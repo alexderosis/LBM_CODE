@@ -31,6 +31,73 @@
 using namespace lbm;
 using namespace campaign;
 
+//------------------------------------------------------------------------------
+// A STRUCT with a template operator(), not a generic lambda.
+//
+// nvcc forbids defining an extended __host__ __device__ lambda inside a generic
+// lambda, and the KOKKOS_LAMBDA that lays down the initial condition sits
+// directly in this body. A class with a template operator() is an ordinary
+// function template, where extended lambdas are allowed, so `dispatch` still
+// deduces the collision operator and nothing else changes.
+//
+// The Threads backend compiles the generic-lambda form perfectly well, which is
+// exactly why it was written that way and why this only surfaced on a device.
+//
+// Note what is NOT captured: the KOKKOS_LAMBDA below closes over d, k and u0c,
+// all locals of operator(). Referring to a member such as D directly would
+// capture `this` and dereference a host pointer on the device.
+//------------------------------------------------------------------------------
+struct TaylorGreen3D {
+  Index D;
+  double Re, tmax;
+  Real u0, nu;
+  std::size_t T;
+  std::string lat, op;
+
+  template <class Coll>
+  void operator()(Coll coll) const {
+    using LL   = typename Coll::Lattice;
+    Domain d(D, D, D, true, true, true);
+    coll.omega = Coll::omega_from_viscosity(nu);
+    FluidSolver<LL, EsotericPull<LL>, Coll> s(d, coll);
+
+    const Real u0c = u0;
+    const Real k = Real(2.0 * M_PI) / Real(D);     // one period across the box
+    s.initialize_field(KOKKOS_LAMBDA(Index n) {
+      Index px, py, pz; d.coords(n, px, py, pz);
+      const Real x = k * Real(px - d.hx), y = k * Real(py - d.hy), z = k * Real(pz - d.hz);
+      FlowState st;
+      st.rho = Real(1);
+      st.ux =  u0c * Kokkos::cos(x) * Kokkos::sin(y) * Kokkos::sin(z);
+      st.uy = -Real(0.5) * u0c * Kokkos::sin(x) * Kokkos::cos(y) * Kokkos::sin(z);
+      st.uz = -Real(0.5) * u0c * Kokkos::sin(x) * Kokkos::sin(y) * Kokkos::cos(z);
+      return st;
+    });
+
+    const Diag d0 = diagnostics(s, d, D, D, D);
+    std::FILE* f = open_out("E_tgv3d", "tgv3d_re" + std::to_string(int(Re)), lat, op);
+    if (f) std::fprintf(f, "# t*  E/E0  Psi/Psi0   D=%d Re=%.0f u0=%.3f tau=%.6f\n",
+                        int(D), Re, double(u0), 3.0 * double(nu) + 0.5);
+    std::printf("  %8s %14s %14s\n", "t*", "E/E0", "Psi/Psi0");
+    const std::size_t probe = T / 20;
+    for (std::size_t t = 0; t <= T; ++t) {
+      if (t % probe == 0) {
+        const Diag dd = diagnostics(s, d, D, D, D);
+        const double ts = tmax * double(t) / double(T);
+        if (!dd.finite) { std::printf("  DIVERGED at t* = %.3f\n", ts);
+                          if (f) std::fprintf(f, "# DIVERGED\n"); break; }
+        std::printf("  %8.3f %14.6f %14.6f\n", ts, dd.energy / d0.energy,
+                    dd.enstrophy / d0.enstrophy);
+        if (f) { std::fprintf(f, "%.6f %.8e %.8e\n", ts, dd.energy / d0.energy,
+                              dd.enstrophy / d0.enstrophy); std::fflush(f); }
+        std::fflush(stdout);
+      }
+      if (t < T) s.step();
+    }
+    if (f) std::fclose(f);
+  }
+};
+
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   {
@@ -58,48 +125,8 @@ int main(int argc, char** argv) {
     std::printf("  t* = t u0 / D up to %.1f   (%zu steps, %d^3 = %d nodes)\n\n",
                 tmax, T, int(D), int(D * D * D));
 
-    const bool ok = dispatch(lat, op, [&](auto coll) {
-      using Coll = decltype(coll);
-      using LL   = typename Coll::Lattice;
-      Domain d(D, D, D, true, true, true);
-      coll.omega = Coll::omega_from_viscosity(nu);
-      FluidSolver<LL, EsotericPull<LL>, Coll> s(d, coll);
-
-      const Real u0c = u0;
-      const Real k = Real(2.0 * M_PI) / Real(D);     // one period across the box
-      s.initialize_field(KOKKOS_LAMBDA(Index n) {
-        Index px, py, pz; d.coords(n, px, py, pz);
-        const Real x = k * Real(px - d.hx), y = k * Real(py - d.hy), z = k * Real(pz - d.hz);
-        FlowState st;
-        st.rho = Real(1);
-        st.ux =  u0c * Kokkos::cos(x) * Kokkos::sin(y) * Kokkos::sin(z);
-        st.uy = -Real(0.5) * u0c * Kokkos::sin(x) * Kokkos::cos(y) * Kokkos::sin(z);
-        st.uz = -Real(0.5) * u0c * Kokkos::sin(x) * Kokkos::sin(y) * Kokkos::cos(z);
-        return st;
-      });
-
-      const Diag d0 = diagnostics(s, d, D, D, D);
-      std::FILE* f = open_out("E_tgv3d", "tgv3d_re" + std::to_string(int(Re)), lat, op);
-      if (f) std::fprintf(f, "# t*  E/E0  Psi/Psi0   D=%d Re=%.0f u0=%.3f tau=%.6f\n",
-                          int(D), Re, double(u0), 3.0 * double(nu) + 0.5);
-      std::printf("  %8s %14s %14s\n", "t*", "E/E0", "Psi/Psi0");
-      const std::size_t probe = T / 20;
-      for (std::size_t t = 0; t <= T; ++t) {
-        if (t % probe == 0) {
-          const Diag dd = diagnostics(s, d, D, D, D);
-          const double ts = tmax * double(t) / double(T);
-          if (!dd.finite) { std::printf("  DIVERGED at t* = %.3f\n", ts);
-                            if (f) std::fprintf(f, "# DIVERGED\n"); break; }
-          std::printf("  %8.3f %14.6f %14.6f\n", ts, dd.energy / d0.energy,
-                      dd.enstrophy / d0.enstrophy);
-          if (f) { std::fprintf(f, "%.6f %.8e %.8e\n", ts, dd.energy / d0.energy,
-                                dd.enstrophy / d0.enstrophy); std::fflush(f); }
-          std::fflush(stdout);
-        }
-        if (t < T) s.step();
-      }
-      if (f) std::fclose(f);
-    });
+    const bool ok = dispatch(lat, op,
+        TaylorGreen3D{D, Re, tmax, u0, nu, T, lat, op});
     if (!ok) std::printf("unknown lattice/operator\n");
   }
   Kokkos::finalize();
