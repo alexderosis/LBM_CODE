@@ -19,3 +19,8 @@ doc/fig/*.bin
 
 # Stray run outputs
 *.vti
+
+# Third-party publisher PDFs. Kept on disk, deliberately not shipped:
+# redistributing them is not ours to do.
+SomeRefs/
+.DS_Store
