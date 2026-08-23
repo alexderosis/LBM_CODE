@@ -210,15 +210,15 @@ static void hermite_probe(Real tau, Index W, Real umax_target) {
     fneq[q] = f - double(SecondOrderEquilibrium<LL>::eq(q, Real(rho), Real(u), Real(0), Real(0)));
   }
   double m0 = 0, m1x = 0;
-  for (int q = 0; q < 9; ++q) { m0 += fneq[q]; m1x += fneq[q] * LL::cx[q]; }
+  for (int q = 0; q < 9; ++q) { m0 += fneq[q]; m1x += fneq[q] * LL::cx(q); }
   const bool ok = std::abs(m0) < 1e-10 && std::abs(m1x + double(G) / 2.0) < 1e-9;
   for (int q = 0; q < 9; ++q) odd[q] = 0.5 * (fneq[q] - fneq[opp(q)]);
 
   double A11=0, A12=0, A22=0, r1=0, r2=0;
   for (int q = 0; q < 9; ++q) {
     const double w  = double(weight<LL, Real>(q));
-    const double p1 = w * LL::cx[q];
-    const double p2 = w * LL::cy[q] * LL::cy[q] * LL::cx[q];
+    const double p1 = w * LL::cx(q);
+    const double p2 = w * LL::cy(q) * LL::cy(q) * LL::cx(q);
     A11 += p1*p1; A12 += p1*p2; A22 += p2*p2; r1 += p1*odd[q]; r2 += p2*odd[q];
   }
   const double det = A11*A22 - A12*A12;

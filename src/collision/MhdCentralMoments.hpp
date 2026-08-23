@@ -83,8 +83,8 @@ struct MhdCentralMoments<D2Q9, HighOrder> {
     Real s = Real(0), mx = Real(0), my = Real(0);
     for (int i = 0; i < 9; ++i) {
       s  += f[i];
-      mx += f[i] * Real(D2Q9::cx[i]);
-      my += f[i] * Real(D2Q9::cy[i]);
+      mx += f[i] * Real(D2Q9::cx(i));
+      my += f[i] * Real(D2Q9::cy(i));
     }
     const Real ir = Real(1) / s;
     return Macro{s, mx * ir, my * ir, Real(0)};
@@ -228,9 +228,9 @@ struct MhdCentralMoments<D3Q27, HighOrder> {
     Real s = Real(0), mx = Real(0), my = Real(0), mz = Real(0);
     for (int i = 0; i < 27; ++i) {
       s  += f[i];
-      mx += f[i] * Real(D3Q27::cx[i]);
-      my += f[i] * Real(D3Q27::cy[i]);
-      mz += f[i] * Real(D3Q27::cz[i]);
+      mx += f[i] * Real(D3Q27::cx(i));
+      my += f[i] * Real(D3Q27::cy(i));
+      mz += f[i] * Real(D3Q27::cz(i));
     }
     const Real ir = Real(1) / s;
     return Macro{s, mx * ir, my * ir, mz * ir};
@@ -245,7 +245,7 @@ struct MhdCentralMoments<D3Q27, HighOrder> {
     constexpr Real cs4v = cs2v * cs2v;
     const Real b2 = b[0] * b[0] + b[1] * b[1] + b[2] * b[2];
     for (int i = 0; i < 27; ++i) {
-      const Real c[3] = {Real(D3Q27::cx[i]), Real(D3Q27::cy[i]), Real(D3Q27::cz[i])};
+      const Real c[3] = {Real(D3Q27::cx(i)), Real(D3Q27::cy(i)), Real(D3Q27::cz(i))};
       // M_ab (c_a c_b - cs2 delta_ab) in closed form: with cs2 M_aa = |b|^2 / 6
       // in three dimensions this is 0.5|b|^2|c|^2 - (c.b)^2 - |b|^2/6.
       const Real c2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];

@@ -55,9 +55,18 @@ struct D2Q5 {
   static constexpr int w_den = 6;
   static constexpr bool supports_navier_stokes = false;
 
-  static constexpr int cx[Q]    = {  0,  1, -1,  0,  0 };
-  static constexpr int cy[Q]    = {  0,  0,  0,  1, -1 };
-  static constexpr int w_num[Q] = {  2,  1,  1,  1,  1 };
+  LBM_FN static constexpr int cx(int i) noexcept {
+    constexpr int v[Q] = {  0,  1, -1,  0,  0 };
+    return v[i];
+  }
+  LBM_FN static constexpr int cy(int i) noexcept {
+    constexpr int v[Q] = {  0,  0,  0,  1, -1 };
+    return v[i];
+  }
+  LBM_FN static constexpr int w_num(int i) noexcept {
+    constexpr int v[Q] = {  2,  1,  1,  1,  1 };
+    return v[i];
+  }
 };
 
 //==============================================================================
@@ -71,9 +80,18 @@ struct D2Q9 {
   static constexpr bool supports_navier_stokes = true;
 
   //                             0   1   2   3   4   5   6   7   8
-  static constexpr int cx[Q]    = { 0,  1, -1,  0,  0,  1, -1,  1, -1 };
-  static constexpr int cy[Q]    = { 0,  0,  0,  1, -1,  1, -1, -1,  1 };
-  static constexpr int w_num[Q] = {16,  4,  4,  4,  4,  1,  1,  1,  1 };
+  LBM_FN static constexpr int cx(int i) noexcept {
+    constexpr int v[Q] = { 0,  1, -1,  0,  0,  1, -1,  1, -1 };
+    return v[i];
+  }
+  LBM_FN static constexpr int cy(int i) noexcept {
+    constexpr int v[Q] = { 0,  0,  0,  1, -1,  1, -1, -1,  1 };
+    return v[i];
+  }
+  LBM_FN static constexpr int w_num(int i) noexcept {
+    constexpr int v[Q] = {16,  4,  4,  4,  4,  1,  1,  1,  1 };
+    return v[i];
+  }
 };
 
 //==============================================================================
@@ -86,10 +104,22 @@ struct D3Q7 {
   static constexpr int w_den = 8;
   static constexpr bool supports_navier_stokes = false;
 
-  static constexpr int cx[Q]    = { 0,  1, -1,  0,  0,  0,  0 };
-  static constexpr int cy[Q]    = { 0,  0,  0,  1, -1,  0,  0 };
-  static constexpr int cz[Q]    = { 0,  0,  0,  0,  0,  1, -1 };
-  static constexpr int w_num[Q] = { 2,  1,  1,  1,  1,  1,  1 };
+  LBM_FN static constexpr int cx(int i) noexcept {
+    constexpr int v[Q] = { 0,  1, -1,  0,  0,  0,  0 };
+    return v[i];
+  }
+  LBM_FN static constexpr int cy(int i) noexcept {
+    constexpr int v[Q] = { 0,  0,  0,  1, -1,  0,  0 };
+    return v[i];
+  }
+  LBM_FN static constexpr int cz(int i) noexcept {
+    constexpr int v[Q] = { 0,  0,  0,  0,  0,  1, -1 };
+    return v[i];
+  }
+  LBM_FN static constexpr int w_num(int i) noexcept {
+    constexpr int v[Q] = { 2,  1,  1,  1,  1,  1,  1 };
+    return v[i];
+  }
 };
 
 //==============================================================================
@@ -103,10 +133,22 @@ struct D3Q19 {
   static constexpr bool supports_navier_stokes = true;
 
   //                          0  1   2  3   4  5   6  7   8  9  10  11 12  13 14  15 16  17 18
-  static constexpr int cx[Q]    = { 0, 1, -1, 0,  0, 0,  0, 1, -1, 1, -1, 1, -1, 1, -1, 0,  0, 0,  0 };
-  static constexpr int cy[Q]    = { 0, 0,  0, 1, -1, 0,  0, 1, -1,-1,  1, 0,  0, 0,  0, 1, -1, 1, -1 };
-  static constexpr int cz[Q]    = { 0, 0,  0, 0,  0, 1, -1, 0,  0, 0,  0, 1, -1,-1,  1, 1, -1,-1,  1 };
-  static constexpr int w_num[Q] = {12, 2,  2, 2,  2, 2,  2, 1,  1, 1,  1, 1,  1, 1,  1, 1,  1, 1,  1 };
+  LBM_FN static constexpr int cx(int i) noexcept {
+    constexpr int v[Q] = { 0, 1, -1, 0,  0, 0,  0, 1, -1, 1, -1, 1, -1, 1, -1, 0,  0, 0,  0 };
+    return v[i];
+  }
+  LBM_FN static constexpr int cy(int i) noexcept {
+    constexpr int v[Q] = { 0, 0,  0, 1, -1, 0,  0, 1, -1,-1,  1, 0,  0, 0,  0, 1, -1, 1, -1 };
+    return v[i];
+  }
+  LBM_FN static constexpr int cz(int i) noexcept {
+    constexpr int v[Q] = { 0, 0,  0, 0,  0, 1, -1, 0,  0, 0,  0, 1, -1,-1,  1, 1, -1,-1,  1 };
+    return v[i];
+  }
+  LBM_FN static constexpr int w_num(int i) noexcept {
+    constexpr int v[Q] = {12, 2,  2, 2,  2, 2,  2, 1,  1, 1,  1, 1,  1, 1,  1, 1,  1, 1,  1 };
+    return v[i];
+  }
 };
 
 //==============================================================================
@@ -119,18 +161,30 @@ struct D3Q27 {
   static constexpr int w_den = 216;
   static constexpr bool supports_navier_stokes = true;
 
-  static constexpr int cx[Q] = { 0, 1, -1, 0,  0, 0,  0,
-                                 1,-1,  1,-1,  1,-1,  1,-1,  0, 0,  0, 0,
-                                 1,-1,  1,-1,  1,-1, -1, 1 };
-  static constexpr int cy[Q] = { 0, 0,  0, 1, -1, 0,  0,
-                                 1,-1, -1, 1,  0, 0,  0, 0,  1,-1,  1,-1,
-                                 1,-1,  1,-1, -1, 1,  1,-1 };
-  static constexpr int cz[Q] = { 0, 0,  0, 0,  0, 1, -1,
-                                 0, 0,  0, 0,  1,-1, -1, 1,  1,-1, -1, 1,
-                                 1,-1, -1, 1,  1,-1,  1,-1 };
-  static constexpr int w_num[Q] = {64, 16,16,16,16,16,16,
-                                    4,  4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-                                    1,  1, 1, 1, 1, 1, 1, 1 };
+  LBM_FN static constexpr int cx(int i) noexcept {
+    constexpr int v[Q] = { 0, 1, -1, 0,  0, 0,  0,
+                        1,-1,  1,-1,  1,-1,  1,-1,  0, 0,  0, 0,
+                        1,-1,  1,-1,  1,-1, -1, 1 };
+    return v[i];
+  }
+  LBM_FN static constexpr int cy(int i) noexcept {
+    constexpr int v[Q] = { 0, 0,  0, 1, -1, 0,  0,
+                        1,-1, -1, 1,  0, 0,  0, 0,  1,-1,  1,-1,
+                        1,-1,  1,-1, -1, 1,  1,-1 };
+    return v[i];
+  }
+  LBM_FN static constexpr int cz(int i) noexcept {
+    constexpr int v[Q] = { 0, 0,  0, 0,  0, 1, -1,
+                        0, 0,  0, 0,  1,-1, -1, 1,  1,-1, -1, 1,
+                        1,-1, -1, 1,  1,-1,  1,-1 };
+    return v[i];
+  }
+  LBM_FN static constexpr int w_num(int i) noexcept {
+    constexpr int v[Q] = {64, 16,16,16,16,16,16,
+                           4,  4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+                           1,  1, 1, 1, 1, 1, 1, 1 };
+    return v[i];
+  }
 };
 
 //------------------------------------------------------------------------------
@@ -140,7 +194,7 @@ struct D3Q27 {
 //------------------------------------------------------------------------------
 template <class L, class T>
 LBM_FN constexpr T weight(int i) noexcept {
-  return static_cast<T>(L::w_num[i]) / static_cast<T>(L::w_den);
+  return static_cast<T>(L::w_num(i)) / static_cast<T>(L::w_den);
 }
 template <class L, class T>
 LBM_FN constexpr T cs2() noexcept {
@@ -153,9 +207,9 @@ LBM_FN constexpr T inv_cs2() noexcept {
 // component a of velocity i; returns 0 for a == 2 on a 2D lattice
 template <class L>
 LBM_FN constexpr int cvel(int i, int a) noexcept {
-  if (a == 0) return L::cx[i];
-  if (a == 1) return L::cy[i];
-  if constexpr (L::D == 3) return L::cz[i];
+  if (a == 0) return L::cx(i);
+  if (a == 1) return L::cy(i);
+  if constexpr (L::D == 3) return L::cz(i);
   else return 0;
 }
 
@@ -165,9 +219,9 @@ LBM_FN constexpr int cvel(int i, int a) noexcept {
 //==============================================================================
 namespace detail {
 
-template <class L> constexpr int cx_(int i) { return L::cx[i]; }
-template <class L> constexpr int cy_(int i) { return L::cy[i]; }
-template <class L> constexpr int cz_(int i) { if constexpr (L::D == 3) return L::cz[i]; else return 0; }
+template <class L> constexpr int cx_(int i) { return L::cx(i); }
+template <class L> constexpr int cy_(int i) { return L::cy(i); }
+template <class L> constexpr int cz_(int i) { if constexpr (L::D == 3) return L::cz(i); else return 0; }
 template <class L> constexpr int c_(int i, int a) {
   return a == 0 ? cx_<L>(i) : (a == 1 ? cy_<L>(i) : cz_<L>(i));
 }
@@ -197,7 +251,7 @@ template <class L> constexpr bool check_unique() {
 // sum_i w_i == 1
 template <class L> constexpr bool check_w_sum() {
   int s = 0;
-  for (int i = 0; i < L::Q; ++i) s += L::w_num[i];
+  for (int i = 0; i < L::Q; ++i) s += L::w_num(i);
   return s == L::w_den;
 }
 
@@ -206,7 +260,7 @@ template <class L> constexpr bool check_second_moment() {
   for (int a = 0; a < L::D; ++a)
     for (int b = 0; b < L::D; ++b) {
       int s = 0;
-      for (int i = 0; i < L::Q; ++i) s += L::w_num[i] * c_<L>(i, a) * c_<L>(i, b);
+      for (int i = 0; i < L::Q; ++i) s += L::w_num(i) * c_<L>(i, a) * c_<L>(i, b);
       const int lhs = s * L::cs2_den;
       const int rhs = (a == b) ? L::w_den * L::cs2_num : 0;
       if (lhs != rhs) return false;
@@ -220,7 +274,7 @@ template <class L> constexpr bool check_third_moment() {
     for (int b = 0; b < L::D; ++b)
       for (int d = 0; d < L::D; ++d) {
         int s = 0;
-        for (int i = 0; i < L::Q; ++i) s += L::w_num[i] * c_<L>(i, a) * c_<L>(i, b) * c_<L>(i, d);
+        for (int i = 0; i < L::Q; ++i) s += L::w_num(i) * c_<L>(i, a) * c_<L>(i, b) * c_<L>(i, d);
         if (s != 0) return false;
       }
   return true;
@@ -235,7 +289,7 @@ template <class L> constexpr bool check_fourth_moment() {
         for (int e = 0; e < L::D; ++e) {
           int s = 0;
           for (int i = 0; i < L::Q; ++i)
-            s += L::w_num[i] * c_<L>(i, a) * c_<L>(i, b) * c_<L>(i, d) * c_<L>(i, e);
+            s += L::w_num(i) * c_<L>(i, a) * c_<L>(i, b) * c_<L>(i, d) * c_<L>(i, e);
           const int iso = (a == b) * (d == e) + (a == d) * (b == e) + (a == e) * (b == d);
           if (s * L::cs2_den * L::cs2_den != L::w_den * L::cs2_num * L::cs2_num * iso) return false;
         }

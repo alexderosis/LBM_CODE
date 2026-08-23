@@ -74,8 +74,8 @@ struct ProductFormPhi<D2Q9> {
   KOKKOS_INLINE_FUNCTION
   static Real phi(int i, Real ux, Real uy, Real /*uz*/) {
     constexpr Real cs2v = cs2<D2Q9, Real>();
-    const Real cx = Real(D2Q9::cx[i]);
-    const Real cy = Real(D2Q9::cy[i]);
+    const Real cx = Real(D2Q9::cx(i));
+    const Real cy = Real(D2Q9::cy(i));
     const Real ax = cx * cx - cs2v;
     const Real ay = cy * cy - cs2v;
     const Real o1 = (cx * ux + cy * uy) / cs2v;
@@ -118,7 +118,7 @@ struct ProductFormPhi<D3Q27> {
   }
   KOKKOS_INLINE_FUNCTION
   static Real phi(int i, Real ux, Real uy, Real uz) {
-    return chi(D3Q27::cx[i], ux) * chi(D3Q27::cy[i], uy) * chi(D3Q27::cz[i], uz) -
+    return chi(D3Q27::cx(i), ux) * chi(D3Q27::cy(i), uy) * chi(D3Q27::cz(i), uz) -
            Real(1);
   }
 };
@@ -143,7 +143,7 @@ struct FourthOrderPhi<D3Q19> {
   static constexpr const char* name = "FourthOrder";
   KOKKOS_INLINE_FUNCTION
   static Real phi(int i, Real ux, Real uy, Real uz) {
-    const Real c[3] = {Real(D3Q19::cx[i]), Real(D3Q19::cy[i]), Real(D3Q19::cz[i])};
+    const Real c[3] = {Real(D3Q19::cx(i)), Real(D3Q19::cy(i)), Real(D3Q19::cz(i))};
     const Real u[3] = {ux, uy, uz};
     const Real s[3] = {ux * ux, uy * uy, uz * uz};
     int a = -1, b = -1, n = 0;

@@ -211,7 +211,7 @@ void mhd_cm_equilibrium(Real rho, Real ux, Real uy, Real bx, Real by) {
   constexpr Real cs4v = cs2v * cs2v;
   Real feq[9];
   for (int i = 0; i < 9; ++i) {
-    const Real cx = Real(D2Q9::cx[i]), cy = Real(D2Q9::cy[i]);
+    const Real cx = Real(D2Q9::cx(i)), cy = Real(D2Q9::cy(i));
     const Real cu = cx * ux + cy * uy, uu = ux * ux + uy * uy;
     const Real hydro = weight<D2Q9, Real>(i) * rho *
         (Real(1) + cu / cs2v + cu * cu / (Real(2) * cs4v) - uu / (Real(2) * cs2v));
@@ -225,8 +225,8 @@ void mhd_cm_equilibrium(Real rho, Real ux, Real uy, Real bx, Real by) {
     Real s = 0;
     for (int i = 0; i < 9; ++i) {
       Real t = feq[i];
-      for (int e = 0; e < p; ++e) t *= (Real(D2Q9::cx[i]) - ux);
-      for (int e = 0; e < q; ++e) t *= (Real(D2Q9::cy[i]) - uy);
+      for (int e = 0; e < p; ++e) t *= (Real(D2Q9::cx(i)) - ux);
+      for (int e = 0; e < q; ++e) t *= (Real(D2Q9::cy(i)) - uy);
       s += t;
     }
     return s;
@@ -260,13 +260,13 @@ void mhd_cm_conservation(Real omega) {
   Real f[9]; fill<D2Q9, RawPopulations>(f);
   Real m0 = 0, p0[2] = {0, 0};
   for (int i = 0; i < 9; ++i) {
-    m0 += f[i]; p0[0] += f[i] * Real(D2Q9::cx[i]); p0[1] += f[i] * Real(D2Q9::cy[i]);
+    m0 += f[i]; p0[0] += f[i] * Real(D2Q9::cx(i)); p0[1] += f[i] * Real(D2Q9::cy(i));
   }
   const Macro m = c.macroscopic(f, 0);
   c.collide(f, m, 0);
   Real m1 = 0, p1[2] = {0, 0};
   for (int i = 0; i < 9; ++i) {
-    m1 += f[i]; p1[0] += f[i] * Real(D2Q9::cx[i]); p1[1] += f[i] * Real(D2Q9::cy[i]);
+    m1 += f[i]; p1[0] += f[i] * Real(D2Q9::cx(i)); p1[1] += f[i] * Real(D2Q9::cy(i));
   }
   const std::string n = "MhdCM omega=" + std::to_string(double(omega));
   check::near(m1, m0, TOL(), n + ": conserves mass");
@@ -303,9 +303,9 @@ void mhd_cm3d_moments(Real rho, const Real u[3], const Real b[3]) {
     Real s = 0;
     for (int i = 0; i < 27; ++i) {
       Real t = fe[i];
-      for (int e = 0; e < p; ++e) t *= (Real(D3Q27::cx[i]) - u[0]);
-      for (int e = 0; e < q; ++e) t *= (Real(D3Q27::cy[i]) - u[1]);
-      for (int e = 0; e < r; ++e) t *= (Real(D3Q27::cz[i]) - u[2]);
+      for (int e = 0; e < p; ++e) t *= (Real(D3Q27::cx(i)) - u[0]);
+      for (int e = 0; e < q; ++e) t *= (Real(D3Q27::cy(i)) - u[1]);
+      for (int e = 0; e < r; ++e) t *= (Real(D3Q27::cz(i)) - u[2]);
       s += t;
     }
     return s;
@@ -417,15 +417,15 @@ void mhd_cm3d_conservation(Real omega) {
   Real f[27]; fill<D3Q27, RawPopulations>(f);
   Real m0 = 0, p0[3] = {0, 0, 0};
   for (int i = 0; i < 27; ++i) {
-    m0 += f[i]; p0[0] += f[i] * Real(D3Q27::cx[i]);
-    p0[1] += f[i] * Real(D3Q27::cy[i]); p0[2] += f[i] * Real(D3Q27::cz[i]);
+    m0 += f[i]; p0[0] += f[i] * Real(D3Q27::cx(i));
+    p0[1] += f[i] * Real(D3Q27::cy(i)); p0[2] += f[i] * Real(D3Q27::cz(i));
   }
   const Macro m = c.macroscopic(f, 0);
   c.collide(f, m, 0);
   Real m1 = 0, p1[3] = {0, 0, 0};
   for (int i = 0; i < 27; ++i) {
-    m1 += f[i]; p1[0] += f[i] * Real(D3Q27::cx[i]);
-    p1[1] += f[i] * Real(D3Q27::cy[i]); p1[2] += f[i] * Real(D3Q27::cz[i]);
+    m1 += f[i]; p1[0] += f[i] * Real(D3Q27::cx(i));
+    p1[1] += f[i] * Real(D3Q27::cy(i)); p1[2] += f[i] * Real(D3Q27::cz(i));
   }
   const std::string n = "MhdCM/D3Q27 omega=" + std::to_string(double(omega));
   check::near(m1, m0, TOL(), n + ": conserves mass");
