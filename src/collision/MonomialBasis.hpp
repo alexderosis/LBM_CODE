@@ -46,17 +46,30 @@ struct MonomialBasis<D3Q19> {
   static constexpr int  D  = 3;
   static constexpr int  NM = 19;
 
-  static constexpr int P[NM] = {0,1,0,0,2,0,0,1,1,0,2,1,2,1,0,0,2,2,0};
-  static constexpr int Qo[NM] = {0,0,1,0,0,2,0,1,0,1,1,2,0,0,2,1,2,0,2};
-  static constexpr int R[NM] = {0,0,0,1,0,0,2,0,1,1,0,0,1,2,1,2,0,2,2};
-
-  KOKKOS_INLINE_FUNCTION static int p_of(int n) { return P[n]; }
-  KOKKOS_INLINE_FUNCTION static int q_of(int n) { return Qo[n]; }
-  KOKKOS_INLINE_FUNCTION static int r_of(int n) { return R[n]; }
-  KOKKOS_INLINE_FUNCTION static int order(int n) { return P[n] + Qo[n] + R[n]; }
+  // The exponents live INSIDE the accessors rather than as static constexpr
+  // array members. A static constexpr array indexed with a runtime index in
+  // device code has to exist in device memory and nvcc will not put it there
+  // ("identifier is undefined in device code"); a constexpr array declared in a
+  // function body is materialised normally. Same reason the lattice velocity
+  // sets are accessors -- see Lattices.hpp.
+  KOKKOS_INLINE_FUNCTION static constexpr int p_of(int n) noexcept {
+    constexpr int v[NM] = {0,1,0,0,2,0,0,1,1,0,2,1,2,1,0,0,2,2,0};
+    return v[n];
+  }
+  KOKKOS_INLINE_FUNCTION static constexpr int q_of(int n) noexcept {
+    constexpr int v[NM] = {0,0,1,0,0,2,0,1,0,1,1,2,0,0,2,1,2,0,2};
+    return v[n];
+  }
+  KOKKOS_INLINE_FUNCTION static constexpr int r_of(int n) noexcept {
+    constexpr int v[NM] = {0,0,0,1,0,0,2,0,1,1,0,0,1,2,1,2,0,2,2};
+    return v[n];
+  }
+  KOKKOS_INLINE_FUNCTION static constexpr int order(int n) noexcept {
+    return p_of(n) + q_of(n) + r_of(n);
+  }
   static constexpr int index_of(int p, int q, int r) {
     for (int n = 0; n < NM; ++n)
-      if (P[n] == p && Qo[n] == q && R[n] == r) return n;
+      if (p_of(n) == p && q_of(n) == q && r_of(n) == r) return n;
     return -1;
   }
 
