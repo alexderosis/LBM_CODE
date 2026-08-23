@@ -92,6 +92,7 @@ enum ScalarCell : std::uint8_t {
   ScalarDirichlet = 2,   // fixed value -- anti-bounce-back toward T_wall
   ScalarExcluded  = 3,   // not part of the simulation
   ScalarMoment    = 4,   // fixed value AT the node, Dellar's moment condition
+  ScalarOutflow   = 5,   // open boundary -- equilibrium at the donor's value
 };
 
 }  // namespace lbm

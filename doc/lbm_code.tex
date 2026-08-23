@@ -1496,6 +1496,53 @@ moment (scalar)   & $T$   & $\sum_i h_i = T_w - T_{\rm ref}$ & on the node \\
 \end{tabular}
 \end{center}
 
+\subsection{Open boundaries for the scalar}
+\label{sec:scalaroutflow}
+
+The two scalar wall conditions above are both closed: adiabatic reflects
+everything, Dirichlet pins a value. Neither lets a plume \emph{leave}. A
+transported scalar on an open domain needs a third condition, zero-gradient on
+$C$, so that what the flow carries to the boundary passes through it instead of
+accumulating behind it.
+
+The condition implemented is equilibrium extrapolation. Each cell marked
+\texttt{ScalarOutflow} is assigned a \emph{donor}, an interior neighbour, and
+every outgoing population is set to
+\begin{equation}
+  h_i^{\rm out} = h_i^{\rm eq}\!\left(C_{\rm donor},\, \uu_{\rm node}\right),
+  \label{eq:scalarout}
+\end{equation}
+so the node carries its neighbour's concentration at its own velocity. The node
+is fully prescribed: whatever streamed into it is discarded, and its inward
+directions carry the interior's value back into the domain. Dropping the
+non-equilibrium part slightly damps the \emph{diffusive} flux at the exit,
+which is negligible when the exit is advection-dominated --- and is measured
+rather than assumed in \S\ref{sec:plume}.
+
+\paragraph{Why this needs a second kernel.} The obvious implementation reads the
+donor's populations inside the main kernel, as the arbitrary-face outflow of
+\S\ref{sec:outflow} does for the fluid. Under Esoteric Pull that is a genuine
+read/write race: the two slots a node reads are exactly the two it writes, so a
+donor being updated concurrently is rewriting the very slots the outflow node is
+reading, and which state is obtained depends on thread scheduling. Outflow cells
+are therefore skipped by the main kernel and handled by a second one after a
+fence, and that pass reads the \emph{macroscopic field} rather than
+populations: the main kernel has just written $C$ at every bulk cell, donors are
+required to be bulk cells, and so nothing the second pass reads is written by
+the second pass. Every storage slot still has exactly one writer, because the
+main pass skips these cells entirely and the outflow pass writes only the slots
+they own. The result is byte-identical on 1, 2 and 4 threads.
+
+\paragraph{Donor selection.} The outward directions of a cell are the axes whose
+neighbour lies outside the field; the donor is the neighbour one step inward
+along all of them at once. A face cell therefore takes its axis neighbour, an
+edge cell the diagonal and a corner cell the body diagonal. Without that, a box
+edge has no purely axial interior neighbour and every edge and corner of the
+domain would be inert. A cell with no bulk neighbour at all is left pointing at
+itself, which makes the condition a no-op there --- it falls back to
+bounce-back --- and is counted and reported at setup rather than silently
+reading a neighbour's garbage.
+
 
 %==============================================================================
 \section{Coupled modules}
@@ -1852,6 +1899,90 @@ D3Q7 advection--diffusion & 1.99 & 2.00 & $7.2\times10^{-4}$ & $2.3\times10^{-4}
 \noindent The phase is measured as well as the amplitude: an error in the
 coupling term puts the wave in the wrong \emph{place}, which an amplitude check
 alone would not detect.
+
+\subsection{Open boundaries: the Gaussian plume}
+\label{sec:plume}
+
+The open boundary of \S\ref{sec:scalaroutflow} is validated against the
+classical plume solution. A continuous point source of strength $Q$ at the
+origin in a uniform wind $U$ along $x$, with isotropic diffusivity $D$,
+satisfies $U\,\partial_x C = D(\partial_{yy}C + \partial_{zz}C)$ once
+streamwise diffusion is neglected. That is the two-dimensional diffusion
+equation with $x/U$ in place of time, so
+\begin{equation}
+  C(x,y,z) = \frac{Q}{4\pi D x}\,
+             \exp\!\left(-\frac{U(y^2+z^2)}{4Dx}\right),
+  \qquad \sigma(x) = \sqrt{\frac{2Dx}{U}} ,
+  \label{eq:plume}
+\end{equation}
+and integrating across the plume gives $U\!\iint C\,{\rm d}y\,{\rm d}z = Q$ at
+\emph{every} station --- which is the property the boundary condition has to
+preserve.
+
+Two tests are run, and they are deliberately of different kinds.
+
+\paragraph{Uniform-state invariance.} A constant field under a constant wind is
+an exact fixed point of equilibrium, collision, streaming and
+\eqref{eq:scalarout} alike, so this needs no analytic solution and no judgement
+about what ``close'' means. On $24^3$ with every face open, after $6\times10^4$
+steps:
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+ & $\max|C-\bar{C}|$ & $\max|\Delta C|$ over $2000$ steps & $|\bar{C}-1|$ \\
+\midrule
+$u=0$    & $0$ & $0$ & $0$ \\
+$u=0.05$ & $3.1\times10^{-13}$ & $1.4\times10^{-15}$ & $6.8\times10^{-3}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The first two columns are the criterion and are round-off. The third
+is a diagnostic, not a failure: with every face zero-gradient the problem is
+pure Neumann, so no constant is preferred and the level is not determined. The
+offset is D3Q7's first-order equilibrium, the $O(u^2)$ defect of
+\S\ref{sec:eqscalar}, and it scales accordingly --- $5.0\times10^{-4}$,
+$1.9\times10^{-3}$, $6.8\times10^{-3}$, $2.2\times10^{-2}$ at $u=0.0125$,
+$0.025$, $0.05$, $0.1$, i.e.\ as $u^{1.9}$. It is \emph{not} the initialiser
+laying down equilibrium at zero velocity, which was the obvious first
+suspicion: attaching the wind only after the field is laid down and settled
+reproduces the offset to six significant figures. Any problem with a Dirichlet
+cell in it, the plume below included, does not see this at all.
+
+\paragraph{The plume.} On $128\times64\times64$ with $U=0.05$, $D=0.01$
+($\omega=1.852$, $\mathrm{Pe}=640$), a source at $x=8$ and $Q=1$ per step,
+$x=0$ held at $C=0$ and the five remaining faces open:
+
+\begin{center}
+\begin{tabular}{rcccccc}
+\toprule
+$x$ & $\sigma$ & $\sqrt{2Dx/U}$ & err & $C_{\max}$ & $Q/4\pi Dx$ & flux$/Q$ \\
+\midrule
+ 20 & 2.370 & 2.191 & $+8.2\%$ & $5.386\times10^{-1}$ & $6.632\times10^{-1}$ & $0.99962$ \\
+ 44 & 3.901 & 3.795 & $+2.8\%$ & $2.048\times10^{-1}$ & $2.211\times10^{-1}$ & $0.99962$ \\
+ 68 & 4.982 & 4.899 & $+1.7\%$ & $1.266\times10^{-1}$ & $1.326\times10^{-1}$ & $0.99962$ \\
+ 92 & 5.867 & 5.797 & $+1.2\%$ & $9.158\times10^{-2}$ & $9.474\times10^{-2}$ & $0.99962$ \\
+122 & 6.813 & 6.753 & $+0.9\%$ & $6.807\times10^{-2}$ & $6.981\times10^{-2}$ & $0.99963$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent \textbf{The flux column is the boundary-condition test}, and it is
+flat to five decimal places from $x=20$ to the last interior cell: worst
+deviation $0.038\%$. A reflecting exit would pile concentration up and make it
+climb; an over-draining one would make it fall. Neither happens, and nothing
+propagates back upstream. This is the same measurement as the aorta's
+inlet/outlet balance of \S\ref{sec:aortabc}, for the same reason.
+
+The width column tests something the uniform-state test cannot see at all,
+namely $D = c_s^2(1/\omega - 1/2)$ with $c_s^2 = 1/4$: a wrong speed of sound
+appears immediately as a slope error. The agreement improves monotonically
+downstream, from $+8.2\%$ at $x=20$ to $+0.9\%$ at $x=122$, which is the
+signature of the finite source: \eqref{eq:plume} is a \emph{point} source and
+the code releases from a $3^3$ box, so the two can only agree once the plume is
+much wider than the box. The residual near $1\%$ is consistent with the
+$O(1/\mathrm{Pe}) \approx 0.2\%$ error of neglecting streamwise diffusion in
+\eqref{eq:plume} together with D3Q7's $O(u^2)$ equilibrium defect.
 
 \subsection{Natural convection}
 
