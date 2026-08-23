@@ -8,7 +8,7 @@
 # Mixing the two dilutes what "validation" means, so they do not share a
 # directory and no demonstrator is registered with add_test.
 
-foreach(d aorta)
+foreach(d aorta urban)
   add_executable(${d} ${d}.cpp)
   target_link_libraries(${d} PRIVATE lbm)
   # FieldDump.hpp is a diagnostic helper shared with the validation cases and

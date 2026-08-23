@@ -3048,6 +3048,7 @@ symmetry and no closed form --- \code{set\_geometry} already takes an arbitrary
 predicate, so real geometry needed a reader, not a new solver.
 
 \subsection{Geometry and its verification}
+\label{sec:aortageom}
 
 \code{src/io/VoxelGeometry.hpp} reads the flat binary produced by voxelising a
 SimVascular surface mesh (case \code{0074\_H\_AO\_H}): $109\times184\times361 =
@@ -3271,6 +3272,145 @@ times, where every speed statistic repeats to eight significant figures from bea
 to beat.}
 \label{fig:aortapulse}
 \end{figure}
+
+%==============================================================================
+\section{Demonstrator: urban pollutant dispersion}
+\label{sec:urban}
+
+The second demonstrator, and the second geometry source. A passive scalar is
+released into a city and transported by an atmospheric wind over building
+geometry read from a height field (\S\ref{sec:heightfield}). Like the aorta,
+this is a demonstrator and not a validation case: there is no analytic solution
+for a plume in a real city and no measurement to compare against, so nothing
+here can fail except by crashing. What \emph{can} be checked is reported as a
+number, and one of those numbers turned out to matter.
+
+\subsection{Geometry from a height field}
+\label{sec:heightfield}
+
+Urban geometry does not arrive as a voxelised surface mesh. It arrives as
+building footprints with heights, so the reader for it is a different one from
+the aorta's (\S\ref{sec:aortageom}): a two-dimensional map of building height
+in metres, plus a small JSON of grid metadata, with a cell solid when its centre
+lies below the local height. That keeps $O(n_x n_y)$ on disk instead of
+$O(n_x n_y n_z)$ --- for Manchester, $640$~kB rather than the $9.6$~million
+cells it expands to.
+
+Two decisions in that reader are about failure modes rather than features, and
+both are there because \emph{none} of the ways it can go wrong produce an
+error. A transposed index order rotates the city; a mis-parsed cell size
+rescales it; an off-by-one in the solid rule shaves a layer off every roof. All
+three run to completion and produce a plausible plume. So a missing key in the
+metadata is an error rather than a default --- falling back to a built-in grid
+size turns a typo into a silently wrong domain --- and a vertical spacing that
+disagrees with the horizontal one is rejected rather than silently stretching
+the city. The regression test compares against independently known values
+throughout, using a deliberately asymmetric height pattern so that a transpose
+changes what is read back.
+
+On the real data the reader is checked against an independent implementation:
+Manchester city centre, $400\times400\times60$ at $5$~m, $171\,375$ solid cells
+of $9.6$~million ($1.79\%$), tallest column $200.5$~m --- matching cell for
+cell.
+
+\subsection{The model, and its principal limitation}
+
+The wind is prescribed: a neutral-stability logarithmic surface layer
+$u(z) = (u_*/\kappa)\ln((z+z_0)/z_0)$, horizontal, along a fixed compass
+bearing, simply zeroed inside buildings. It has no street-canyon recirculation,
+no building wake and no channelling along avenues --- which are precisely the
+phenomena an urban dispersion study is about. The scalar side is the validated
+one: D3Q7 transport, adiabatic buildings and ground, and the open boundaries of
+\S\ref{sec:scalaroutflow}.
+
+The time step follows from capping the fastest cell at a chosen lattice
+velocity, and the relaxation rate then follows from the physical diffusivity.
+Deriving $\Delta t$ from the wind and $\omega$ from $\Delta t$, rather than
+choosing $\tau$ and letting $\Delta t$ fall out, is what keeps the advective
+Courant number bounded --- the constraint that actually binds in an
+advection-dominated problem.
+
+\paragraph{How not to measure the limitation.} A log profile zeroed inside
+buildings is not divergence-free, and it is tempting to look for the damage in a
+mass budget. That budget cannot see it. Bounce-back is conservative and
+$\sum_i w_i \ci = 0$, so the advective term contributes nothing to
+$\sum_i h_i$: the budget closes to round-off however wrong the wind is. The
+error appears in the concentration instead, because
+$\nabla\!\cdot\!(\uu C) = \uu\!\cdot\!\nabla C + C\,\nabla\!\cdot\!\uu$
+and the second term is spurious --- it concentrates the scalar where
+$\nabla\!\cdot\!\uu < 0$ and dilutes it where the divergence is positive. So
+$\nabla\!\cdot\!\uu$ is the diagnostic, and it is reported separately over
+the open cells and over the cells adjacent to a wall, where the zeroing bites
+hardest. On Manchester city centre, $400\times400\times60$ at $5$~m:
+\[
+  \mathrm{RMS}(\nabla\!\cdot\!\uu) = 9.4\times10^{-4}
+  \ \text{over}\ 9.06\times10^{6}\ \text{open cells},
+  \qquad
+  8.4\times10^{-3}\ \text{over}\ 1.14\times10^{5}\ \text{wall-adjacent cells},
+\]
+a factor of nine worse next to a building. Those two numbers are the
+quantitative case for replacing this wind with a solved one, and they are the
+reason the original project wrote a Navier--Stokes solver as its second stage.
+
+\subsection{Agreement with the original implementation, and one disagreement}
+\label{sec:urbancompare}
+
+The same case run through the original hand-written solver and through this one
+agrees exactly where it should. On a synthetic $60\times30\times20$ domain both
+give $\Delta t = 0.0129$~s, $\tau = 0.5646$, and identical divergence
+statistics --- RMS $1.063\times10^{-3}$ over open cells, $9.213\times10^{-3}$
+over wall-adjacent cells, maximum $1.867\times10^{-2}$. Along the plume
+centreline the two concentration fields agree to within $0.8\%$ through the
+interior. The wind, the scaling, the geometry and the transport are the same
+problem.
+
+They part company at the outflow, and it is worth recording which one is wrong.
+Steady-state mass here is $11.4\%$ higher than the original's, and the excess
+lies entirely near the open faces: $12.5\%$ of this field is within three cells
+of one, against $5.9\%$ of the original's. The advective flux through successive
+planes settles it:
+
+\begin{center}
+\begin{tabular}{rcc}
+\toprule
+plane $x$ & original & here \\
+\midrule
+30 & $1.000$ & $1.000$ \\
+45 & $0.908$ & $1.052$ \\
+55 & $0.840$ & $1.071$ \\
+58 & $0.823$ & $1.076$ \\
+59 & $0.478$ & $1.076$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent A steady state cannot destroy half its flux at a boundary, and the
+original loses from $0.823$ to $0.478$ across a \emph{single} cell. Its exit is
+an artificial sink: outgoing populations are discarded and no incoming ones are
+supplied, which starves the last cell and pulls material out diffusively for
+some distance upstream. The gradual decline from $x=30$ onward is that reach.
+
+The $7.6\%$ rise on this side is not error either, or not all of it. The wind is
+sheared, so scalar mixing upward into faster-moving air genuinely increases
+$u\,C$ through successive planes while the total flux, advective plus diffusive,
+is what is conserved. The condition itself was measured in \S\ref{sec:plume}
+against a case with no shear and an analytic answer, where it holds the flux to
+$0.038\%$ to the last interior cell.
+
+\subsection{The top boundary is a modelling choice}
+
+A horizontal wind has $u_z = 0$ at the top face, so a zero-gradient condition
+there passes no advective flux --- there is none --- and no diffusive flux,
+because that is what zero-gradient means. The top is therefore a \emph{lid}:
+material that mixes to it stays in the domain. That is right when the top is far
+above the plume and wrong when it is not. Holding the top at $C=0$ instead says
+the atmosphere above is clean and lets the scalar diffuse into it, which is the
+more physical statement for a domain whose top is an arbitrary cut through the
+boundary layer, at the cost of forcing $C=0$ there. Both are offered; the lid is
+the default because it is the validated condition. On the synthetic case the
+choice is worth $0.7\%$ of retained mass, which is small only because the plume
+does not reach the top --- it is not a general bound.
+
 
 %==============================================================================
 \section{Performance}
