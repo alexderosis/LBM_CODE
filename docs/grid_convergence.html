@@ -1,0 +1,175 @@
+<title>Grid Convergence Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+:root {
+  --ground:#F6F7F9; --panel:#FFFFFF; --ink:#151A21; --body:#2B333D;
+  --muted:#5C6673; --rule:#D3D9E1; --grid:#EAEEF3; --wedge:#EEF1F5;
+  --s-bgk:#6E7885; --s-trt:#A8562A; --s-mrt:#2D7A8C; --s-cm:#8B3A62;
+  --band:#ECF0F4;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:#12161B; --panel:#181D24; --ink:#EDF1F5; --body:#C3CBD4;
+    --muted:#8A95A2; --rule:#2C343D; --grid:#222932; --wedge:#1E242B;
+    --s-bgk:#9BA6B3; --s-trt:#D9853F; --s-mrt:#4FB2C6; --s-cm:#D06590;
+    --band:#1B2128;
+  }
+}
+:root[data-theme="dark"] {
+  --ground:#12161B; --panel:#181D24; --ink:#EDF1F5; --body:#C3CBD4;
+  --muted:#8A95A2; --rule:#2C343D; --grid:#222932; --wedge:#1E242B;
+  --s-bgk:#9BA6B3; --s-trt:#D9853F; --s-mrt:#4FB2C6; --s-cm:#D06590;
+  --band:#1B2128;
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--ground); color:var(--body);
+  font-family:"Source Serif 4",Georgia,serif; font-size:17px; line-height:1.62;
+  -webkit-font-smoothing:antialiased; }
+.wrap { max-width:1000px; margin:0 auto; padding:64px 28px 96px;
+  display:flex; flex-direction:column; gap:38px; }
+.col { max-width:66ch; }
+h1 { font-family:"IBM Plex Sans Condensed",system-ui,sans-serif; font-weight:700;
+  font-size:clamp(2rem,4.4vw,3rem); line-height:1.06; letter-spacing:-.015em;
+  color:var(--ink); margin:0; text-wrap:balance; }
+h2 { font-family:"IBM Plex Sans Condensed",system-ui,sans-serif; font-weight:600;
+  font-size:1.42rem; letter-spacing:-.005em; color:var(--ink); margin:0 0 2px;
+  text-wrap:balance; }
+.eyebrow { font-family:"IBM Plex Sans Condensed",system-ui,sans-serif; font-weight:600;
+  font-size:.76rem; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); margin:0 0 12px; }
+p { margin:0 0 14px; }
+.lede { font-size:1.12rem; color:var(--body); }
+code, .mono { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:.9em;
+  font-variant-numeric:tabular-nums; }
+figure { margin:0; display:flex; flex-direction:column; gap:12px; }
+.plot { background:var(--panel); border:1px solid var(--rule); border-radius:2px;
+  padding:10px 6px 4px; overflow-x:auto; }
+.plot svg { display:block; width:100%; height:auto; min-width:640px; }
+figcaption { font-family:"IBM Plex Sans Condensed",system-ui,sans-serif;
+  font-size:.9rem; color:var(--muted); max-width:74ch; line-height:1.5; }
+figcaption b { color:var(--ink); font-weight:600; }
+svg text { font-family:"IBM Plex Sans Condensed",system-ui,sans-serif; }
+.tick { font-size:11.5px; fill:var(--muted); font-variant-numeric:tabular-nums; }
+.axis { font-size:12.5px; fill:var(--ink); font-weight:600; letter-spacing:.01em; }
+.leg { font-size:12.5px; fill:var(--body); }
+.legh { font-size:10.5px; fill:var(--muted); font-weight:700; letter-spacing:.13em; }
+.tw { overflow-x:auto; border:1px solid var(--rule); border-radius:2px; background:var(--panel); }
+table { border-collapse:collapse; width:100%; min-width:620px;
+  font-family:"IBM Plex Mono",monospace; font-size:.83rem; font-variant-numeric:tabular-nums; }
+th { font-family:"IBM Plex Sans Condensed",sans-serif; font-size:.72rem; font-weight:600;
+  letter-spacing:.1em; text-transform:uppercase; color:var(--muted); text-align:right;
+  padding:11px 14px; border-bottom:1px solid var(--rule); white-space:nowrap; }
+th:first-child, th:nth-child(2) { text-align:left; }
+td { padding:7px 14px; border-bottom:1px solid var(--grid); color:var(--body); }
+td.num { text-align:right; }
+td.dim { color:var(--muted); }
+td.lat { color:var(--ink); }
+tbody tr:nth-child(4n+1) td, tbody tr:nth-child(4n+2) td,
+tbody tr:nth-child(4n+3) td, tbody tr:nth-child(4n+4) td { }
+.op { font-weight:500; }
+.op-bgk { color:var(--s-bgk); } .op-trt { color:var(--s-trt); }
+.op-mrt { color:var(--s-mrt); } .op-cm { color:var(--s-cm); }
+.stats { display:flex; flex-wrap:wrap; gap:0; border:1px solid var(--rule);
+  border-radius:2px; background:var(--panel); }
+.stat { flex:1 1 150px; padding:16px 20px; border-right:1px solid var(--rule); }
+.stat:last-child { border-right:0; }
+.stat .k { font-family:"IBM Plex Sans Condensed",sans-serif; font-size:.7rem;
+  letter-spacing:.13em; text-transform:uppercase; color:var(--muted); font-weight:600; }
+.stat .v { font-family:"IBM Plex Mono",monospace; font-size:1.42rem; color:var(--ink);
+  font-variant-numeric:tabular-nums; margin-top:3px; }
+.note { border-left:2px solid var(--rule); padding:2px 0 2px 18px; color:var(--muted);
+  font-size:.96rem; }
+hr { border:0; border-top:1px solid var(--rule); margin:8px 0; }
+</style>
+
+<div class="wrap">
+  <header class="col">
+    <p class="eyebrow">LBM_CODE · validation</p>
+    <h1>Grid convergence across every lattice and operator</h1>
+    <p class="lede" style="margin-top:16px">Two flows with exact Navier–Stokes solutions, three lattices,
+    four collision operators, five grid refinements. Under diffusive scaling the
+    Mach-number error falls at the same rate as the spatial error, so a correct
+    implementation should give a straight line of slope −2 on every curve below.</p>
+  </header>
+
+  <div class="stats">
+    <div class="stat"><div class="k">fitted slopes</div><div class="v">40</div></div>
+    <div class="stat"><div class="k">range</div><div class="v">−2.023 … −1.994</div></div>
+    <div class="stat"><div class="k">worst R²</div><div class="v">0.99982</div></div>
+    <div class="stat"><div class="k">data points</div><div class="v">92</div></div>
+  </div>
+
+  <figure>
+    <div class="plot"><svg viewBox="0 0 760 470" role="img" aria-label="Taylor-Green: log-log convergence"><rect x="74" y="30" width="490" height="382" fill="var(--panel)" stroke="var(--rule)"/><line x1="74" y1="365.73" x2="564" y2="365.73" stroke="var(--grid)" stroke-width="1"/><text x="64" y="369.33" text-anchor="end" class="tick">1e−3</text><line x1="74" y1="297.19" x2="564" y2="297.19" stroke="var(--grid)" stroke-width="1"/><text x="64" y="300.79" text-anchor="end" class="tick">2e−3</text><line x1="74" y1="206.58" x2="564" y2="206.58" stroke="var(--grid)" stroke-width="1"/><text x="64" y="210.18" text-anchor="end" class="tick">5e−3</text><line x1="74" y1="138.03" x2="564" y2="138.03" stroke="var(--grid)" stroke-width="1"/><text x="64" y="141.63" text-anchor="end" class="tick">1e−2</text><line x1="74" y1="69.49" x2="564" y2="69.49" stroke="var(--grid)" stroke-width="1"/><text x="64" y="73.09" text-anchor="end" class="tick">2e−2</text><line x1="112.07" y1="30" x2="112.07" y2="412" stroke="var(--grid)" stroke-width="1"/><text x="112.07" y="432" text-anchor="middle" class="tick">16</text><line x1="232.84" y1="30" x2="232.84" y2="412" stroke="var(--grid)" stroke-width="1"/><text x="232.84" y="432" text-anchor="middle" class="tick">24</text><line x1="318.52" y1="30" x2="318.52" y2="412" stroke="var(--grid)" stroke-width="1"/><text x="318.52" y="432" text-anchor="middle" class="tick">32</text><line x1="439.29" y1="30" x2="439.29" y2="412" stroke="var(--grid)" stroke-width="1"/><text x="439.29" y="432" text-anchor="middle" class="tick">48</text><line x1="524.97" y1="30" x2="524.97" y2="412" stroke="var(--grid)" stroke-width="1"/><text x="524.97" y="432" text-anchor="middle" class="tick">64</text><path d="M 222.74 84.72 L 429.19 221.81 L 429.19 84.72 Z" fill="var(--wedge)" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3 3"/><text x="436.19" y="156.87" class="tick" fill="var(--muted)">2</text><text x="325.97" y="100.72" text-anchor="middle" class="tick" fill="var(--muted)">1</text><polyline points="112.07,76.48 232.84,157.01 318.52,213.50 439.29,292.65 524.97,350.69" fill="none" stroke="var(--s-bgk)" stroke-width="1.4" opacity="0.85"/><circle cx="112.07" cy="76.48" r="4.00" fill="var(--s-bgk)" stroke="var(--panel)" stroke-width="1"/><circle cx="232.84" cy="157.01" r="4.00" fill="var(--s-bgk)" stroke="var(--panel)" stroke-width="1"/><circle cx="318.52" cy="213.50" r="4.00" fill="var(--s-bgk)" stroke="var(--panel)" stroke-width="1"/><circle cx="439.29" cy="292.65" r="4.00" fill="var(--s-bgk)" stroke="var(--panel)" stroke-width="1"/><circle cx="524.97" cy="350.69" r="4.00" fill="var(--s-bgk)" stroke="var(--panel)" stroke-width="1"/><polyline points="112.07,76.48 232.84,157.01 318.52,213.50 439.29,292.65 524.97,350.69" fill="none" stroke="var(--s-bgk)" stroke-width="1.4" opacity="0.85"/><rect x="108.67" y="73.08" width="6.80" height="6.80" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><rect x="229.44" y="153.61" width="6.80" height="6.80" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><rect x="315.12" y="210.10" width="6.80" height="6.80" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><rect x="435.89" y="289.25" width="6.80" height="6.80" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><rect x="521.57" y="347.29" width="6.80" height="6.80" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><polyline points="112.07,76.48 232.84,157.01 318.52,213.50 439.29,292.65 524.97,350.69" fill="none" stroke="var(--s-bgk)" stroke-width="1.4" opacity="0.85"/><path d="M 112.07 71.68 L 116.47 79.84 L 107.67 79.84 Z" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><path d="M 232.84 152.21 L 237.24 160.37 L 228.44 160.37 Z" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><path d="M 318.52 208.70 L 322.92 216.86 L 314.12 216.86 Z" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><path d="M 439.29 287.85 L 443.69 296.01 L 434.89 296.01 Z" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><path d="M 524.97 345.89 L 529.37 354.05 L 520.57 354.05 Z" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><polyline points="112.07,90.65 232.84,171.05 318.52,227.39 439.29,306.27 524.97,364.73" fill="none" stroke="var(--s-trt)" stroke-width="1.4" opacity="0.85"/><circle cx="112.07" cy="90.65" r="4.00" fill="var(--s-trt)" stroke="var(--panel)" stroke-width="1"/><circle cx="232.84" cy="171.05" r="4.00" fill="var(--s-trt)" stroke="var(--panel)" stroke-width="1"/><circle cx="318.52" cy="227.39" r="4.00" fill="var(--s-trt)" stroke="var(--panel)" stroke-width="1"/><circle cx="439.29" cy="306.27" r="4.00" fill="var(--s-trt)" stroke="var(--panel)" stroke-width="1"/><circle cx="524.97" cy="364.73" r="4.00" fill="var(--s-trt)" stroke="var(--panel)" stroke-width="1"/><polyline points="112.07,90.65 232.84,171.05 318.52,227.39 439.29,306.27 524.97,364.73" fill="none" stroke="var(--s-trt)" stroke-width="1.4" opacity="0.85"/><rect x="108.67" y="87.25" width="6.80" height="6.80" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><rect x="229.44" y="167.65" width="6.80" height="6.80" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><rect x="315.12" y="223.99" width="6.80" height="6.80" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><rect x="435.89" y="302.87" width="6.80" height="6.80" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><rect x="521.57" y="361.33" width="6.80" height="6.80" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><polyline points="112.07,90.65 232.84,171.05 318.52,227.39 439.29,306.27 524.97,364.73" fill="none" stroke="var(--s-trt)" stroke-width="1.4" opacity="0.85"/><path d="M 112.07 85.85 L 116.47 94.01 L 107.67 94.01 Z" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><path d="M 232.84 166.25 L 237.24 174.41 L 228.44 174.41 Z" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><path d="M 318.52 222.59 L 322.92 230.75 L 314.12 230.75 Z" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><path d="M 439.29 301.47 L 443.69 309.63 L 434.89 309.63 Z" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><path d="M 524.97 359.93 L 529.37 368.09 L 520.57 368.09 Z" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><polyline points="112.07,85.31 232.84,165.74 318.52,222.13 439.29,301.11 524.97,359.40" fill="none" stroke="var(--s-mrt)" stroke-width="1.4" opacity="0.85"/><circle cx="112.07" cy="85.31" r="4.00" fill="var(--s-mrt)" stroke="var(--panel)" stroke-width="1"/><circle cx="232.84" cy="165.74" r="4.00" fill="var(--s-mrt)" stroke="var(--panel)" stroke-width="1"/><circle cx="318.52" cy="222.13" r="4.00" fill="var(--s-mrt)" stroke="var(--panel)" stroke-width="1"/><circle cx="439.29" cy="301.11" r="4.00" fill="var(--s-mrt)" stroke="var(--panel)" stroke-width="1"/><circle cx="524.97" cy="359.40" r="4.00" fill="var(--s-mrt)" stroke="var(--panel)" stroke-width="1"/><polyline points="112.07,85.31 232.84,165.74 318.52,222.13 439.29,301.11 524.97,359.40" fill="none" stroke="var(--s-mrt)" stroke-width="1.4" opacity="0.85"/><rect x="108.67" y="81.91" width="6.80" height="6.80" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><rect x="229.44" y="162.34" width="6.80" height="6.80" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><rect x="315.12" y="218.73" width="6.80" height="6.80" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><rect x="435.89" y="297.71" width="6.80" height="6.80" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><rect x="521.57" y="356.00" width="6.80" height="6.80" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><polyline points="112.07,85.31 232.84,165.74 318.52,222.13 439.29,301.11 524.97,359.40" fill="none" stroke="var(--s-mrt)" stroke-width="1.4" opacity="0.85"/><path d="M 112.07 80.51 L 116.47 88.67 L 107.67 88.67 Z" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><path d="M 232.84 160.94 L 237.24 169.10 L 228.44 169.10 Z" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><path d="M 318.52 217.33 L 322.92 225.49 L 314.12 225.49 Z" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><path d="M 439.29 296.31 L 443.69 304.47 L 434.89 304.47 Z" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><path d="M 524.97 354.60 L 529.37 362.76 L 520.57 362.76 Z" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><polyline points="112.07,85.32 232.84,165.75 318.52,222.13 439.29,301.11 524.97,359.40" fill="none" stroke="var(--s-cm)" stroke-width="1.4" opacity="0.85"/><circle cx="112.07" cy="85.32" r="4.00" fill="var(--s-cm)" stroke="var(--panel)" stroke-width="1"/><circle cx="232.84" cy="165.75" r="4.00" fill="var(--s-cm)" stroke="var(--panel)" stroke-width="1"/><circle cx="318.52" cy="222.13" r="4.00" fill="var(--s-cm)" stroke="var(--panel)" stroke-width="1"/><circle cx="439.29" cy="301.11" r="4.00" fill="var(--s-cm)" stroke="var(--panel)" stroke-width="1"/><circle cx="524.97" cy="359.40" r="4.00" fill="var(--s-cm)" stroke="var(--panel)" stroke-width="1"/><polyline points="112.07,85.32 232.84,165.75 318.52,222.13 439.29,301.11 524.97,359.40" fill="none" stroke="var(--s-cm)" stroke-width="1.4" opacity="0.85"/><rect x="108.67" y="81.92" width="6.80" height="6.80" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><rect x="229.44" y="162.35" width="6.80" height="6.80" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><rect x="315.12" y="218.73" width="6.80" height="6.80" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><rect x="435.89" y="297.71" width="6.80" height="6.80" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><rect x="521.57" y="356.00" width="6.80" height="6.80" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><polyline points="112.07,85.32 232.84,165.75 318.52,222.13 439.29,301.11 524.97,359.40" fill="none" stroke="var(--s-cm)" stroke-width="1.4" opacity="0.85"/><path d="M 112.07 80.52 L 116.47 88.68 L 107.67 88.68 Z" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><path d="M 232.84 160.95 L 237.24 169.11 L 228.44 169.11 Z" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><path d="M 318.52 217.33 L 322.92 225.49 L 314.12 225.49 Z" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><path d="M 439.29 296.31 L 443.69 304.47 L 434.89 304.47 Z" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><path d="M 524.97 354.60 L 529.37 362.76 L 520.57 362.76 Z" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><text x="319.00" y="456" text-anchor="middle" class="axis">N — grid points per direction</text><text transform="translate(18,221.00) rotate(-90)" text-anchor="middle" class="axis">relative L2 error in u</text><text x="586" y="38" class="legh">OPERATOR</text><line x1="586" y1="54" x2="608" y2="54" stroke="var(--s-bgk)" stroke-width="2.4"/><text x="616" y="58" class="leg">BGK</text><line x1="586" y1="73" x2="608" y2="73" stroke="var(--s-trt)" stroke-width="2.4"/><text x="616" y="77" class="leg">TRT</text><line x1="586" y1="92" x2="608" y2="92" stroke="var(--s-mrt)" stroke-width="2.4"/><text x="616" y="96" class="leg">MRT</text><line x1="586" y1="111" x2="608" y2="111" stroke="var(--s-cm)" stroke-width="2.4"/><text x="616" y="115" class="leg">CM</text><text x="586" y="150" class="legh">LATTICE</text><circle cx="596.00" cy="168.00" r="4.00" fill="var(--muted)" stroke="var(--panel)" stroke-width="1"/><text x="616" y="172" class="leg">D2Q9</text><rect x="592.60" y="185.60" width="6.80" height="6.80" fill="none" stroke="var(--muted)" stroke-width="1.6"/><text x="616" y="193" class="leg">D3Q19</text><path d="M 596.00 205.20 L 600.40 213.36 L 591.60 213.36 Z" fill="none" stroke="var(--muted)" stroke-width="1.6"/><text x="616" y="214" class="leg">D3Q27</text></svg></div>
+    <figcaption><b>Taylor–Green vortex</b> — nonlinear, exact. The field is z-independent,
+    so it is the same physical problem on all three lattices and is the only case that
+    lets D2Q9, D3Q19 and D3Q27 be compared directly. They agree to 14 digits: every
+    circle, square and triangle here is concentric, and the three lattices are
+    indistinguishable at every resolution. What separates the curves is the operator,
+    and only by amplitude — never by slope.</figcaption>
+  </figure>
+
+  <figure>
+    <div class="plot"><svg viewBox="0 0 760 470" role="img" aria-label="ABC / Beltrami: log-log convergence"><rect x="74" y="30" width="490" height="382" fill="var(--panel)" stroke="var(--rule)"/><line x1="74" y1="340.93" x2="564" y2="340.93" stroke="var(--grid)" stroke-width="1"/><text x="64" y="344.53" text-anchor="end" class="tick">1e−3</text><line x1="74" y1="268.81" x2="564" y2="268.81" stroke="var(--grid)" stroke-width="1"/><text x="64" y="272.41" text-anchor="end" class="tick">2e−3</text><line x1="74" y1="173.47" x2="564" y2="173.47" stroke="var(--grid)" stroke-width="1"/><text x="64" y="177.07" text-anchor="end" class="tick">5e−3</text><line x1="74" y1="101.35" x2="564" y2="101.35" stroke="var(--grid)" stroke-width="1"/><text x="64" y="104.95" text-anchor="end" class="tick">1e−2</text><line x1="120.14" y1="30" x2="120.14" y2="412" stroke="var(--grid)" stroke-width="1"/><text x="120.14" y="432" text-anchor="middle" class="tick">16</text><line x1="266.50" y1="30" x2="266.50" y2="412" stroke="var(--grid)" stroke-width="1"/><text x="266.50" y="432" text-anchor="middle" class="tick">24</text><line x1="370.34" y1="30" x2="370.34" y2="412" stroke="var(--grid)" stroke-width="1"/><text x="370.34" y="432" text-anchor="middle" class="tick">32</text><line x1="516.70" y1="30" x2="516.70" y2="412" stroke="var(--grid)" stroke-width="1"/><text x="516.70" y="432" text-anchor="middle" class="tick">48</text><path d="M 254.26 87.58 L 504.47 231.81 L 504.47 87.58 Z" fill="var(--wedge)" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3 3"/><text x="511.47" y="163.30" class="tick" fill="var(--muted)">2</text><text x="379.37" y="103.58" text-anchor="middle" class="tick" fill="var(--muted)">1</text><polyline points="120.14,78.90 266.50,162.97 370.34,223.33 516.70,308.16" fill="none" stroke="var(--s-bgk)" stroke-width="1.4" opacity="0.85"/><rect x="116.74" y="75.50" width="6.80" height="6.80" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><rect x="263.10" y="159.57" width="6.80" height="6.80" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><rect x="366.94" y="219.93" width="6.80" height="6.80" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><rect x="513.30" y="304.76" width="6.80" height="6.80" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><polyline points="120.14,78.97 266.50,162.99 370.34,223.33 516.70,308.16" fill="none" stroke="var(--s-bgk)" stroke-width="1.4" opacity="0.85"/><path d="M 120.14 74.17 L 124.54 82.33 L 115.74 82.33 Z" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><path d="M 266.50 158.19 L 270.90 166.35 L 262.10 166.35 Z" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><path d="M 370.34 218.53 L 374.74 226.69 L 365.94 226.69 Z" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><path d="M 516.70 303.36 L 521.10 311.52 L 512.30 311.52 Z" fill="none" stroke="var(--s-bgk)" stroke-width="1.6"/><polyline points="120.14,131.53 266.50,214.29 370.34,276.20 516.70,362.25" fill="none" stroke="var(--s-trt)" stroke-width="1.4" opacity="0.85"/><rect x="116.74" y="128.13" width="6.80" height="6.80" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><rect x="263.10" y="210.89" width="6.80" height="6.80" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><rect x="366.94" y="272.80" width="6.80" height="6.80" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><rect x="513.30" y="358.85" width="6.80" height="6.80" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><polyline points="120.14,132.00 266.50,214.22 370.34,276.02 516.70,362.26" fill="none" stroke="var(--s-trt)" stroke-width="1.4" opacity="0.85"/><path d="M 120.14 127.20 L 124.54 135.36 L 115.74 135.36 Z" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><path d="M 266.50 209.42 L 270.90 217.58 L 262.10 217.58 Z" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><path d="M 370.34 271.22 L 374.74 279.38 L 365.94 279.38 Z" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><path d="M 516.70 357.46 L 521.10 365.62 L 512.30 365.62 Z" fill="none" stroke="var(--s-trt)" stroke-width="1.6"/><polyline points="120.14,104.50 266.50,187.74 370.34,248.59 516.70,333.89" fill="none" stroke="var(--s-mrt)" stroke-width="1.4" opacity="0.85"/><rect x="116.74" y="101.10" width="6.80" height="6.80" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><rect x="263.10" y="184.34" width="6.80" height="6.80" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><rect x="366.94" y="245.19" width="6.80" height="6.80" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><rect x="513.30" y="330.49" width="6.80" height="6.80" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><polyline points="120.14,104.54 266.50,187.78 370.34,248.63 516.70,333.94" fill="none" stroke="var(--s-mrt)" stroke-width="1.4" opacity="0.85"/><path d="M 120.14 99.74 L 124.54 107.90 L 115.74 107.90 Z" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><path d="M 266.50 182.98 L 270.90 191.14 L 262.10 191.14 Z" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><path d="M 370.34 243.83 L 374.74 251.99 L 365.94 251.99 Z" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><path d="M 516.70 329.14 L 521.10 337.30 L 512.30 337.30 Z" fill="none" stroke="var(--s-mrt)" stroke-width="1.6"/><polyline points="120.14,104.21 266.50,187.82 370.34,248.71 516.70,333.88" fill="none" stroke="var(--s-cm)" stroke-width="1.4" opacity="0.85"/><rect x="116.74" y="100.81" width="6.80" height="6.80" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><rect x="263.10" y="184.42" width="6.80" height="6.80" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><rect x="366.94" y="245.31" width="6.80" height="6.80" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><rect x="513.30" y="330.48" width="6.80" height="6.80" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><polyline points="120.14,104.28 266.50,187.87 370.34,248.75 516.70,333.93" fill="none" stroke="var(--s-cm)" stroke-width="1.4" opacity="0.85"/><path d="M 120.14 99.48 L 124.54 107.64 L 115.74 107.64 Z" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><path d="M 266.50 183.07 L 270.90 191.23 L 262.10 191.23 Z" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><path d="M 370.34 243.95 L 374.74 252.11 L 365.94 252.11 Z" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><path d="M 516.70 329.13 L 521.10 337.29 L 512.30 337.29 Z" fill="none" stroke="var(--s-cm)" stroke-width="1.6"/><text x="319.00" y="456" text-anchor="middle" class="axis">N — grid points per direction</text><text transform="translate(18,221.00) rotate(-90)" text-anchor="middle" class="axis">relative L2 error in u</text><text x="586" y="38" class="legh">OPERATOR</text><line x1="586" y1="54" x2="608" y2="54" stroke="var(--s-bgk)" stroke-width="2.4"/><text x="616" y="58" class="leg">BGK</text><line x1="586" y1="73" x2="608" y2="73" stroke="var(--s-trt)" stroke-width="2.4"/><text x="616" y="77" class="leg">TRT</text><line x1="586" y1="92" x2="608" y2="92" stroke="var(--s-mrt)" stroke-width="2.4"/><text x="616" y="96" class="leg">MRT</text><line x1="586" y1="111" x2="608" y2="111" stroke="var(--s-cm)" stroke-width="2.4"/><text x="616" y="115" class="leg">CM</text><text x="586" y="150" class="legh">LATTICE</text><circle cx="596.00" cy="168.00" r="4.00" fill="var(--muted)" stroke="var(--panel)" stroke-width="1"/><text x="616" y="172" class="leg">D2Q9</text><rect x="592.60" y="185.60" width="6.80" height="6.80" fill="none" stroke="var(--muted)" stroke-width="1.6"/><text x="616" y="193" class="leg">D3Q19</text><path d="M 596.00 205.20 L 600.40 213.36 L 591.60 213.36 Z" fill="none" stroke="var(--muted)" stroke-width="1.6"/><text x="616" y="214" class="leg">D3Q27</text></svg></div>
+    <figcaption><b>ABC / Beltrami flow</b> — nonlinear and genuinely three-dimensional,
+    so D3Q19 and D3Q27 only. Again the two lattices sit on top of each other: this flow
+    is built from axis-aligned sinusoids and does not probe the extra eight velocities.
+    TRT at Λ = 3/16 is the most accurate of the four, by about 1.7× over BGK.</figcaption>
+  </figure>
+
+  <section class="col">
+    <p class="eyebrow">Reading the slopes</p>
+    <h2>Amplitude separates the operators; order does not</h2>
+    <p>All 40 fitted slopes land within 1.2% of −2, with the worst correlation
+    coefficient at 0.99982 — these are straight lines, not approximately straight
+    ones. No operator, lattice or storage convention is buying an extra order of
+    accuracy, and none is losing one either.</p>
+    <p>The ordering by amplitude is consistent across both cases:
+    <span class="mono op-trt">TRT</span> &lt;
+    <span class="mono op-cm">CM</span> ≈ <span class="mono op-mrt">MRT</span> &lt;
+    <span class="mono op-bgk">BGK</span>. That TRT wins in a periodic bulk flow is not a
+    contradiction of the central-moment results elsewhere — the magic parameter tunes the
+    third-order modes that CM and MRT send straight to equilibrium. On an off-axis shear
+    wave the ordering reverses.</p>
+    <p class="note">D2Q5 and D3Q7 are absent by construction. They have no isotropic
+    fourth-order moments, cannot support Navier–Stokes, and have no fluid solver to
+    converge; they arrive with the thermal module.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow">Taylor–Green</p>
+    <div class="tw"><table>
+      <thead><tr><th>Lattice</th><th>Operator</th><th>Slope L2</th><th>R²</th>
+        <th>Slope ν</th><th>R²</th><th>L2 @ N=64</th></tr></thead>
+      <tbody><tr><td class="lat">D2Q9</td><td class="op op-bgk">BGK</td><td class="num">-1.996</td><td class="num dim">0.99998</td><td class="num">-2.022</td><td class="num dim">1.00000</td><td class="num">1.164e-03</td></tr><tr><td class="lat">D2Q9</td><td class="op op-trt">TRT</td><td class="num">-1.994</td><td class="num dim">0.99996</td><td class="num">-2.023</td><td class="num dim">1.00000</td><td class="num">1.010e-03</td></tr><tr><td class="lat">D2Q9</td><td class="op op-mrt">MRT</td><td class="num">-1.994</td><td class="num dim">0.99997</td><td class="num">-2.023</td><td class="num dim">1.00000</td><td class="num">1.066e-03</td></tr><tr><td class="lat">D2Q9</td><td class="op op-cm">CM</td><td class="num">-1.994</td><td class="num dim">0.99997</td><td class="num">-2.023</td><td class="num dim">1.00000</td><td class="num">1.066e-03</td></tr><tr><td class="lat">D3Q19</td><td class="op op-bgk">BGK</td><td class="num">-1.996</td><td class="num dim">0.99998</td><td class="num">-2.022</td><td class="num dim">1.00000</td><td class="num">1.164e-03</td></tr><tr><td class="lat">D3Q19</td><td class="op op-trt">TRT</td><td class="num">-1.994</td><td class="num dim">0.99996</td><td class="num">-2.023</td><td class="num dim">1.00000</td><td class="num">1.010e-03</td></tr><tr><td class="lat">D3Q19</td><td class="op op-mrt">MRT</td><td class="num">-1.994</td><td class="num dim">0.99997</td><td class="num">-2.023</td><td class="num dim">1.00000</td><td class="num">1.066e-03</td></tr><tr><td class="lat">D3Q19</td><td class="op op-cm">CM</td><td class="num">-1.994</td><td class="num dim">0.99997</td><td class="num">-2.023</td><td class="num dim">1.00000</td><td class="num">1.066e-03</td></tr><tr><td class="lat">D3Q27</td><td class="op op-bgk">BGK</td><td class="num">-1.996</td><td class="num dim">0.99998</td><td class="num">-2.022</td><td class="num dim">1.00000</td><td class="num">1.164e-03</td></tr><tr><td class="lat">D3Q27</td><td class="op op-trt">TRT</td><td class="num">-1.994</td><td class="num dim">0.99996</td><td class="num">-2.023</td><td class="num dim">1.00000</td><td class="num">1.010e-03</td></tr><tr><td class="lat">D3Q27</td><td class="op op-mrt">MRT</td><td class="num">-1.994</td><td class="num dim">0.99997</td><td class="num">-2.023</td><td class="num dim">1.00000</td><td class="num">1.066e-03</td></tr><tr><td class="lat">D3Q27</td><td class="op op-cm">CM</td><td class="num">-1.994</td><td class="num dim">0.99997</td><td class="num">-2.023</td><td class="num dim">1.00000</td><td class="num">1.066e-03</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">ABC / Beltrami</p>
+    <div class="tw"><table>
+      <thead><tr><th>Lattice</th><th>Operator</th><th>Slope L2</th><th>R²</th>
+        <th>Slope ν</th><th>R²</th><th>L2 @ N=48</th></tr></thead>
+      <tbody><tr><td class="lat">D3Q19</td><td class="op op-bgk">BGK</td><td class="num">-2.006</td><td class="num dim">0.99999</td><td class="num">-2.013</td><td class="num dim">1.00000</td><td class="num">1.370e-03</td></tr><tr><td class="lat">D3Q19</td><td class="op op-trt">TRT</td><td class="num">-2.022</td><td class="num dim">0.99987</td><td class="num">-2.012</td><td class="num dim">0.99999</td><td class="num">8.147e-04</td></tr><tr><td class="lat">D3Q19</td><td class="op op-mrt">MRT</td><td class="num">-2.009</td><td class="num dim">0.99995</td><td class="num">-2.010</td><td class="num dim">1.00000</td><td class="num">1.070e-03</td></tr><tr><td class="lat">D3Q19</td><td class="op op-cm">CM</td><td class="num">-2.011</td><td class="num dim">0.99997</td><td class="num">-2.011</td><td class="num dim">1.00000</td><td class="num">1.070e-03</td></tr><tr><td class="lat">D3Q27</td><td class="op op-bgk">BGK</td><td class="num">-2.006</td><td class="num dim">0.99999</td><td class="num">-2.012</td><td class="num dim">1.00000</td><td class="num">1.370e-03</td></tr><tr><td class="lat">D3Q27</td><td class="op op-trt">TRT</td><td class="num">-2.018</td><td class="num dim">0.99982</td><td class="num">-2.011</td><td class="num dim">0.99999</td><td class="num">8.146e-04</td></tr><tr><td class="lat">D3Q27</td><td class="op op-mrt">MRT</td><td class="num">-2.009</td><td class="num dim">0.99995</td><td class="num">-2.010</td><td class="num dim">1.00000</td><td class="num">1.069e-03</td></tr><tr><td class="lat">D3Q27</td><td class="op op-cm">CM</td><td class="num">-2.011</td><td class="num dim">0.99997</td><td class="num">-2.010</td><td class="num dim">1.00000</td><td class="num">1.070e-03</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section class="col">
+    <p class="eyebrow">Method</p>
+    <h2>How these numbers were produced</h2>
+    <p>Both flows are exact solutions of the incompressible Navier–Stokes equations, so
+    the reference is analytic rather than a fine-grid extrapolation. Each run marches
+    half an e-folding of the decay, then reports the relative L2 error of the velocity
+    field and the effective viscosity recovered from the decay rate. Slopes are
+    least-squares fits of log error against log N over the whole ladder — five points for
+    Taylor–Green, four for ABC — not pairwise ratios.</p>
+    <p>Peak velocity scales as 1/N so the O(Ma²) compressibility error stays second order
+    alongside the spatial error; holding it fixed instead would flatten every curve toward
+    first order and measure the wrong thing. Streaming is Esoteric Pull with shifted
+    populations throughout, in FP64. The axis is grid points per direction — against total
+    node count the same data would show slope −2/D.</p>
+    <p class="note">Reproduce with <code>./build/validation/grid_convergence</code>,
+    which emits this data as CSV in about 43 seconds.</p>
+  </section>
+</div>

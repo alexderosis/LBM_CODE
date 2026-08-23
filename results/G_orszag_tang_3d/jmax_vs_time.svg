@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 450" width="780" height="450" font-family="Georgia, 'Times New Roman', serif">
+<rect width="100%" height="100%" fill="#fbfaf8"/>
+<line x1="72" y1="392.0" x2="758" y2="392.0" stroke="#e2ded7" stroke-width="1"/>
+<text x="62" y="396.0" text-anchor="end" font-size="13" fill="#5a544c">0</text>
+<line x1="72" y1="312.5" x2="758" y2="312.5" stroke="#e2ded7" stroke-width="1"/>
+<text x="62" y="316.5" text-anchor="end" font-size="13" fill="#5a544c">5</text>
+<line x1="72" y1="232.9" x2="758" y2="232.9" stroke="#e2ded7" stroke-width="1"/>
+<text x="62" y="236.9" text-anchor="end" font-size="13" fill="#5a544c">10</text>
+<line x1="72" y1="153.4" x2="758" y2="153.4" stroke="#e2ded7" stroke-width="1"/>
+<text x="62" y="157.4" text-anchor="end" font-size="13" fill="#5a544c">15</text>
+<line x1="72" y1="73.8" x2="758" y2="73.8" stroke="#e2ded7" stroke-width="1"/>
+<text x="62" y="77.8" text-anchor="end" font-size="13" fill="#5a544c">20</text>
+<line x1="72.0" y1="42" x2="72.0" y2="392" stroke="#e2ded7" stroke-width="1"/>
+<text x="72.0" y="414" text-anchor="middle" font-size="13" fill="#5a544c">0</text>
+<line x1="243.5" y1="42" x2="243.5" y2="392" stroke="#e2ded7" stroke-width="1"/>
+<text x="243.5" y="414" text-anchor="middle" font-size="13" fill="#5a544c">1</text>
+<line x1="415.0" y1="42" x2="415.0" y2="392" stroke="#e2ded7" stroke-width="1"/>
+<text x="415.0" y="414" text-anchor="middle" font-size="13" fill="#5a544c">2</text>
+<line x1="586.5" y1="42" x2="586.5" y2="392" stroke="#e2ded7" stroke-width="1"/>
+<text x="586.5" y="414" text-anchor="middle" font-size="13" fill="#5a544c">3</text>
+<line x1="758.0" y1="42" x2="758.0" y2="392" stroke="#e2ded7" stroke-width="1"/>
+<text x="758.0" y="414" text-anchor="middle" font-size="13" fill="#5a544c">4</text>
+<line x1="243.5" y1="42" x2="243.5" y2="392" stroke="#b0a89c" stroke-width="1.2" stroke-dasharray="3 4"/>
+<text x="250.5" y="57" font-size="11.5" fill="#8a8177" font-style="italic">paper: max at about t = 1</text>
+<line x1="72" y1="392" x2="758" y2="392" stroke="#3a352e" stroke-width="1.4"/>
+<line x1="72" y1="42" x2="72" y2="392" stroke="#3a352e" stroke-width="1.4"/>
+<polyline points="72.00,309.00 106.13,294.81 140.26,257.22 174.39,220.09 208.51,194.92 242.64,172.94 276.77,142.15 310.90,178.24 345.03,220.58 379.16,250.48 413.29,270.60 447.41,286.66 481.37,300.50 515.50,306.67 549.63,312.34 583.76,321.77 617.88,326.57 652.01,329.41 686.14,332.42 720.27,335.76 754.40,338.52 758.00,338.71" fill="none" stroke="#4a6fa5" stroke-width="2.1" stroke-dasharray="5 3" stroke-linejoin="round"/>
+<circle cx="276.8" cy="142.2" r="3.4" fill="#4a6fa5"/>
+<polyline points="72.00,307.93 106.30,292.55 140.43,252.70 174.73,208.55 209.03,173.53 243.16,129.76 277.46,86.64 311.59,141.03 345.89,193.40 380.19,233.32 414.31,258.57 448.61,274.41 482.91,288.38 517.04,299.78 551.34,302.27 585.64,310.45 619.77,319.73 654.07,321.64 688.20,324.51 722.50,327.71 756.80,330.70 758.00,330.81" fill="none" stroke="#c2703d" stroke-width="2.1" stroke-dasharray="2 3" stroke-linejoin="round"/>
+<circle cx="277.5" cy="86.6" r="3.4" fill="#c2703d"/>
+<polyline points="72.00,307.67 106.30,291.97 140.60,251.53 174.90,205.48 209.20,166.90 243.50,115.77 277.80,67.00 312.10,126.04 346.40,184.30 380.70,227.10 415.00,254.57 449.30,271.30 483.60,284.95 517.90,296.64 552.20,299.59 586.50,307.48 620.80,316.66 655.10,318.97 689.40,322.29 723.70,325.56 758.00,328.86" fill="none" stroke="#2f6b4f" stroke-width="2.1" stroke-linejoin="round"/>
+<circle cx="277.8" cy="67.0" r="3.4" fill="#2f6b4f"/>
+<line x1="608" y1="60" x2="640" y2="60" stroke="#2f6b4f" stroke-width="2.1"/>
+<text x="648" y="64" font-size="12.5" fill="#3a352e">128³ — peak 20.4 at t=1.20</text>
+<line x1="608" y1="79" x2="640" y2="79" stroke="#c2703d" stroke-width="2.1" stroke-dasharray="2 3"/>
+<text x="648" y="83" font-size="12.5" fill="#3a352e">64³ — peak 19.2 at t=1.20</text>
+<line x1="608" y1="98" x2="640" y2="98" stroke="#4a6fa5" stroke-width="2.1" stroke-dasharray="5 3"/>
+<text x="648" y="102" font-size="12.5" fill="#3a352e">32³ — peak 15.7 at t=1.19</text>
+<text x="415" y="436" text-anchor="middle" font-size="14" fill="#3a352e">time</text>
+<text x="18" y="217" text-anchor="middle" font-size="14" fill="#3a352e" transform="rotate(-90 18 217)">J_max</text>
+<text x="72" y="26" font-size="15" fill="#22201c">3D Orszag–Tang: peak current magnitude, D3Q27 central moments</text>
+</svg>
