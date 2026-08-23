@@ -5,8 +5,35 @@ It shares no headers with `../src`, is not built by the parent's CMake, and is
 not a port of it — only the physics and the output format are deliberately the
 same, so the two can be compared.
 
-**Status: core complete and verified, physics coverage is a fraction of the
-parent's.** Read the scope table before assuming anything works.
+**Status: core complete, built and validated on a Tesla T4. Physics coverage is
+a fraction of the parent's.** Read the scope table before assuming anything works.
+
+## Measured, on a Tesla T4 (sm_75, CUDA 12.8, FP32, 64^3)
+
+| operator | MLUPS | GB/s | mass drift |
+|---|---|---|---|
+| BGK | 943.1 | 203.7 | 0.000e+00 |
+| central moments | 933.0 | 201.5 | 0.000e+00 |
+
+Central moments runs at **99% of BGK speed**, and 203.7 GB/s is **64% of the
+T4's 320 GB/s peak** — i.e. the kernel is memory-bound, which is what a
+correctly written LBM kernel should be. This matters beyond this code: the
+parent Kokkos implementation could not complete two central-moment
+configurations at the same size in seventeen minutes, and `-Xptxas -v` ruled out
+register spilling as the cause. The same algorithm at BGK speed here shows the
+collapse there is **not** intrinsic to the operator.
+
+**Taylor–Green at Re=1600, 64^3, tau=0.502400, central moments**, against the
+parent's committed FP64 reference `../results/E_tgv3d/tgv3d_re1600_d3q27_cm.dat`:
+
+| | worst relative difference |
+|---|---|
+| kinetic energy E/E0 | 5.3e-04 |
+| enstrophy Psi/Psi0 | 2.1e-03 |
+
+Enstrophy peak 2.1292 at t\*=1.000 against the parent's 2.1305 at t\*=1.000.
+Two independent implementations, FP32 against FP64 — this is the agreement
+FP32 round-off alone would predict. 32,000 steps in 9.12 s (920 MLUPS).
 
 ## Why it is written this way
 
