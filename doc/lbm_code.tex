@@ -3051,50 +3051,64 @@ in the physiological range for an aorta. The drive is exact beat after beat:
 $Q_{\rm in}$ reaches $-12.98043$ at every systolic peak and $-1.947065$ at every
 trough, identical to five digits across six cycles.
 
-\paragraph{The run is not converged, and the figures should be read accordingly.}
-The viscous diffusion time across the vessel is $R^2/\nu = 20\,552$ steps, which
-is $10.3$ beats; the run of $12\,800$ steps is $0.62$ diffusion times. Periodic
-steady state needs several. Sampling at matched phase makes the shortfall
-explicit --- both the mean and the median speed rise monotonically through all
-six beats, so this is the bulk flow still developing and not an artefact of an
-outlier:
+\paragraph{Convergence.} The viscous diffusion time across the vessel is
+$R^2/\nu = 20\,552$ steps, which is $10.3$ beats. This run is $60\,000$ steps,
+$2.92$ diffusion times, and it is converged: sampled at matched phase over the
+final three beats, \emph{every} statistic of the speed field repeats to eight
+significant figures.
 
 \begin{center}\small
 \begin{tabular}{clcccc}
 \hline
-beat & step & mean & median & $p_{99}$ & $|\uu|_{\max}$ \\
+$\phi$ & step & mean & median & $p_{99}$ & $|\uu|_{\max}$ \\
 \hline
-\multicolumn{6}{l}{\emph{systolic peak}, $\phi=0.5$}\\
-2 & 3000  & 0.00395 & 0.00430 & 0.00822 & 0.03045 \\
-4 & 7000  & 0.00429 & 0.00447 & 0.00895 & 0.03105 \\
-6 & 11000 & 0.00457 & 0.00473 & 0.00961 & 0.03148 \\
-\multicolumn{6}{l}{\emph{diastolic trough}, $\phi=0$}\\
-2 & 4000  & 0.00284 & 0.00163 & 0.01253 & 0.05035 \\
-4 & 8000  & 0.00314 & 0.00187 & 0.01379 & 0.05288 \\
-6 & 12000 & 0.00339 & 0.00213 & 0.01456 & 0.05503 \\
+0.0 & 54000 & 0.00364663 & 0.00238384 & 0.0153191 & 0.0565515 \\
+0.0 & 56000 & 0.00364663 & 0.00238384 & 0.0153191 & 0.0565515 \\
+0.0 & 58000 & 0.00364663 & 0.00238384 & 0.0153191 & 0.0565515 \\
+0.5 & 55000 & 0.00483408 & 0.00495437 & 0.0104059 & 0.0320153 \\
+0.5 & 57000 & 0.00483408 & 0.00495437 & 0.0104059 & 0.0320153 \\
+0.5 & 59000 & 0.00483408 & 0.00495437 & 0.0104059 & 0.0320153 \\
 \hline
 \end{tabular}
 \end{center}
 
-The mass error does converge --- $3.34\e{-3} \to 3.51\e{-4}$ at matched phase,
-roughly halving every two beats --- but the outlet density is still walking down
-by exactly the per-application clamp $5\e{-4}$ every cycle, which is the
-controller saturating rather than settling.
+\noindent The residual differences are in the eighth digit, which is round-off.
+The outlet density has stopped moving at $0.99699$, so the mass controller has
+found its fixed point rather than still walking toward one. An earlier
+$12\,800$-step run --- $0.62$ diffusion times --- was reported in a previous
+draft of this section as \emph{not} converged, with mean and median still rising
+monotonically through six beats. That was accurate, and it is what a run of that
+length looks like; it is superseded rather than corrected.
 
-\paragraph{Phase lag.} Over the final beat the \emph{mean} speed peaks at
-$\phi=0.60$ against a drive peaking at $\phi=0.50$: a lag of $0.10$ of a cycle,
-$36^\circ$, which is the expected sense and order for $\alpha=8$. The $p_{99}$
-tail behaves differently, peaking at $\phi\approx0.05$ --- nearly antiphase --- and
-this is visible in Fig.~\ref{fig:aortapulse}, where at the diastolic trough the
-root has gone pale while the narrow descending aorta is still carrying the
-fastest flow in the vessel. A transit-time explanation does not survive
-arithmetic: at these speeds a fluid particle needs several beats to cross the
-vessel. The honest statement is that the fast tail and the bulk are out of phase
-with each other, that the effect is reproducible across beats, and that it has
-not been explained here. It should not be quoted as a Womersley result.
-$|\uu|_{\max}$ is quoted only for completeness and should not be used at all: it
-is a single staircase-corner voxel, with $p_{99.9}=0.026$ against $p_{100}=0.070$
-in the steady run.
+\paragraph{Phase relationships, and a storage effect that is not Womersley.}
+Over a converged beat the \emph{mean} speed peaks at $\phi=0.60$ against a drive
+peaking at $\phi=0.50$: a lag of $0.10$ of a cycle, $36^\circ$, the expected
+sense and order for $\alpha=8$.
+
+The fast tail does the opposite. Both $p_{99}$ and $|\uu|_{\max}$ peak at
+$\phi=0$ and reach their \emph{minimum} at systole --- nearly antiphase with the
+drive. This is not a transient: it repeats identically across the final three
+beats, and it is visible in Fig.~\ref{fig:aortapulse}, where at the diastolic
+trough the root has gone pale while the descending aorta carries the fastest
+flow in the vessel.
+
+The mechanism is storage, not phase lag. Total mass is not constant over a beat:
+it swings by $\pm2.7\e{-3}$, with its minimum at $\phi=0.25$ and its maximum at
+$\phi=0.70$, accumulating through systole and discharging through diastole. The
+fast tail peaks where that discharge is steepest. A transit-time explanation was
+considered and does not survive arithmetic --- at these speeds a fluid particle
+needs several beats to cross the vessel.
+
+What this data does \emph{not} settle is where the storage lives. Two candidates
+produce the same signature and are not distinguished by the dumps taken here,
+which carry velocity but not density: the lattice fluid's own $O(\mathrm{Ma}^2)$
+compressibility acting as a compliance chamber, or the fixed-pressure outlet
+acting as a reservoir. Either way the effect is numerical rather than
+physiological --- the wall is rigid (\S\ref{sec:aorta}, and the Known
+Limitations) --- so the antiphase should not be quoted as a Womersley result,
+and the fast tail should not be read as a haemodynamic observation.
+$|\uu|_{\max}$ in particular is a single staircase-corner voxel and should not
+be used at all.
 
 \begin{figure}[htbp]
 \centering
@@ -3115,13 +3129,15 @@ volume is cast rather than sliced.}
 \includegraphics[width=0.32\textwidth]{aorta_diastole.png} \\[1mm]
 \small (a) systolic peak, $\phi=0.5$ & \small (b) diastolic trough, $\phi=0$ \\
 \end{tabular}
-\caption{\textbf{Pulsatile inflow}, sixth beat, $\alpha=8.04$, shared colour
-scale. The inset traces \eqref{eq:aortawave} with a marker at the current phase.
-At systole the root carries a visible jet; at diastole it has gone pale while the
-descending aorta still carries the fastest flow, which is the antiphase of the
-$p_{99}$ tail discussed in \S\ref{sec:aortapulse}. The flow is still developing
-at this point --- $0.62$ viscous diffusion times --- so these are not
-periodic-steady fields.}
+\caption{\textbf{Pulsatile inflow}, converged, $\alpha=8.04$, shared colour
+scale, with streamlines traced from the inlet cap through the current field. The
+inset traces \eqref{eq:aortawave} with a marker at the current phase. At systole
+the root drives a visible jet; at the diastolic trough it has gone pale while the
+descending aorta carries the fastest flow in the vessel --- the antiphase fast
+tail of \S\ref{sec:aortapulse}, which is a storage-and-release effect and not a
+Womersley lag. Both panels are from the same beat, at $2.9$ viscous diffusion
+times, where every speed statistic repeats to eight significant figures from beat
+to beat.}
 \label{fig:aortapulse}
 \end{figure}
 

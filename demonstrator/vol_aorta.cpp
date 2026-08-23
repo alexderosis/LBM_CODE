@@ -91,6 +91,7 @@ int main(int argc, char** argv) {
   int nsl = 0, slsteps = 260; double slstep = 0.9, ksl = 2.6;
   bool cbar = false;
   double printpct = -1.0;  // report a speed percentile and exit, for the driver
+  bool printstats = false; // report mean p50 p99 p99.9 max and exit
   int W = 640, H = 900, smooth = 2;
 
   for (int i = 1; i < argc; ++i) {
@@ -117,6 +118,7 @@ int main(int argc, char** argv) {
     else if (a == "-ksl"     && i + 1 < argc) ksl     = std::atof(argv[++i]);
     else if (a == "-cbar") cbar = true;
     else if (a == "-printpct" && i + 1 < argc) printpct = std::atof(argv[++i]);
+    else if (a == "-stats") printstats = true;
   }
   if (volf.empty() || outf.empty()) { std::fprintf(stderr, "need -vol and -out\n"); return 2; }
 
@@ -218,6 +220,18 @@ int main(int argc, char** argv) {
   // The driver needs a shared colour scale across frames, and computing a
   // percentile of 1.2M speeds in pure Python costs about 20 s a frame. Doing it
   // here costs 0.15 s, so the driver shells out to this instead.
+  if (printstats) {
+    std::vector<float> q; q.reserve(N / 4);
+    for (std::size_t i = 0; i < N; ++i) if (mask[i] > 0.5f) q.push_back(spd[i]);
+    std::sort(q.begin(), q.end());
+    double sum = 0; for (float v : q) sum += v;
+    auto pc = [&](double p){ std::size_t k = std::size_t(q.size()*p/100.0);
+                             return double(q[k >= q.size() ? q.size()-1 : k]); };
+    std::printf("%.8g %.8g %.8g %.8g %.8g\n",
+                sum/double(q.size()), pc(50), pc(99), pc(99.9), double(q.back()));
+    return 0;
+  }
+
   if (printpct >= 0.0) {
     std::vector<float> q;
     q.reserve(N / 4);
