@@ -137,21 +137,22 @@ struct Scaling {
 // several hundred megabytes per frame, which makes a time series unusable.
 //------------------------------------------------------------------------------
 static void write_vtk(const std::string& path, const Domain& d, const HeightField& g,
-                      const std::vector<float>& C, int step) {
+                      const std::vector<float>& C, int step,
+                      const char* field = "concentration") {
   std::FILE* f = std::fopen(path.c_str(), "wb");
   if (!f) throw std::runtime_error("cannot write " + path);
   const std::size_t n = g.cells();
   std::fprintf(f, "# vtk DataFile Version 3.0\nurban plume step %d\nBINARY\n"
                   "DATASET STRUCTURED_POINTS\nDIMENSIONS %d %d %d\n"
                   "ORIGIN 0 0 0\nSPACING %g %g %g\nPOINT_DATA %zu\n"
-                  "SCALARS concentration float 1\nLOOKUP_TABLE default\n",
-               step, int(g.nx), int(g.ny), int(g.nz), g.dx, g.dx, g.dx, n);
+                  "SCALARS %s float 1\nLOOKUP_TABLE default\n",
+               step, int(g.nx), int(g.ny), int(g.nz), g.dx, g.dx, g.dx, n, field);
   std::vector<unsigned char> buf(n * 4);
   std::size_t p = 0;
   for (Index z = 0; z < g.nz; ++z)
     for (Index y = 0; y < g.ny; ++y)
       for (Index x = 0; x < g.nx; ++x) {
-        const float v = g.solid(x, y, z) ? -1.f : C[std::size_t(d.id(x, y, z))];
+        const float v = C[std::size_t(d.id(x, y, z))];
         std::uint32_t w; std::memcpy(&w, &v, 4);
         w = __builtin_bswap32(w);                    // legacy VTK is big-endian
         std::memcpy(&buf[p], &w, 4); p += 4;
@@ -168,7 +169,7 @@ int main(int argc, char** argv) {
   double rate = 1.0;
   int src_i = -1, src_j = -1, src_k = -1, src_r = 2;
   bool diffusion_only = false;
-  std::string top = "lid", mode = "prescribed";
+  std::string top = "lid", mode = "prescribed", wind_out;
   double nu_phys = 2.0;              // effective (turbulent) viscosity, m2/s
   std::size_t flow_max = 40000;
   double flow_tol = 1e-6;
@@ -192,6 +193,7 @@ int main(int argc, char** argv) {
     else if (s == "-diffusion-only") diffusion_only = true;
     else if (s == "-top")       top = argv[++a];
     else if (s == "-mode")      mode = argv[++a];
+    else if (s == "-wind-out")  wind_out = argv[++a];
     else if (s == "-visc")      nu_phys = num(nu_phys);
     else if (s == "-flow-steps") flow_max = std::size_t(num(double(flow_max)));
     else if (s == "-flow-tol")  flow_tol = num(flow_tol);
@@ -574,6 +576,23 @@ int main(int argc, char** argv) {
     }
 
     //--------------------------------------------------------------------------
+    // The wind itself, in m/s, in the same format as the concentration frames.
+    // Solid is written as -1 so a renderer masks it the same way.
+    if (!wind_out.empty()) {
+      std::vector<float> W(std::size_t(d.n_padded), 0.f);
+      for (Index z = 0; z < g.nz; ++z)
+        for (Index y = 0; y < g.ny; ++y)
+          for (Index x = 0; x < g.nx; ++x) {
+            const Index n = d.id(x, y, z);
+            W[std::size_t(n)] = g.solid(x, y, z) ? -1.f : float(
+                std::sqrt(double(h_ux(n))*double(h_ux(n)) +
+                          double(h_uy(n))*double(h_uy(n)) +
+                          double(h_uz(n))*double(h_uz(n))) * g.dx / sc.dt);
+          }
+      write_vtk(wind_out, d, g, W, 0, "speed");
+      std::printf("  wind written to %s (m/s)\n", wind_out.c_str());
+    }
+
     if (src_i < 0) { src_i = g.nx / 2; src_j = g.ny / 2; src_k = 1; }
     while (src_k < g.nz - 1 && g.solid(src_i, src_j, src_k)) ++src_k;   // out of any building
     Index nsrc = 0;
@@ -629,9 +648,9 @@ int main(int argc, char** argv) {
           for (Index y = 0; y < g.ny; ++y)
             for (Index x = 0; x < g.nx; ++x) {
               const Index n = d.id(x, y, z);
-              const double c = g.solid(x, y, z) ? 0.0 : double(h(n));
-              mass += c;
-              cmin = std::min(cmin, c); cmax = std::max(cmax, c);
+              const double c = g.solid(x, y, z) ? -1.0 : double(h(n));
+              mass += g.solid(x, y, z) ? 0.0 : c;
+              if (!g.solid(x, y, z)) { cmin = std::min(cmin, c); cmax = std::max(cmax, c); }
               Cout[std::size_t(n)] = float(c);
             }
         const double now = sc.seconds(t);

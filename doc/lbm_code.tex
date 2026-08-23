@@ -3494,6 +3494,68 @@ Figure~\ref{fig:urbanplume} initially tested \texttt{v < 0} for the building
 mask, which is how it came to paint three million undershooting cells as
 buildings and hide most of the city.
 
+\subsection{Solving the wind}
+\label{sec:urbansolved}
+
+The wind can instead be solved: D3Q27 TRT Navier--Stokes on the same geometry,
+sharing the Domain, $\Delta x$ and $\Delta t$ with the scalar, so the fluid's
+lattice velocity \emph{is} the scalar's and the two couple with no conversion.
+TRT rather than BGK because the effective viscosity puts $\tau^+$ within a few
+thousandths of $1/2$, where BGK is unusable and TRT's free antisymmetric rate is
+exactly the lever required; $\Lambda = 3/16$ additionally places the
+bounce-back wall halfway, so a voxelised building is the size it looks. Starting
+from the undisturbed profile rather than from rest leaves only the wakes to
+develop, and the solve converges to a relative change of $2\times10^{-7}$ in
+$7000$ steps.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.78\textwidth]{fig/urban_wind_compare.png}
+\caption{Vertical section through a building, wind speed, both panels on the
+same scale. \emph{Top}: the prescribed logarithmic profile --- flat horizontal
+layers, unaware that the building is there. \emph{Bottom}: the solved field ---
+upstream stagnation, acceleration over the roof, and a slow wake in the lee
+recovering over roughly twenty cells. Along the centreline at mid-building
+height the prescribed field is $4.34\,\mathrm{m\,s^{-1}}$ everywhere, while
+the solved one falls to $1.37$ approaching the building and $0.30$ behind it.
+The bright stripe at the right edge is the outlet-corner artefact discussed
+below, left visible rather than cropped. The colour scale is the $98$th
+percentile, not the maximum: that artefact reaches $29\,\mathrm{m\,s^{-1}}$ and
+scaling to it renders every physical feature in the bottom quarter of the ramp
+--- the same trap as the aorta volume render, where $p_{100}$ was $2.7$ times
+$p_{99.9}$.}
+\label{fig:urbanwind}
+\end{figure}
+
+\paragraph{The interior is right, and is the point.} Three cells clear of every
+face, the divergence falls from $\mathrm{RMS} = 1.27\times10^{-3}$ prescribed to
+$2.12\times10^{-4}$ solved --- a factor of six --- and the peak speed is
+$8.80\,\mathrm{m\,s^{-1}}$ against a $7.74\,\mathrm{m\,s^{-1}}$ free stream, a
+$14\%$ speed-up over the building. That is a result the prescribed profile
+cannot produce at all, and the divergence drop is the spurious source of
+\S\ref{sec:urbanstab} shrinking, which is what drove both the concentration
+error and the stability floor.
+
+\paragraph{The domain edges are not right.} Where the pressure outlet meets the
+velocity-prescribed lateral and top faces the corner is over-determined, and a
+jet forms along it: $31.6\,\mathrm{m\,s^{-1}}$ and
+$\nabla\!\cdot\!\uu = 9.5\times10^{-2}$, against $8.8$ and $7.0\times10^{-3}$
+in the interior. This is why the global maxima look worse than the prescribed
+field's while every interior statistic is better, and it is the reason the
+diagnostics now report interior-only figures and say whether the worst
+divergence sits on a domain face --- without which the two were not separable.
+
+Two remedies were tried. Giving the edges the free-stream profile removed the
+sixty-eight inert outflow nodes, whose donor lay on an adjoining wall, but did
+\emph{not} remove the jet, which locates the cause in the mixed condition
+itself rather than in the donor lookup. The identified fix is periodic lateral
+boundaries, the standard atmospheric arrangement, which deletes two of the four
+offending faces outright. It is not done here because the Domain is shared with
+the scalar, for which periodic laterals mean a plume leaving one side re-enters
+the other --- a modelling decision rather than a bug fix. Until then the solved
+field is usable away from the boundary, a plume must not be allowed to reach the
+outlet edges, and the prescribed wind remains the default.
+
 \subsection{The top boundary is a modelling choice}
 
 A horizontal wind has $u_z = 0$ at the top face, so a zero-gradient condition
