@@ -97,6 +97,23 @@ struct Op { const char* name; std::vector<double> nu; double drift; };
 
 }  // namespace
 
+//------------------------------------------------------------------------------
+// Operator tags at NAMESPACE scope, deliberately not inside main().
+//
+// These are template arguments for sweep(), whose body contains a
+// KOKKOS_LAMBDA, and nvcc rejects "a type local to a function" in the template
+// arguments of an extended lambda. Declaring them here costs nothing and is the
+// whole fix; the Threads backend accepts either form, which is why they were
+// local to begin with.
+//------------------------------------------------------------------------------
+struct TB { using type = BGK<D3Q27, SecondOrderEquilibrium<D3Q27>, NoForcing, ShiftedPopulations>; };
+struct TT { using type = TRT<D3Q27, SecondOrderEquilibrium<D3Q27>, NoForcing, ShiftedPopulations>; };
+struct TM { using type = MomentCollision<D3Q27, NoForcing, ShiftedPopulations, false>; };
+struct TC { using type = MomentCollision<D3Q27, NoForcing, ShiftedPopulations, true>; };
+struct QB { using type = BGK<D3Q19, SecondOrderEquilibrium<D3Q19>, NoForcing, ShiftedPopulations>; };
+struct QM { using type = MomentCollision<D3Q19, NoForcing, ShiftedPopulations, false>; };
+struct QC { using type = MomentCollision<D3Q19, NoForcing, ShiftedPopulations, true>; };
+
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   int status = 0;
@@ -129,14 +146,6 @@ int main(int argc, char** argv) {
       std::printf("  %-11.2e\n", o.drift);
       return o;
     };
-
-    struct TB { using type = BGK<D3Q27, SecondOrderEquilibrium<D3Q27>, NoForcing, ShiftedPopulations>; };
-    struct TT { using type = TRT<D3Q27, SecondOrderEquilibrium<D3Q27>, NoForcing, ShiftedPopulations>; };
-    struct TM { using type = MomentCollision<D3Q27, NoForcing, ShiftedPopulations, false>; };
-    struct TC { using type = MomentCollision<D3Q27, NoForcing, ShiftedPopulations, true>; };
-    struct QB { using type = BGK<D3Q19, SecondOrderEquilibrium<D3Q19>, NoForcing, ShiftedPopulations>; };
-    struct QM { using type = MomentCollision<D3Q19, NoForcing, ShiftedPopulations, false>; };
-    struct QC { using type = MomentCollision<D3Q19, NoForcing, ShiftedPopulations, true>; };
 
     auto plain = [](auto& c, Real w) { c.omega = w; };
     auto trt   = [](auto& c, Real w) {
