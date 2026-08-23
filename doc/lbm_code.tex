@@ -3397,6 +3397,59 @@ is what is conserved. The condition itself was measured in \S\ref{sec:plume}
 against a case with no shear and an analytic answer, where it holds the flux to
 $0.038\%$ to the last interior cell.
 
+\subsection{A stability limit that does not announce itself}
+\label{sec:urbanstab}
+
+The first attempt at the full city ran to completion, reported no error, and
+wrote four hundred megabytes of nonsense. Mass in the domain grew from
+$5.6\times10^{1}$ at $t=60$~s to $1.2\times10^{8}$ at $t=90$~s and thereafter by
+roughly nine orders of magnitude per frame, reaching $10^{70}$ --- without ever
+producing a NaN, which is why the finiteness check in the output loop passed
+every time.
+
+The mechanism is the spurious term of the previous section read in the other
+direction. Since
+$\partial_t C \supset -C\,\nabla\!\cdot\!\uu$, the scalar \emph{grows}
+exponentially wherever the divergence is negative, at rate
+$|\nabla\!\cdot\!\uu|$. What opposes it is diffusion, which damps a
+cell-scale blob at approximately $D_{\rm lat}\pi^2$. Writing the lattice
+diffusivity out,
+\begin{equation}
+  D_{\rm lat} = \frac{D\,\Delta t}{\Delta x^2}
+              = \frac{D\,u_{\rm lat}^{\max}}{u_{\rm peak}\,\Delta x},
+  \label{eq:dlat}
+\end{equation}
+which contains no $\Delta t$: \textbf{shortening the time step buys no margin
+at all}, because $\Delta t$ cancels between the diffusivity and the velocity
+scaling. Only a larger diffusivity, a slower wind or a finer grid helps.
+
+\begin{center}
+\begin{tabular}{lccccl}
+\toprule
+case & $\Delta x$ & $D_{\rm lat}$ & $D_{\rm lat}\pi^2$ &
+$\max|\nabla\!\cdot\!\uu|$ & margin \\
+\midrule
+synthetic          & 2 m & $0.0162$ & $0.159$ & $0.0187$ & $8.5\times$ stable \\
+Manchester, $D=5$  & 5 m & $0.0042$ & $0.042$ & $0.0232$ & $1.8\times$ diverged \\
+Manchester, $D=20$ & 5 m & $0.0168$ & $0.166$ & $0.0232$ & $7.2\times$ stable \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The margin is not a theorem; it is those measured points. What the
+code now does is report it at setup and warn below $4\times$, and --- the part
+that actually matters --- test for divergence properly during the run. Mass in
+the domain cannot exceed what has been injected by any meaningful factor, so
+that, not finiteness, is the test. The failing configuration now stops at
+$t=80$~s with its cause named instead of running for fourteen minutes.
+
+This is worth stating plainly as a limitation of the prescribed wind rather than
+a tuning inconvenience. A larger $D$ is defensible ---
+it is a calibrated stand-in for unresolved mixing, not a measured constant, and
+$20\,\mathrm{m^2s^{-1}}$ at $5$~m resolution in a city is not extravagant ---
+but the reason it is \emph{needed} is that the wind is not divergence-free. A
+solved wind removes the spurious source altogether, and with it this constraint.
+
 \subsection{The top boundary is a modelling choice}
 
 A horizontal wind has $u_z = 0$ at the top face, so a zero-gradient condition

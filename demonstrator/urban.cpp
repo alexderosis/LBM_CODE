@@ -292,6 +292,7 @@ int main(int argc, char** argv) {
 
     //--------------------------------------------------------------------------
     // div(u): the diagnostic that CAN see a bad wind, unlike a mass budget.
+    double max_div = 0.0;
     {
       double s2 = 0, s2w = 0, mx = 0, mxw = 0;
       long long nn = 0, nw = 0;
@@ -315,6 +316,38 @@ int main(int argc, char** argv) {
                   nw ? std::sqrt(s2w / double(nw)) : 0.0, mxw, nw);
       std::printf("          a divergence-free field gives 0. This is the error the\n");
       std::printf("          wind injects into CONCENTRATION, and no mass budget sees it.\n");
+      max_div = mx;
+    }
+
+    //--------------------------------------------------------------------------
+    // STABILITY MARGIN, and why it is worth a line of output.
+    //
+    // The spurious term is dC/dt = -C div(u), so wherever the divergence is
+    // negative the scalar GROWS at rate |div u|. What opposes that is diffusion,
+    // which damps a cell-scale blob at roughly D_lat pi^2. When the two are
+    // comparable the run does not fail, it EXPONENTIATES -- slowly enough to
+    // look plausible for a few thousand steps and then by nine orders of
+    // magnitude per frame.
+    //
+    // The margin is not a theorem, it is two measured points: a synthetic case
+    // at 8.5x ran stably to steady state, and Manchester at 1.8x diverged after
+    // about four thousand steps. Note that D_lat = D_phys u_lat_max / (u_peak
+    // dx) has no dt in it, so shortening the time step does NOT buy margin --
+    // only a larger diffusivity, a slower wind or a finer grid does.
+    if (!diffusion_only && max_div > 0) {
+      const double margin = sc.D_lat() * M_PI * M_PI / max_div;
+      std::printf("\n  stability: D_lat %.5f, damping %.4f vs max|div u| %.4f  ->  margin %.1fx\n",
+                  sc.D_lat(), sc.D_lat() * M_PI * M_PI, max_div, margin);
+      if (margin < 4.0) {
+        std::printf("  *** MARGIN IS LOW. The spurious C div(u) source is close to\n"
+                    "  *** outrunning diffusion, and this run may exponentiate rather\n"
+                    "  *** than diverge visibly. Raise -diff (the turbulent diffusivity\n"
+                    "  *** is a calibrated stand-in, not a measured constant) or use a\n"
+                    "  *** solved, divergence-free wind. A shorter time step will NOT\n"
+                    "  *** help: D_lat does not depend on dt.\n");
+        std::printf("  *** For reference, -diff %.0f would give a margin of about 4x.\n",
+                    std::ceil(D_phys * 4.0 / margin));
+      }
     }
 
     //--------------------------------------------------------------------------
@@ -372,7 +405,17 @@ int main(int argc, char** argv) {
             }
         const double now = sc.seconds(t);
         const double dM = (now > prev_t) ? (mass - prev_mass) / (now - prev_t) : 0.0;
-        if (!std::isfinite(mass)) { std::printf("  DIVERGED at t = %.1f s\n", now); rc = 1; break; }
+        // Finiteness is NOT a sufficient check. An exponentiating run stays
+        // perfectly finite for a long time -- the Manchester case that motivated
+        // this reached 1e70 without ever producing a NaN, and ran to completion
+        // writing 400 MB of garbage. Mass in the domain cannot exceed what was
+        // injected by any meaningful factor, so that is the real test.
+        if (!std::isfinite(mass) || (injected > 0 && mass > 2.0 * injected)) {
+          std::printf("  DIVERGED at t = %.1f s: %.4e in the domain against %.4e injected\n",
+                      now, mass, injected);
+          std::printf("  Check the stability margin reported above.\n");
+          rc = 1; break;
+        }
         std::printf("  %9.1f %12.4e %12.4e %10.1f%% %11.3e\n",
                     now, mass, injected, injected > 0 ? 100.0 * mass / injected : 0.0, dM);
         std::fflush(stdout);
