@@ -64,12 +64,15 @@
 //  flux to 0.038% all the way to the last interior cell.
 //==============================================================================
 #include "collision/ScalarBGK.hpp"
+#include "collision/TRT.hpp"
 #include "core/Types.hpp"
 #include "io/HeightField.hpp"
 #include "memory/EsotericPull.hpp"
+#include "solver/FluidSolver.hpp"
 #include "solver/ScalarSolver.hpp"
 
 #include <chrono>
+#include <memory>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -82,6 +85,14 @@ using namespace lbm;
 using L      = D3Q7;
 using Coll   = ScalarBGK<L>;
 using Solver = ScalarSolver<L, EsotericPull<L>, Coll>;
+
+// The wind, when it is solved rather than prescribed. D3Q27 because D3Q19 is
+// out of scope for validation in this code, and TRT rather than BGK because the
+// effective viscosity here puts tau within a few thousandths of 1/2, where BGK
+// is not usable and TRT's free antisymmetric rate is exactly the lever needed.
+using FL   = D3Q27;
+using FOp  = TRT<FL>;
+using Flow = FluidSolver<FL, EsotericPull<FL>, FOp>;
 
 //------------------------------------------------------------------------------
 // Neutral-stability logarithmic surface layer.
@@ -157,7 +168,10 @@ int main(int argc, char** argv) {
   double rate = 1.0;
   int src_i = -1, src_j = -1, src_k = -1, src_r = 2;
   bool diffusion_only = false;
-  std::string top = "lid";
+  std::string top = "lid", mode = "prescribed";
+  double nu_phys = 2.0;              // effective (turbulent) viscosity, m2/s
+  std::size_t flow_max = 40000;
+  double flow_tol = 1e-6;
 
   for (int a = 1; a < argc; ++a) {
     const std::string s = argv[a];
@@ -177,6 +191,10 @@ int main(int argc, char** argv) {
     else if (s == "-src-r")     src_r = int(num(src_r));
     else if (s == "-diffusion-only") diffusion_only = true;
     else if (s == "-top")       top = argv[++a];
+    else if (s == "-mode")      mode = argv[++a];
+    else if (s == "-visc")      nu_phys = num(nu_phys);
+    else if (s == "-flow-steps") flow_max = std::size_t(num(double(flow_max)));
+    else if (s == "-flow-tol")  flow_tol = num(flow_tol);
     else { std::printf("unknown argument %s\n", s.c_str()); return 2; }
   }
 
@@ -291,11 +309,188 @@ int main(int argc, char** argv) {
     s.set_velocity(ux, uy, uz);
 
     //--------------------------------------------------------------------------
+    // SOLVED WIND. The prescribed profile above becomes the far-field boundary
+    // condition and the initial state; the interior is solved, so the flow
+    // separates behind buildings and channels along streets instead of passing
+    // through them as if they were porous.
+    //
+    // The payoff is not realism for its own sake -- it is that a solved field is
+    // divergence-free to round-off, which removes the spurious C div(u) source
+    // entirely, and with it both the concentration error reported above and the
+    // stability floor on the diffusivity.
+    //
+    // Same Domain, same dx, same dt, so the fluid's lattice velocity IS the
+    // scalar's lattice velocity and the two couple with no conversion. That is
+    // the module composition the whole design is for.
+    //
+    // *** INCOMPLETE. READ THIS BEFORE USING -mode solved. ***
+    //
+    // The interior is right and is the point: three cells clear of every face,
+    // div u falls from RMS 1.27e-3 (prescribed) to 2.12e-4, and the peak speed
+    // is 8.8 m/s against a 7.7 m/s free stream -- a 14% speed-up over the
+    // building, which is the physical result the prescribed profile cannot
+    // produce at all.
+    //
+    // The domain EDGES are not right. Where the pressure outlet meets the
+    // velocity-prescribed lateral and top faces, the corner is over-determined,
+    // and a jet forms along it: 31.6 m/s and div u of 9.5e-2, against 8.8 m/s
+    // and 7.0e-3 in the interior. Giving those edges the free stream (below)
+    // removed the inert-outflow-node warning but did NOT remove the jet, so the
+    // cause is the mixed condition itself and not the donor lookup.
+    //
+    // The identified fix is periodic lateral boundaries -- the standard
+    // atmospheric setup, which deletes two of the four offending faces outright
+    // and leaves only the outlet/top edge. It is not done here because the
+    // Domain is shared with the scalar, for which periodic laterals mean a
+    // plume leaving one side re-enters the other, and that is a modelling
+    // decision rather than a bug fix.
+    //
+    // Until then: the field is usable away from the boundary, the plume must
+    // not be allowed to reach the outlet edges, and -mode prescribed remains
+    // the default.
+    std::unique_ptr<Flow> flow;
+    if (mode == "solved") {
+      if (diffusion_only) throw std::runtime_error("-mode solved and -diffusion-only conflict");
+      const double nu_lat = nu_phys * sc.dt / (g.dx * g.dx);
+      FOp fcoll;
+      fcoll.omega_p = FOp::omega_from_viscosity(Real(nu_lat));
+      // The magic parameter is the reason this is TRT. At nu_lat this small,
+      // tau_plus sits a few thousandths above 1/2, where BGK is unusable;
+      // Lambda = 3/16 additionally puts the bounce-back wall exactly halfway,
+      // which is what makes a voxelised building the size it looks.
+      fcoll.omega_m = FOp::omega_minus_for(fcoll.omega_p, FOp::magic_3_16);
+      std::printf("\n  SOLVING the wind: D3Q27 TRT, nu %.2f m2/s -> nu_lat %.3e,"
+                  " tau+ %.6f, Lambda 3/16\n",
+                  nu_phys, nu_lat, 1.0 / double(fcoll.omega_p));
+
+      flow = std::make_unique<Flow>(d, fcoll);
+      flow->set_geometry([&](Index x, Index y, Index z) -> CellType {
+        if (g.solid(x, y, z)) return Solid;
+        // z = 0 is deliberately NOT a wall here, for the same reason as in the
+        // scalar: Esoteric Pull already bounces it off the layer below, putting
+        // the no-slip ground at z = 0 exactly.
+        const bool face = (x == 0 || x == g.nx - 1 || y == 0 || y == g.ny - 1 ||
+                           z == g.nz - 1);
+        return face ? RegWall : Fluid;
+      });
+
+      using WS = Flow::WallSpec;
+      flow->set_regularized_walls([&](Index x, Index y, Index z) -> WS {
+        if (g.solid(x, y, z)) return WS{};
+        const double ul = sc.to_u_lat(wind.speed((double(z) + 0.5) * g.dx));
+        const Real vx = Real(ul * ex), vy = Real(ul * ey), vz = Real(0);
+        // A face is an inlet where the wind enters it, an outlet where it
+        // leaves, and free-stream where the flow runs parallel -- prescribing
+        // the undisturbed profile there rather than letting the boundary drift.
+        auto face = [&](double inward, std::uint8_t code) -> WS {
+          if (inward < -1e-9) return WS{NrmOutFree, Real(0), Real(0), Real(0), Real(1)};
+          return WS{code, vx, vy, vz, Real(1)};
+        };
+        // EDGES AND CORNERS GET THE FREE STREAM, NOT OUTFLOW. An outflow node
+        // takes its distribution from an interior donor, and FluidSolver
+        // requires that donor to be a Fluid cell -- but the cell inward of an
+        // outlet EDGE lies on the adjoining lateral face, which is a wall. Such
+        // nodes are reported inert and behave as walls, and the resulting
+        // partial blockage of the outlet plane drove a corner jet: 28.7 m/s
+        // against a 7.7 m/s free stream, with div u of 8.9e-2 concentrated
+        // there, while the interior was meanwhile perfectly well behaved at
+        // 9.1 m/s and 7.3e-3. Prescribing the undisturbed profile on the edges
+        // is both defined and defensible -- they are far field by construction.
+        const int faces = int(x == 0) + int(x == g.nx - 1) + int(y == 0) +
+                          int(y == g.ny - 1) + int(z == g.nz - 1);
+        if (faces > 1) return WS{NrmCorner, vx, vy, vz, Real(1)};
+        if (x == 0)         return face( ex, NrmXm);
+        if (x == g.nx - 1)  return face(-ex, NrmXp);
+        if (y == 0)         return face( ey, NrmYm);
+        if (y == g.ny - 1)  return face(-ey, NrmYp);
+        if (z == g.nz - 1)  return face(Real(0), NrmZp);
+        return WS{};
+      });
+      // The finite-difference corner stress walks two nodes off each wall node.
+      // In a city those neighbours are frequently inside a building, whose
+      // populations Esoteric Pull never updates, so the stencil would read
+      // stale memory -- the same defect the aorta hit.
+      flow->set_fd_corners(false);
+
+      // Start from the undisturbed profile rather than from rest: only the
+      // wakes then have to develop, instead of the whole boundary layer being
+      // advected in from the inlet over several flow-through times.
+      View1D<Real> prof("prof", g.nz);
+      auto h_prof = Kokkos::create_mirror_view(prof);
+      for (Index z = 0; z < g.nz; ++z)
+        h_prof(z) = Real(sc.to_u_lat(wind.speed((double(z) + 0.5) * g.dx)));
+      Kokkos::deep_copy(prof, h_prof);
+      const Domain fd = d;
+      const Real fex = Real(ex), fey = Real(ey);
+      flow->initialize_field(KOKKOS_LAMBDA(Index n) {
+        Index px, py, pz; fd.coords(n, px, py, pz);
+        const Index z = pz - fd.hz;
+        const Real u = (z >= 0 && z < fd.nz) ? prof(z) : Real(0);
+        return FlowState{Real(1), u * fex, u * fey, Real(0)};
+      });
+
+      // Convergence on the mean speed. A residual on a single probe point would
+      // settle long before the wakes do.
+      const std::size_t probe = 500;
+      double prev = 0.0;
+      std::size_t used = 0;
+      std::printf("  %10s %16s %14s\n", "steps", "mean |u|", "rel change");
+      std::printf("  %s\n", std::string(44, '-').c_str());
+      for (std::size_t t = 0; t < flow_max; t += probe) {
+        for (std::size_t k = 0; k < probe; ++k) flow->step();
+        used += probe;
+        flow->compute_macroscopic();
+        auto a = Kokkos::create_mirror_view_and_copy(HostSpace{}, flow->ux());
+        auto b = Kokkos::create_mirror_view_and_copy(HostSpace{}, flow->uy());
+        auto c = Kokkos::create_mirror_view_and_copy(HostSpace{}, flow->uz());
+        double sum = 0.0; long long cnt = 0;
+        for (Index z = 0; z < g.nz; ++z)
+          for (Index y = 0; y < g.ny; ++y)
+            for (Index x = 0; x < g.nx; ++x) {
+              if (g.solid(x, y, z)) continue;
+              const Index n = d.id(x, y, z);
+              sum += std::sqrt(double(a(n))*double(a(n)) + double(b(n))*double(b(n)) +
+                               double(c(n))*double(c(n)));
+              ++cnt;
+            }
+        const double cur = cnt ? sum / double(cnt) : 0.0;
+        const double rel = (prev > 0) ? std::abs(cur - prev) / cur : 1.0;
+        std::printf("  %10zu %16.8e %14.3e\n", used, cur, rel);
+        std::fflush(stdout);
+        if (!std::isfinite(cur)) throw std::runtime_error("the wind solve diverged");
+        if (prev > 0 && rel < flow_tol) break;
+        prev = cur;
+      }
+
+      // Hand the solved field to the scalar, and re-take the host mirrors so the
+      // divergence diagnostic below measures the field actually being used.
+      s.set_velocity(flow->ux(), flow->uy(), flow->uz());
+      Kokkos::deep_copy(h_ux, flow->ux());
+      Kokkos::deep_copy(h_uy, flow->uy());
+      Kokkos::deep_copy(h_uz, flow->uz());
+      for (Index z = 0; z < g.nz; ++z)
+        for (Index y = 0; y < g.ny; ++y)
+          for (Index x = 0; x < g.nx; ++x)
+            if (g.solid(x, y, z)) {
+              const Index n = d.id(x, y, z);
+              h_ux(n) = 0; h_uy(n) = 0; h_uz(n) = 0;
+            }
+      double umax = 0;
+      for (Index n = 0; n < d.n_padded; ++n)
+        umax = std::max(umax, std::sqrt(double(h_ux(n))*double(h_ux(n)) +
+                                        double(h_uy(n))*double(h_uy(n)) +
+                                        double(h_uz(n))*double(h_uz(n))));
+      std::printf("  solved: peak |u| %.4f lattice = %.2f m/s\n",
+                  umax, umax * g.dx / sc.dt);
+    }
+
+    //--------------------------------------------------------------------------
     // div(u): the diagnostic that CAN see a bad wind, unlike a mass budget.
     double max_div = 0.0;
     {
       double s2 = 0, s2w = 0, mx = 0, mxw = 0;
       long long nn = 0, nw = 0;
+      Index mxi = 0, mxj = 0, mxk = 0;
       for (Index z = 1; z < g.nz - 1; ++z)
         for (Index y = 1; y < g.ny - 1; ++y)
           for (Index x = 1; x < g.nx - 1; ++x) {
@@ -304,7 +499,8 @@ int main(int argc, char** argv) {
                 0.5 * (double(h_ux(d.id(x+1,y,z))) - double(h_ux(d.id(x-1,y,z)))) +
                 0.5 * (double(h_uy(d.id(x,y+1,z))) - double(h_uy(d.id(x,y-1,z)))) +
                 0.5 * (double(h_uz(d.id(x,y,z+1))) - double(h_uz(d.id(x,y,z-1))));
-            s2 += dv * dv; ++nn; mx = std::max(mx, std::abs(dv));
+            s2 += dv * dv; ++nn;
+            if (std::abs(dv) > mx) { mx = std::abs(dv); mxi = x; mxj = y; mxk = z; }
             const bool wall = g.solid(x+1,y,z) || g.solid(x-1,y,z) ||
                               g.solid(x,y+1,z) || g.solid(x,y-1,z) ||
                               g.solid(x,y,z+1) || g.solid(x,y,z-1);
@@ -317,6 +513,33 @@ int main(int argc, char** argv) {
       std::printf("          a divergence-free field gives 0. This is the error the\n");
       std::printf("          wind injects into CONCENTRATION, and no mass budget sees it.\n");
       max_div = mx;
+      // Where the worst divergence sits matters more than its value: at a
+      // domain face it is a boundary-condition artefact, in the interior it is
+      // the wind model.
+      std::printf("          worst at (%d,%d,%d)%s\n", int(mxi), int(mxj), int(mxk),
+                  (mxi <= 1 || mxi >= g.nx - 2 || mxj <= 1 || mxj >= g.ny - 2 ||
+                   mxk >= g.nz - 2) ? "  <- ON A DOMAIN FACE" : "  (interior)");
+      // Interior-only statistics, three cells clear of every face, so a
+      // boundary artefact cannot masquerade as a bulk error.
+      double is2 = 0, imx = 0, iu = 0; long long inn = 0;
+      for (Index z = 1; z < g.nz - 3; ++z)
+        for (Index y = 3; y < g.ny - 3; ++y)
+          for (Index x = 3; x < g.nx - 3; ++x) {
+            if (g.solid(x, y, z)) continue;
+            const double dv =
+                0.5 * (double(h_ux(d.id(x+1,y,z))) - double(h_ux(d.id(x-1,y,z)))) +
+                0.5 * (double(h_uy(d.id(x,y+1,z))) - double(h_uy(d.id(x,y-1,z)))) +
+                0.5 * (double(h_uz(d.id(x,y,z+1))) - double(h_uz(d.id(x,y,z-1))));
+            is2 += dv * dv; ++inn; imx = std::max(imx, std::abs(dv));
+            const Index nn2 = d.id(x, y, z);
+            iu = std::max(iu, std::sqrt(double(h_ux(nn2))*double(h_ux(nn2)) +
+                                        double(h_uy(nn2))*double(h_uy(nn2)) +
+                                        double(h_uz(nn2))*double(h_uz(nn2))));
+          }
+      std::printf("  div u:  RMS %.3e (max %.3e) over %lld cells 3 clear of every face\n",
+                  inn ? std::sqrt(is2 / double(inn)) : 0.0, imx, inn);
+      std::printf("          peak |u| there %.4f lattice = %.2f m/s\n",
+                  iu, iu * g.dx / sc.dt);
     }
 
     //--------------------------------------------------------------------------
