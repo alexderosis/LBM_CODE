@@ -77,6 +77,13 @@ Four things worth knowing before starting:
 
 There is no Metal backend in Kokkos, so an Apple GPU is not a target.
 
+`colab_gpu_test.ipynb` in the repository root does all of the above on a free
+Colab GPU: detects the device and maps its compute capability to a
+`Kokkos_ARCH_*` macro, installs Kokkos (optionally cached to Drive so a
+disconnect does not cost the whole build), builds FP32, runs `ctest` on the
+device, then runs 3D Taylor-Green on both backends and compares the energy and
+enstrophy decay. Roughly 25-40 minutes, nearly all of it compiling.
+
 ## Layout
 
 | path | contents |
