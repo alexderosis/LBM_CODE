@@ -8,16 +8,20 @@ same, so the two can be compared.
 **Status: core complete, built and validated on a Tesla T4. Physics coverage is
 a fraction of the parent's.** Read the scope table before assuming anything works.
 
-## Measured, on a Tesla T4 (sm_75, CUDA 12.8, FP32, 64^3)
+## Measured, on a Tesla T4 (sm_75, CUDA 12.8, FP32)
 
-| operator | MLUPS | GB/s | mass drift |
-|---|---|---|---|
-| BGK | 943.1 | 203.7 | 0.000e+00 |
-| central moments | 933.0 | 201.5 | 0.000e+00 |
+| operator | grid | MLUPS | GB/s | mass drift |
+|---|---|---|---|---|
+| BGK | 64^3 | 943.1 | 203.7 | 0.000e+00 |
+| central moments | 64^3 | 933.0 | 201.5 | 0.000e+00 |
+| BGK | 128^3 | 980.3 | 211.8 | 0.000e+00 |
+| central moments | 128^3 | 973.3 | 210.2 | 0.000e+00 |
 
-Central moments runs at **99% of BGK speed**, and 203.7 GB/s is **64% of the
+Central moments runs at **99% of BGK speed**, and 211.8 GB/s is **66% of the
 T4's 320 GB/s peak** — i.e. the kernel is memory-bound, which is what a
-correctly written LBM kernel should be. This matters beyond this code: the
+correctly written LBM kernel should be. Going from 64^3 to 128^3 buys only ~4%,
+which says 64^3 already came close to saturating this card; on a larger device
+the useful sizes start well above that. This matters beyond this code: the
 parent Kokkos implementation could not complete two central-moment
 configurations at the same size in seventeen minutes, and `-Xptxas -v` ruled out
 register spilling as the cause. The same algorithm at BGK speed here shows the
@@ -34,6 +38,38 @@ parent's committed FP64 reference `../results/E_tgv3d/tgv3d_re1600_d3q27_cm.dat`
 Enstrophy peak 2.1292 at t\*=1.000 against the parent's 2.1305 at t\*=1.000.
 Two independent implementations, FP32 against FP64 — this is the agreement
 FP32 round-off alone would predict. 32,000 steps in 9.12 s (920 MLUPS).
+
+**And it converges with resolution.** The same case at 128^3 (tau = 0.504800,
+64,000 steps in 138 s, 972.8 MLUPS):
+
+| | 64^3 | 128^3 |
+|---|---|---|
+| enstrophy peak | 2.1292 | 2.2746 |
+| E/E0 at t\*=10 | 0.014462 | 0.014929 |
+
+The peak rises 6.8% and less energy is lost, both being the under-resolution
+signature lifting: at 64^3 the cascade reaches the grid scale early and
+dissipates energy prematurely, damping the vorticity peak. 128^3 is still far
+short of the 256^3-512^3 the published DNS uses, so this is the right trend
+rather than agreement with the benchmark.
+
+## Running on another card
+
+`-DLBM_GPU_ARCH=` takes the compute capability without the dot: 70 Volta,
+75 Turing (T4), 80 A100, 86 RTX 30xx, 89 L4 / RTX 40xx, **90 Hopper (H100,
+H200)**. That flag is normally the only thing to change.
+
+Two notes for large or modern devices. **Size the problem to the card** — 512^3
+is 134M nodes and 14.5 GB in FP32, which is nothing on an H200's 141 GB but is
+where such a card starts to be used properly; the 128^3 figures above would
+badly understate it. And **FP64 is worth building separately** (`-DLBM_DOUBLE=ON`)
+on parts with full-rate FP64, where it allows a direct comparison against the
+parent's FP64 references rather than the 5e-4 agreement FP32 gives. Strip
+`--use_fast_math` from CMakeLists.txt if strict IEEE is wanted for that.
+
+`src/bench.cu` reports peak bandwidth via `cudaDeviceProp::memoryClockRate`,
+deprecated in CUDA 12 and possibly absent in 13. If it will not compile, delete
+that one `printf`; nothing else uses it.
 
 ## Why it is written this way
 
