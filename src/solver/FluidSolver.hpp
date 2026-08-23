@@ -582,6 +582,14 @@ class FluidSolver {
         // u_w -/+ F/(2 rho) (each helps one flow and harms the other), applying
         // no force at the wall node, and the scaffold-symmetrisation argument.
         // No correction is applied rather than one fitted to a single flow.
+        // NVCC: an extended __host__ __device__ lambda cannot FIRST capture a
+        // variable inside an `if constexpr` body, and `coll` would first be
+        // named in the branch below. Unlike the StoreMacro case in run_step this
+        // one CANNOT become a plain `if`: coll.forcing does not exist when the
+        // operator carries no forcing, so the branch has to be discarded at
+        // compile time. Naming `coll` here instead forces the capture to happen
+        // outside the branch, which is all nvcc wants.
+        [[maybe_unused]] const auto& coll_captured_outside_constexpr_if = coll;
         Real Fv[3] = {Real(0), Real(0), Real(0)};
         if constexpr (has_forcing<Collision>) coll.forcing.at(n, Fv);
         Real ur[3] = {uw[0], uw[1], uw[2]};
