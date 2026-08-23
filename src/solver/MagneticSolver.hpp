@@ -191,7 +191,20 @@ class MagneticSolver {
     return e;
   }
 
- private:
+ public:
+  //----------------------------------------------------------------------------
+  // NVCC CONSTRAINT, NOT A DESIGN CHOICE. Everything from here to the data
+  // members is an implementation detail and morally private. It is public
+  // because CUDA forbids it otherwise: "the enclosing parent function for an
+  // extended __host__ __device__ lambda cannot have private or protected access
+  // within its class". Every one of these launches a Kokkos kernel, so every
+  // one contains such a lambda, and marking them private makes the whole solver
+  // uncompilable with nvcc. Found by building on a T4; the Threads backend
+  // never complains, which is exactly why it went unnoticed.
+  //
+  // Do not call these from outside. They assume parity, fences and flag state
+  // that only the public methods maintain.
+  //----------------------------------------------------------------------------
   template <int P>
   void run_step(bool field_is_current) {
     const auto coll = coll_;
@@ -283,6 +296,7 @@ class MagneticSolver {
     Kokkos::fence();
   }
 
+ private:
   Domain dom_;
   Collision coll_;
   Streaming pop_[3];

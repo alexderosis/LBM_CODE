@@ -430,7 +430,20 @@ class FluidSolver {
     if (t_ % 2 == 0) scatter<0>(fn); else scatter<1>(fn);
   }
 
- private:
+ public:
+  //----------------------------------------------------------------------------
+  // NVCC CONSTRAINT, NOT A DESIGN CHOICE. Everything from here to the data
+  // members is an implementation detail and morally private. It is public
+  // because CUDA forbids it otherwise: "the enclosing parent function for an
+  // extended __host__ __device__ lambda cannot have private or protected access
+  // within its class". Every one of these launches a Kokkos kernel, so every
+  // one contains such a lambda, and marking them private makes the whole solver
+  // uncompilable with nvcc. Found by building on a T4; the Threads backend
+  // never complains, which is exactly why it went unnoticed.
+  //
+  // Do not call these from outside. They assume parity, fences and flag state
+  // that only the public methods maintain.
+  //----------------------------------------------------------------------------
   //----------------------------------------------------------------------------
   //----------------------------------------------------------------------------
   // Corner densities, run before the main sweep and only when corners exist.
@@ -726,7 +739,13 @@ class FluidSolver {
       acc.store_rest(nb, f[0]);
       for (int i = 1; i < Q; i += 2) acc.store_pair(nb, i, f[i], f[i + 1]);
 
-      if constexpr (StoreMacro) {
+      // A plain `if`, deliberately not `if constexpr`. NVCC cannot let an
+      // extended __host__ __device__ lambda FIRST capture a variable inside an
+      // `if constexpr` body, and rho/ux/uy/uz are first named right here.
+      // StoreMacro is a compile-time constant so the branch still folds away;
+      // the only cost is that the four views are captured unconditionally,
+      // which is a few bytes of closure and no runtime work.
+      if (StoreMacro) {
         rho(n) = Collision::density(m);
         ux(n) = m.ux; uy(n) = m.uy; uz(n) = m.uz;
       }
