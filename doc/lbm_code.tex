@@ -3450,6 +3450,50 @@ $20\,\mathrm{m^2s^{-1}}$ at $5$~m resolution in a city is not extravagant ---
 but the reason it is \emph{needed} is that the wind is not divergence-free. A
 solved wind removes the spurious source altogether, and with it this constraint.
 
+\subsection{The city}
+
+Manchester city centre, $400\times400\times60$ cells at $5$~m --- $2$~km square
+and $300$~m deep, $6058$ buildings --- with a $5\,\mathrm{m\,s^{-1}}$ westerly
+at $10$~m, $z_0 = 1$~m, $D = 20\,\mathrm{m^2s^{-1}}$ and a continuous release of
+one unit per second. The source cell falls inside a building and is lifted clear
+of it, so the release is from a roof at $32.5$~m rather than from the street.
+Five minutes of physical time is $14\,280$ steps and runs in $801$~s on four
+threads of an M1, or $171$~MLUPS.
+
+The plume approaches steady state monotonically: $\mathrm{d}M/\mathrm{d}t$ falls
+from $0.97$ to $2.0\times10^{-3}$ over the run while the mass in the domain
+plateaus at $1.409\times10^{2}$. It has not fully arrived --- the derivative is
+three orders down but not zero --- which is honest for a five-minute release into
+a two-kilometre domain at $5\,\mathrm{m\,s^{-1}}$: the leading edge has crossed
+roughly $1.5$~km.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.82\textwidth]{fig/urban_mcr_plume.png}
+\caption{Urban plume over Manchester city centre after five minutes of
+continuous release from a rooftop at $32.5$~m. \emph{Top}: plan view, building
+footprints in grey, column-integrated concentration on a logarithmic scale; the
+bar is $500$~m. \emph{Bottom}: vertical section along the plume centreline,
+vertical scale exaggerated three times, showing the release lifting as it enters
+faster-moving air aloft. The wind is a $5\,\mathrm{m\,s^{-1}}$ westerly, so the
+plume runs east. Note what the figure does \emph{not} show: the wind is
+prescribed, so there is no recirculation behind any of these buildings and no
+channelling along the streets the plan view makes so visible.}
+\label{fig:urbanplume}
+\end{figure}
+
+\paragraph{Negative concentrations.} The scheme undershoots. A first-order
+equilibrium with no limiter produces small negative concentrations at sharp
+gradients: $3.2$~million cells of $9.6$~million hold values between $0$ and
+$-7.9\times10^{-5}$, against a section peak of $5.4\times10^{-2}$ --- a few
+parts in ten thousand. They are bounded and do not grow, and \texttt{min C} is
+now reported every frame so that they are visible rather than assumed away. The
+practical consequence is for anything downstream that takes a logarithm or
+treats a negative value as a flag: the plan-view renderer for
+Figure~\ref{fig:urbanplume} initially tested \texttt{v < 0} for the building
+mask, which is how it came to paint three million undershooting cells as
+buildings and hide most of the city.
+
 \subsection{The top boundary is a modelling choice}
 
 A horizontal wind has $u_z = 0$ at the top face, so a zero-gradient condition

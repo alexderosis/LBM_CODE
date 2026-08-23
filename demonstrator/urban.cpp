@@ -382,9 +382,16 @@ int main(int argc, char** argv) {
     std::string mk = "mkdir -p " + outdir;
     if (std::system(mk.c_str()) != 0) throw std::runtime_error("cannot create " + outdir);
 
-    std::printf("  %9s %12s %12s %12s %11s\n",
-                "t (s)", "in domain", "injected", "retained", "dM/dt");
-    std::printf("  %s\n", std::string(62, '-').c_str());
+    // min C is reported because it is not zero and should not be hidden. A
+    // first-order equilibrium with no limiter undershoots at sharp gradients,
+    // so a few parts in ten thousand of the peak appear as small NEGATIVE
+    // concentrations. They are bounded and they do not grow, but anything
+    // downstream that takes a logarithm or treats "negative" as "solid" has to
+    // know: the plan-view plot in doc/fig/plot_urban.py originally painted three
+    // million undershooting cells as buildings for exactly that reason.
+    std::printf("  %9s %12s %12s %10s %10s %11s\n",
+                "t (s)", "in domain", "injected", "retained", "min C", "dM/dt");
+    std::printf("  %s\n", std::string(70, '-').c_str());
 
     std::vector<float> Cout(std::size_t(d.n_padded));
     const auto t0 = std::chrono::steady_clock::now();
@@ -394,13 +401,14 @@ int main(int argc, char** argv) {
       if (t % every == 0) {
         s.compute_field();
         auto h = Kokkos::create_mirror_view_and_copy(HostSpace{}, s.temperature());
-        double mass = 0.0;
+        double mass = 0.0, cmin = 0.0, cmax = 0.0;
         for (Index z = 0; z < g.nz; ++z)
           for (Index y = 0; y < g.ny; ++y)
             for (Index x = 0; x < g.nx; ++x) {
               const Index n = d.id(x, y, z);
               const double c = g.solid(x, y, z) ? 0.0 : double(h(n));
               mass += c;
+              cmin = std::min(cmin, c); cmax = std::max(cmax, c);
               Cout[std::size_t(n)] = float(c);
             }
         const double now = sc.seconds(t);
@@ -416,8 +424,10 @@ int main(int argc, char** argv) {
           std::printf("  Check the stability margin reported above.\n");
           rc = 1; break;
         }
-        std::printf("  %9.1f %12.4e %12.4e %10.1f%% %11.3e\n",
-                    now, mass, injected, injected > 0 ? 100.0 * mass / injected : 0.0, dM);
+        std::printf("  %9.1f %12.4e %12.4e %9.1f%% %10.2e %11.3e\n",
+                    now, mass, injected, injected > 0 ? 100.0 * mass / injected : 0.0,
+                    cmin, dM);
+        (void)cmax;
         std::fflush(stdout);
         char p[512];
         std::snprintf(p, sizeof p, "%s/conc_%04d.vtk", outdir.c_str(), frame++);
