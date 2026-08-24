@@ -27,3 +27,9 @@ endforeach()
 # and there is no numpy in the target environment. Python put it in the hours;
 # this renders a frame in about a second.
 add_executable(vol_aorta vol_aorta.cpp)
+
+# Same reasoning for the urban plume: no ParaView on this machine, no numpy in
+# its Python, and 400x400x60 over tens of frames and three cameras.
+add_executable(vol_urban vol_urban.cpp)
+find_package(Threads REQUIRED)
+target_link_libraries(vol_urban PRIVATE Threads::Threads)
