@@ -1351,32 +1351,52 @@ ill-posedness that made a zero-gradient \emph{fluid} outlet drive $\rho$ to
 $181$. Until it is understood, keep the outlet far from anything being measured.
 
 %------------------------------------------------------------------------------
-\paragraph{A race that does not fire, and where it would.}
+\paragraph{A race that was not benign.}
 \label{sec:outflowrace}
-The arbitrary-face closure reads its donor's populations from inside the main
-\texttt{stream\_collide} kernel. Under Esoteric Pull the two slots a node reads
-are exactly the two it writes, so the donor --- an ordinary fluid cell, updated
-in the same pass --- is rewriting the slots the outflow node is reading. That is
-a data race by construction, and whether the pre- or post-collision state is
-obtained is not determined by the program.
+The arbitrary-face closure needs its donor's whole distribution, and originally
+read it from inside the main \texttt{stream\_collide} kernel. Under Esoteric
+Pull the two slots a node reads are exactly the two it writes, so the donor ---
+an ordinary fluid cell updated in the same pass --- was rewriting the slots the
+outflow node was reading. Which state was obtained, pre- or post-collision, was
+not determined by the program.
 
-Measured on the aorta of \S\ref{sec:aorta}, $4000$ steps with $2000$ outlet
-nodes, the output is \textbf{byte-identical on 1, 2, 4 and 8 threads}. The
-reason is layout, not correctness: \texttt{rebuild\_lists} builds the active
-list by scanning node indices in ascending order, and a donor is an immediate
-spatial neighbour, so an outflow node and its donor sit close together in that
-list and fall inside one thread's contiguous chunk. Only a pair straddling a
-chunk boundary can race, and with eight threads there are seven boundaries
-against two thousand outlet nodes.
+It looked harmless. On the aorta of \S\ref{sec:aorta}, $4000$ steps with $2000$
+outlet nodes, the output was byte-identical on 1, 2, 4 and 8 threads --- because
+\texttt{rebuild\_lists} builds the active list in ascending node index and a
+donor is an immediate neighbour, so the pair falls inside one thread's
+contiguous chunk. That is a property of CPU chunking, and it would not have
+survived a GPU.
 
-\textbf{That guarantee is a property of contiguous CPU chunking and does not
-survive a GPU.} There, every node is its own work item and all of them are
-concurrent; no ordering between an outflow node and its donor is implied at all.
-The aorta has never been run on a GPU, so this is untested rather than broken ---
-but it is the first thing to fix when the fluid solver is ported, and the fix is
-known: the scalar solver's open boundary (\S\ref{sec:scalaroutflow}) avoids the
-same hazard by handling those cells in a second pass after a fence, reading the
-macroscopic field rather than populations.
+\textbf{It was not harmless.} What the layout made deterministic it did not make
+consistent: whether a given outlet node saw its donor before or after collision
+depended on nothing but index order, so different cells of the same cap were
+using states one collision apart. Measured over $4000$ steps:
+
+\begin{center}\small
+\begin{tabular}{lcc}
+\toprule
+ & in-kernel read & prefetched \\
+\midrule
+peak velocity      & grows $3.0\times$, $0.033 \to 0.101$ & settles near $0.05$ \\
+mass imbalance     & $+5\times10^{-3}$, one-signed        & oscillates about $0$, $\sim10^{-4}$ \\
+outlet density     & falls monotonically to $0.990$       & within $0.002$ of the imposed $1$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent A monotonically growing peak velocity and a monotonically falling
+outlet density are what a boundary condition pumping the solution looks like.
+
+The fix is the one the scalar's open boundary already used: read what cannot be
+read safely in a pass that runs \emph{before} anything is written.
+\texttt{outflow\_prefetch} copies each donor's distribution into a compact
+buffer --- $n_{\rm out}\times Q$ reals, $432$~kB for this geometry --- and the
+main kernel reads the buffer. One extra fence, skipped entirely when no cell is
+an arbitrary-face outflow. Determinism is retained on 1, 4 and 8 threads and all
+sixteen regression tests pass.
+
+The identical donor read in the \texttt{macro} kernel is deliberately left
+alone: that pass writes no populations, so nothing there can race.
 
 \subsection{Forcing: every component, every axis, and a fully 3D case}
 \label{sec:forceval}
@@ -3232,6 +3252,12 @@ $\phi$ & step & mean & median & $p_{99}$ & $|\uu|_{\max}$ \\
 \end{center}
 
 \noindent The residual differences are in the eighth digit, which is round-off.
+\emph{The figures quoted in the remainder of this section predate the outflow
+fix of \S\ref{sec:outflowrace} and are being regenerated. The outlet density in
+particular was being dragged below its imposed value by the very mechanism that
+fix removes, so the settled value below should be read as a property of the old
+closure.}
+
 The outlet density has stopped moving at $0.99699$, so the mass controller has
 found its fixed point rather than still walking toward one. An earlier
 $12\,800$-step run --- $0.62$ diffusion times --- was reported in a previous
