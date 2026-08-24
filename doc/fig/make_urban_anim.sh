@@ -16,10 +16,10 @@
 # the same 2 km at 5 m. See render_palette.py in the Pollutant project for why
 # they cannot be reconstructed from azimuth/elevation.
 #
-#   usage: make_urban_anim.sh <vtk_dir> <work_dir> <out.mp4> [minutes_total]
+#   usage: make_urban_anim.sh <vtk_dir> <work_dir> <out.mp4> [minutes_total] [steady_min]
 set -euo pipefail
 
-VTK=$1; WORK=$2; OUT=$3; TOTAL=${4:-12}
+VTK=$1; WORK=$2; OUT=$3; TOTAL=${4:-12}; STEADY=${5:--1}
 BIN=$(dirname "$0")/../../build/demonstrator/vol_urban
 GEN=$(dirname "$0")/urban_overlay.py
 
@@ -45,7 +45,7 @@ for f in "${FILES[@]}"; do
   "$BIN" -in "$f" -out "$WORK/panels/G_$n.ppm" -w  750 -h 510 -cam $CAM_G -foc $FOC -fov 30
 
   t=$(python3 -c "print(f'{$TOTAL*$i/max(1,$N-1):.2f}')")
-  python3 "$GEN" "$t" "$WORK/panels/ov_$n.svg"
+  python3 "$GEN" "$t" "$WORK/panels/ov_$n.svg" "$STEADY"
   rsvg-convert -w 1920 -h 1080 "$WORK/panels/ov_$n.svg" -o "$WORK/panels/ov_$n.png"
 
   magick -size 1920x1080 xc:'#f2f1ee' \

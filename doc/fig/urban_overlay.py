@@ -6,7 +6,7 @@ hand, because this ffmpeg build has no drawtext filter and the environment has n
 PIL. rsvg-convert and ImageMagick are both present; between them they do
 typography properly, which a hand-rolled bitmap font at title size would not.
 
-  usage: urban_overlay.py <t_minutes> <out.svg>
+  usage: urban_overlay.py <t_minutes> <out.svg> [steady_minutes]
 """
 import sys
 
@@ -24,6 +24,10 @@ def text(x, y, s, size, weight="400", fill=FG, anchor="start", op="1"):
 
 def main():
     t = float(sys.argv[1]); out = sys.argv[2]
+    # When the run reaches steady state is a property of the run, not a constant.
+    # Passing it in stops the caption asserting a time the data does not support;
+    # omit it and no claim is made.
+    steady = float(sys.argv[3]) if len(sys.argv) > 3 else -1.0
     o = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
          f'viewBox="0 0 {W} {H}">']
 
@@ -32,7 +36,7 @@ def main():
                   44, "700"))
     o.append(text(30, 95,
                   "Lattice-Boltzmann D3Q7 advection–diffusion  ·  2 km domain at 5 m "
-                  "resolution  ·  9.6M cells  ·  5 m/s westerly", 21, "400", MUTE))
+                  "resolution  ·  9.6M cells  ·  5 m/s wind toward NE", 21, "400", MUTE))
     # The caveat is part of the figure, not a footnote: the wind is prescribed,
     # so the thing a reader will assume they are seeing is not there.
     o.append(text(30, 122,
@@ -46,7 +50,7 @@ def main():
     # change. Saying so turns a static tail into the result it actually is --
     # what enters now leaves -- instead of leaving the viewer to wonder whether
     # the animation has stalled.
-    if t >= 5.0:
+    if steady > 0 and t >= steady:
         # Right-anchored, because a left-anchored line of unknown width runs off
         # the canvas -- which is exactly what the first version did.
         o.append(text(W - 30, 88, "steady state — what enters now leaves",
@@ -54,11 +58,11 @@ def main():
 
     # --- panel labels ----------------------------------------------------------
     o.append(text(40, H - 74, "skyline sweep", 30, "700"))
-    o.append(text(40, H - 46, "the plume rides above the roofline, from a source at 32.5 m",
+    o.append(text(40, H - 46, "street-level release at 7.5 m, 2.6 km of fetch along the diagonal",
                   20, "400", MUTE))
 
     o.append(text(1196, 520, "low oblique", 26, "700"))
-    o.append(text(1196, 546, "one corridor, because the wind cannot turn", 18, "400", MUTE))
+    o.append(text(1196, 546, "the plume lifts into faster air as it runs", 18, "400", MUTE))
 
     o.append(text(1196, H - 46, "plan view", 26, "700"))
     o.append(text(1196, H - 22, "isotropic lateral spread — the streets do not steer it",

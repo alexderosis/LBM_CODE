@@ -254,7 +254,14 @@ int main(int argc, char** argv) {
     const bool in_xm = ex > 1e-9, in_xp = ex < -1e-9;
     const bool in_ym = ey > 1e-9, in_yp = ey < -1e-9;
 
-    s.set_geometry([&](Index x, Index y, Index z) -> ScalarCell {
+    // ONE classification, named, used by set_geometry AND by the source-cell
+    // count below. They were two separate hand-written predicates and they
+    // drifted: the count required z > 0 while the injection ran over every
+    // ScalarBulk cell, which after the ground fix includes z = 0. A source
+    // sitting on the ground therefore had its per-cell rate divided by three
+    // layers and applied to four -- 33% over-injection, visible as "retained
+    // 127.9%" and invisible for any source high enough to clear z = 2.
+    auto classify = [&](Index x, Index y, Index z) -> ScalarCell {
       if (g.solid(x, y, z)) return ScalarAdiabatic;      // buildings: zero flux
       // THE GROUND IS NOT MARKED. Under Esoteric Pull the z = 0 cells already
       // bounce back off the layer beneath them -- that layer is never processed,
@@ -285,7 +292,8 @@ int main(int argc, char** argv) {
       if (z == g.nz - 1) return (top == "open") ? ScalarDirichlet : ScalarOutflow;
       const bool face = (x == 0 || x == g.nx - 1 || y == 0 || y == g.ny - 1);
       return face ? ScalarOutflow : ScalarBulk;
-    });
+    };
+    s.set_geometry(classify);
     s.set_wall_values([](Index, Index, Index) -> Real { return Real(0); });
     s.finalize_geometry();
     s.initialize(Real(0));
@@ -595,13 +603,17 @@ int main(int argc, char** argv) {
 
     if (src_i < 0) { src_i = g.nx / 2; src_j = g.ny / 2; src_k = 1; }
     while (src_k < g.nz - 1 && g.solid(src_i, src_j, src_k)) ++src_k;   // out of any building
+    // add_source injects into every ScalarBulk cell of the box, so that is
+    // exactly the set to divide by. Asking classify() rather than re-deriving
+    // the condition is what keeps the two from drifting apart again.
     Index nsrc = 0;
     for (Index z = src_k - src_r; z <= src_k + src_r; ++z)
       for (Index y = src_j - src_r; y <= src_j + src_r; ++y)
         for (Index x = src_i - src_r; x <= src_i + src_r; ++x)
-          if (x > 0 && x < g.nx - 1 && y > 0 && y < g.ny - 1 && z > 0 && z < g.nz - 1 &&
-              !g.solid(x, y, z)) ++nsrc;
-    if (nsrc == 0) throw std::runtime_error("every source cell is solid -- move the source");
+          if (x >= 0 && x < g.nx && y >= 0 && y < g.ny && z >= 0 && z < g.nz &&
+              classify(x, y, z) == ScalarBulk) ++nsrc;
+    if (nsrc == 0)
+      throw std::runtime_error("no source cell is a bulk cell -- move the source");
 
     const Real per_cell = Real(rate * sc.dt / double(nsrc));
     const Domain dc = d;
@@ -660,6 +672,14 @@ int main(int argc, char** argv) {
         // this reached 1e70 without ever producing a NaN, and ran to completion
         // writing 400 MB of garbage. Mass in the domain cannot exceed what was
         // injected by any meaningful factor, so that is the real test.
+        // A conservative bound would be mass <= injected. It is not quite that:
+        // the outflow condition prescribes its cells and can add a little at a
+        // boundary the plume has reached. 1.05 catches a normalisation error --
+        // the 1.28 above -- while tolerating that.
+        if (injected > 0 && mass > 1.05 * injected && now < 60.0)
+          std::printf("  *** mass exceeds injection by %.1f%% before the plume can have\n"
+                      "  *** reached a boundary -- the source normalisation is wrong\n",
+                      100.0 * (mass / injected - 1.0));
         if (!std::isfinite(mass) || (injected > 0 && mass > 2.0 * injected)) {
           std::printf("  DIVERGED at t = %.1f s: %.4e in the domain against %.4e injected\n",
                       now, mass, injected);
