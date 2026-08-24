@@ -1351,6 +1351,33 @@ ill-posedness that made a zero-gradient \emph{fluid} outlet drive $\rho$ to
 $181$. Until it is understood, keep the outlet far from anything being measured.
 
 %------------------------------------------------------------------------------
+\paragraph{A race that does not fire, and where it would.}
+\label{sec:outflowrace}
+The arbitrary-face closure reads its donor's populations from inside the main
+\texttt{stream\_collide} kernel. Under Esoteric Pull the two slots a node reads
+are exactly the two it writes, so the donor --- an ordinary fluid cell, updated
+in the same pass --- is rewriting the slots the outflow node is reading. That is
+a data race by construction, and whether the pre- or post-collision state is
+obtained is not determined by the program.
+
+Measured on the aorta of \S\ref{sec:aorta}, $4000$ steps with $2000$ outlet
+nodes, the output is \textbf{byte-identical on 1, 2, 4 and 8 threads}. The
+reason is layout, not correctness: \texttt{rebuild\_lists} builds the active
+list by scanning node indices in ascending order, and a donor is an immediate
+spatial neighbour, so an outflow node and its donor sit close together in that
+list and fall inside one thread's contiguous chunk. Only a pair straddling a
+chunk boundary can race, and with eight threads there are seven boundaries
+against two thousand outlet nodes.
+
+\textbf{That guarantee is a property of contiguous CPU chunking and does not
+survive a GPU.} There, every node is its own work item and all of them are
+concurrent; no ordering between an outflow node and its donor is implied at all.
+The aorta has never been run on a GPU, so this is untested rather than broken ---
+but it is the first thing to fix when the fluid solver is ported, and the fix is
+known: the scalar solver's open boundary (\S\ref{sec:scalaroutflow}) avoids the
+same hazard by handling those cells in a second pass after a fence, reading the
+macroscopic field rather than populations.
+
 \subsection{Forcing: every component, every axis, and a fully 3D case}
 \label{sec:forceval}
 
