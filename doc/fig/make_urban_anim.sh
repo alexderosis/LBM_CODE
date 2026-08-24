@@ -16,10 +16,13 @@
 # the same 2 km at 5 m. See render_palette.py in the Pollutant project for why
 # they cannot be reconstructed from azimuth/elevation.
 #
-#   usage: make_urban_anim.sh <vtk_dir> <work_dir> <out.mp4> [minutes_total] [steady_min]
+#   usage: make_urban_anim.sh <vtk_dir> <work_dir> <out.mp4> [minutes_total] [steady_min] [levels] [kappa]
 set -euo pipefail
 
 VTK=$1; WORK=$2; OUT=$3; TOTAL=${4:-12}; STEADY=${5:--1}
+# Transfer-function levels. Right value depends on the run: a plume spread over
+# 2.6 km carries about half the concentration of the same release over 1 km.
+LEVELS=${6:-3e-4,3e-3,1.5e-2}; KAPPA=${7:-0.30,4.0,15.0}
 BIN=$(dirname "$0")/../../build/demonstrator/vol_urban
 GEN=$(dirname "$0")/urban_overlay.py
 
@@ -40,12 +43,12 @@ echo "  $N simulation frames"
 i=0
 for f in "${FILES[@]}"; do
   n=$(printf "%04d" $i)
-  "$BIN" -in "$f" -out "$WORK/panels/H_$n.ppm" -w 1160 -h 940 -cam $CAM_H -foc $FOC -fov 34
-  "$BIN" -in "$f" -out "$WORK/panels/E_$n.ppm" -w  750 -h 420 -cam $CAM_E -foc $FOC -fov 34
-  "$BIN" -in "$f" -out "$WORK/panels/G_$n.ppm" -w  750 -h 510 -cam $CAM_G -foc $FOC -fov 30
+  "$BIN" -in "$f" -out "$WORK/panels/H_$n.ppm" -w 1160 -h 940 -cam $CAM_H -foc $FOC -fov 34 -levels $LEVELS -kappa $KAPPA
+  "$BIN" -in "$f" -out "$WORK/panels/E_$n.ppm" -w  750 -h 420 -cam $CAM_E -foc $FOC -fov 34 -levels $LEVELS -kappa $KAPPA
+  "$BIN" -in "$f" -out "$WORK/panels/G_$n.ppm" -w  750 -h 510 -cam $CAM_G -foc $FOC -fov 30 -levels $LEVELS -kappa $KAPPA
 
   t=$(python3 -c "print(f'{$TOTAL*$i/max(1,$N-1):.2f}')")
-  python3 "$GEN" "$t" "$WORK/panels/ov_$n.svg" "$STEADY"
+  python3 "$GEN" "$t" "$WORK/panels/ov_$n.svg" "$STEADY" "$LEVELS"
   rsvg-convert -w 1920 -h 1080 "$WORK/panels/ov_$n.svg" -o "$WORK/panels/ov_$n.png"
 
   magick -size 1920x1080 xc:'#f2f1ee' \

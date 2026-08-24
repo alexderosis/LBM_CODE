@@ -6,9 +6,9 @@ hand, because this ffmpeg build has no drawtext filter and the environment has n
 PIL. rsvg-convert and ImageMagick are both present; between them they do
 typography properly, which a hand-rolled bitmap font at title size would not.
 
-  usage: urban_overlay.py <t_minutes> <out.svg> [steady_minutes]
+  usage: urban_overlay.py <t_minutes> <out.svg> [steady_minutes] [l0,l1,l2]
 """
-import sys
+import math, sys
 
 W, H = 1920, 1080
 FG, MUTE, WARN = "#1b1b1d", "#5c5c62", "#9a3b2f"
@@ -28,6 +28,11 @@ def main():
     # Passing it in stops the caption asserting a time the data does not support;
     # omit it and no claim is made.
     steady = float(sys.argv[3]) if len(sys.argv) > 3 else -1.0
+    # The key is generated from the SAME levels the renderer was given, passed
+    # through by make_urban_anim.sh. Hand-typing them here is how a caption ends
+    # up asserting numbers the picture does not show.
+    lv = [float(x) for x in sys.argv[4].split(",")] if len(sys.argv) > 4 \
+         else [3.0e-4, 3.0e-3, 1.5e-2]
     o = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
          f'viewBox="0 0 {W} {H}">']
 
@@ -72,7 +77,14 @@ def main():
     # These MUST match the band levels in demonstrator/vol_urban.cpp. A key that
     # quotes different numbers from the ones the renderer used is worse than no
     # key: it is a caption asserting something the picture does not show.
-    keys = [("1.5×10⁻²", "#e03326"), ("3×10⁻³", "#faa88a"), ("3×10⁻⁴", "#e8e2dd")]
+    sup = str.maketrans("-0123456789", "⁻⁰¹²³⁴⁵⁶⁷⁸⁹")
+    def fmt(v):
+        e = int(math.floor(math.log10(v)))
+        m = v / 10 ** e
+        ms = ("%g" % round(m, 1))
+        return ("%s×10%s" % (ms, str(e).translate(sup))) if ms != "1" \
+               else ("10%s" % str(e).translate(sup))
+    keys = [(fmt(lv[2]), "#e03326"), (fmt(lv[1]), "#faa88a"), (fmt(lv[0]), "#e8e2dd")]
     x0 = W - 330
     o.append(text(x0, 128, "shells", 17, "600", MUTE))
     for i, (lab, col) in enumerate(keys):

@@ -3482,6 +3482,31 @@ channelling along the streets the plan view makes so visible.}
 \label{fig:urbanplume}
 \end{figure}
 
+\paragraph{A second configuration, and what the first one hid.} Releasing at the
+centre of the domain into a due-east wind gives only $1$~km of fetch, and the
+plume reaches steady state at $t=5$~min --- three fifths of that run is static.
+Moving the source to an open pocket in the south-west at $(140,135)$~m and
+turning the wind onto the diagonal, toward the north-east, gives $2.6$~km of
+fetch; steady state then arrives at $10.8$~min and the plume develops throughout.
+The source also sits at street level, $7.5$~m, rather than being lifted onto a
+roof as the central cell was.
+
+That change exposed a defect the first configuration could not. The count of
+cells used to normalise the release and the set of cells actually injected into
+were separate predicates, and they disagreed at $z=0$: the count required
+$z>0$ while the injection covers every bulk cell, which since
+\S\ref{sec:urban} includes the ground layer. A box centred at $z=1$ therefore
+had its per-cell rate computed for three layers and applied to four --- $33\%$
+over-injection, visible within eighteen seconds as more scalar in the domain
+than had been released, and invisible for any source clearing $z=2$. The two are
+now one named predicate, asked twice.
+
+The diagonal wind also costs stability margin: zeroing both horizontal
+components inside buildings raises $\max|\nabla\!\cdot\!\uu|$ from
+$2.3\times10^{-2}$ to $3.3\times10^{-2}$, so the margin of
+\S\ref{sec:urbanstab} falls from $7.2$ to $5.1$. Still comfortably clear of the
+$1.8$ that diverged, but it is the narrowest configuration run to completion.
+
 \paragraph{Negative concentrations.} The scheme undershoots. A first-order
 equilibrium with no limiter produces small negative concentrations at sharp
 gradients: $3.2$~million cells of $9.6$~million hold values between $0$ and

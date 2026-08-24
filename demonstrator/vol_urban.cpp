@@ -32,6 +32,7 @@
 //
 //    usage: vol_urban -in conc.vtk -out frame.ppm [-w 1160] [-h 920]
 //                     [-cam x,y,z] [-foc x,y,z] [-fov 32] [-gain 1.0]
+//                     [-levels l0,l1,l2] [-kappa k0,k1,k2]
 //==============================================================================
 #include <algorithm>
 #include <cmath>
@@ -68,6 +69,7 @@ int main(int argc, char** argv) {
   int W = 1160, H = 920;
   Vec cam{268.15, 2772.56, 966.15}, foc{997.5, 997.5, 107.49};
   double fov = 32.0, gain = 1.0;
+  std::string levels, kappas;
 
   for (int a = 1; a < argc; ++a) {
     const std::string s = argv[a];
@@ -79,6 +81,8 @@ int main(int argc, char** argv) {
     else if (s == "-foc"  && a + 1 < argc) foc = parse_vec(argv[++a]);
     else if (s == "-fov"  && a + 1 < argc) fov = std::atof(argv[++a]);
     else if (s == "-gain" && a + 1 < argc) gain = std::atof(argv[++a]);
+    else if (s == "-levels" && a + 1 < argc) levels = argv[++a];
+    else if (s == "-kappa"  && a + 1 < argc) kappas = argv[++a];
   }
   if (in.empty()) { std::fprintf(stderr, "vol_urban: -in is required\n"); return 2; }
 
@@ -139,11 +143,30 @@ int main(int argc, char** argv) {
   //
   // Levels are ABSOLUTE, not percentiles of the current frame. Percentiles would
   // re-normalise every frame and the plume would appear to stop growing.
-  const Band bands[3] = {
+  Band bands[3] = {
     {3.0e-4, 0.42, 0.99, 0.96, 0.94, 0.30},   // outer haze, near-white
     {3.0e-3, 0.42, 0.98, 0.66, 0.55, 4.0},    // salmon
     {1.5e-2, 0.48, 0.88, 0.20, 0.15, 15.0},   // core, red
   };
+  // The right levels depend on the run, not on the renderer: a plume spread over
+  // 2.6 km carries roughly half the concentration of the same release over 1 km,
+  // and the outer shell accumulates far more along each ray. Exposing them
+  // avoids a rebuild per tuning attempt -- and the key in the overlay must be
+  // told the same numbers, or it captions something the picture does not show.
+  if (!levels.empty()) {
+    double l0, l1, l2; char c;
+    std::istringstream is(levels);
+    if (is >> l0 >> c >> l1 >> c >> l2) {
+      bands[0].level = l0; bands[1].level = l1; bands[2].level = l2;
+    }
+  }
+  if (!kappas.empty()) {
+    double k0, k1, k2; char c;
+    std::istringstream is(kappas);
+    if (is >> k0 >> c >> k1 >> c >> k2) {
+      bands[0].kappa = k0; bands[1].kappa = k1; bands[2].kappa = k2;
+    }
+  }
 
   const double Lx = nx * dx, Ly = ny * dyy, Lz = nz * dz;
   const Vec fwd = norm(foc - cam);
