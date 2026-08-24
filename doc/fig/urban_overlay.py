@@ -42,6 +42,16 @@ def main():
 
     o.append(text(W - 30, 62, f"t = {t:.1f} min", 30, "500", MUTE, "end"))
 
+    # The plume reaches steady state at 5 min and the remaining frames barely
+    # change. Saying so turns a static tail into the result it actually is --
+    # what enters now leaves -- instead of leaving the viewer to wonder whether
+    # the animation has stalled.
+    if t >= 5.0:
+        # Right-anchored, because a left-anchored line of unknown width runs off
+        # the canvas -- which is exactly what the first version did.
+        o.append(text(W - 30, 88, "steady state — what enters now leaves",
+                      18, "400", "#2f7d5a", "end"))
+
     # --- panel labels ----------------------------------------------------------
     o.append(text(40, H - 74, "skyline sweep", 30, "700"))
     o.append(text(40, H - 46, "the plume rides above the roofline, from a source at 32.5 m",
@@ -60,11 +70,11 @@ def main():
     # key: it is a caption asserting something the picture does not show.
     keys = [("1.5×10⁻²", "#e03326"), ("3×10⁻³", "#faa88a"), ("3×10⁻⁴", "#e8e2dd")]
     x0 = W - 330
-    o.append(text(x0, 112, "shells", 17, "600", MUTE))
+    o.append(text(x0, 128, "shells", 17, "600", MUTE))
     for i, (lab, col) in enumerate(keys):
-        o.append(f'<rect x="{x0 + 62 + i*84}" y="96" width="14" height="14" '
+        o.append(f'<rect x="{x0 + 62 + i*84}" y="116" width="14" height="14" '
                  f'fill="{col}" stroke="#b9b4ae" stroke-width="0.8"/>')
-        o.append(text(x0 + 80 + i*84, 108, lab, 15, "400", MUTE))
+        o.append(text(x0 + 80 + i*84, 128, lab, 15, "400", MUTE))
 
     o.append("</svg>")
     open(out, "w").write("\n".join(o))
