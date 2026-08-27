@@ -3867,7 +3867,10 @@ $p_{99.9}$.}
 \label{fig:urbanwind}
 \end{figure}
 
-\paragraph{The interior is right, and is the point.} Three cells clear of every
+\paragraph{The interior is right, and is the point.} \emph{All the figures in
+this and the next paragraph are the synthetic $60\times30\times20$ case}, which
+for a long time was the only geometry this mode had ever been run on; the city
+results are in \S\ref{sec:urbansolvedcity}. Three cells clear of every
 face, the divergence falls from $\mathrm{RMS} = 1.27\times10^{-3}$ prescribed to
 $2.12\times10^{-4}$ solved --- a factor of six --- and the peak speed is
 $8.80\,\mathrm{m\,s^{-1}}$ against a $7.74\,\mathrm{m\,s^{-1}}$ free stream, a
@@ -3890,11 +3893,115 @@ sixty-eight inert outflow nodes, whose donor lay on an adjoining wall, but did
 \emph{not} remove the jet, which locates the cause in the mixed condition
 itself rather than in the donor lookup. The identified fix is periodic lateral
 boundaries, the standard atmospheric arrangement, which deletes two of the four
-offending faces outright. It is not done here because the Domain is shared with
-the scalar, for which periodic laterals mean a plume leaving one side re-enters
-the other --- a modelling decision rather than a bug fix. Until then the solved
-field is usable away from the boundary, a plume must not be allowed to reach the
-outlet edges, and the prescribed wind remains the default.
+offending faces outright.
+
+\subsection{The same mode on a city, and the two things that stopped it}
+\label{sec:urbansolvedcity}
+
+Everything above is the synthetic case. Pointed at Manchester the mode produced
+a NaN within $500$ steps --- in FP64 as well as FP32, so not a precision effect
+--- and it did so at the $\tau^+$ the synthetic case had converged at. Bisecting
+by geometry:
+
+\begin{center}\small
+\begin{tabular}{lccll}
+\toprule
+case & buildings & on faces & outcome & peak / free stream \\
+\midrule
+synthetic $60\times30\times20$   & 1    & no  & converges, $5.7\times10^{-7}$    & $4.1\times$ \\
+flat $200\times200\times150$     & none & --- & no NaN, residual $6.5\times10^{-2}$ & $4.4\times$ \\
+Manchester $400\times400\times60$ & 6058 & \textbf{yes} & \textbf{NaN by step 500} & --- \\
+Manchester, 8-cell clear margin  & 2083 & no  & no NaN, residual $2.7\times10^{-1}$ & $2.6\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{A face cell shadowed by a building is ill-posed.} The regularised
+condition reconstructs the density at a wall node from the populations that
+streamed into it, split by the wall normal into known and unknown, and that
+split assumes the known ones arrived from the interior. When the cell one step
+inward is a building, what actually arrives is bounce-back off that building,
+the reconstructed density is not a density, and the solve diverges. Manchester
+has $3975$ built columns touching the domain edge; clearing an eight-cell band
+removes the NaN outright, which is what identified the cause. Only $141$ cells
+are \emph{actually} shadowed --- a face cell with solid immediately inward ---
+and those $141$ were enough to destroy a nine-million-cell solve. They are now
+closed as \texttt{Solid}, which extends the building by the one cell it was
+already effectively occupying and turns an ill-posed node into a well-posed
+wall. That also subsumes the ``outflow node has no fluid neighbour and is
+inert'' case: the same geometry seen from the outlet side, previously left
+frozen rather than closed.
+
+\paragraph{Periodic laterals, and what they cost.} \texttt{-lateral periodic}
+makes the $y$ faces periodic, deleting two of the four junctions where a
+velocity-prescribed wall meets a pressure outlet. Periodicity is handled inside
+\texttt{Domain::fill\_neighbours}, so neither solver needed changing; the
+divergence diagnostics did, because $y=0$ and $y=n_y-1$ become ordinary
+interior cells whose neighbours wrap, and omitting them would drop $0.5\%$ of
+the domain from an rms the stability threshold is built on.
+
+The two fixes are independent, and it is worth being explicit that periodic
+laterals alone do \textbf{not} cure the NaN --- they leave the inlet and outlet
+faces, where the same shadowing occurs. Both are required.
+
+What periodicity costs is a modelling choice rather than accuracy, and the run
+now states it rather than leaving it implicit: the domain becomes an infinite
+strip, the city repeats every $2$~km across the wind, and a plume drifting
+sideways out of one edge re-enters at the other. The seam is not smooth either,
+since real building heights at $y=0$ and $y=n_y-1$ were never chosen to match:
+$220$ of Manchester's $400$ edge columns disagree, worst by $48$~m. That count
+is printed, and a separate warning fires if the wind has a cross-wind component,
+because the plume is then advected through the seam rather than merely diffusing
+across it.
+
+\paragraph{A solved wind inverts which statistic misleads.} With both fixes,
+Manchester at $8000$ flow steps --- one flow-through time at
+$u^{\max}_{\rm lat} = 0.05$, so a developing field and not a converged one:
+
+\begin{center}\small
+\begin{tabular}{lccc}
+\toprule
+ & prescribed & solved & change \\
+\midrule
+rms, whole domain      & $9.422\times10^{-4}$ & $2.638\times10^{-3}$ & $0.4\times$ \\
+rms, 3 clear of a face & $9.614\times10^{-4}$ & $7.401\times10^{-5}$ & $\bm{13.0\times}$ \\
+rms, wall-adjacent     & $8.407\times10^{-3}$ & $2.045\times10^{-3}$ & $4.1\times$ \\
+max, whole domain      & $2.318\times10^{-2}$ & $8.351\times10^{-2}$ & $0.3\times$ \\
+max, 3 clear of a face & $2.318\times10^{-2}$ & $1.016\times10^{-2}$ & $2.3\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The interior is $13\times$ better, more than double the factor of six
+the synthetic case showed. The global figures are $2.8\times$ \emph{worse}, and
+the worst cell sits at $(398,342,58)$: the outlet/top edge, the one junction
+periodic laterals cannot delete.
+
+So the two fields fail differently, and the statistic that reads correctly for
+one misreads the other. A prescribed field spreads its error through the city,
+so its whole-domain and interior rms agree to $2\%$ ($9.42\times10^{-4}$ against
+$9.61\times10^{-4}$, margins $44\times$ and $43\times$) and the test of
+\S\ref{sec:urbanstab} is the whole story. A solved field is divergence-free
+everywhere it is solved and carries its entire error at one boundary, so the
+whole-domain figure is set by that edge and understates the interior by more
+than an order of magnitude: $16\times$ against $561\times$. Both are now
+printed, the run says so explicitly when they differ by more than a factor of
+three, and the warning stays on the whole-domain figure because only that one is
+a guarantee.
+
+\paragraph{The diffusivity floor is a property of the prescribed profile.} This
+is what solving the wind buys, stated at the diffusivity that matters.
+$D = 5\,\mathrm{m^2s^{-1}}$ is the value that diverged under the prescribed
+wind, at an interior margin of $43\times$. Under the solved wind the same
+$D = 5$ gives $561\times$. Every urban run in this document has been constrained
+to $D \geq 20$ by a term that the wind model introduced and the physics does
+not contain.
+
+Two caveats stand. The field above is one flow-through time, not a converged
+urban wind --- three to five would be the usual requirement, and at the measured
+rate on this machine that is four to seven hours. And the outlet/top edge is
+still over-determined, so a plume must be kept clear of it. The prescribed wind
+therefore remains the default.
 
 \subsection{The top boundary is a modelling choice}
 
