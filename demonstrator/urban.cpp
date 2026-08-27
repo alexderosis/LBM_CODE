@@ -595,7 +595,7 @@ int main(int argc, char** argv) {
 
     //--------------------------------------------------------------------------
     // div(u): the diagnostic that CAN see a bad wind, unlike a mass budget.
-    double max_div = 0.0, rms_div = 0.0;
+    double max_div = 0.0, rms_div = 0.0, rms_int = 0.0;
     {
       double s2 = 0, s2w = 0, mx = 0, mxw = 0;
       long long nn = 0, nw = 0;
@@ -657,8 +657,9 @@ int main(int argc, char** argv) {
                                         double(h_uy(nn2))*double(h_uy(nn2)) +
                                         double(h_uz(nn2))*double(h_uz(nn2))));
           }
+      rms_int = inn ? std::sqrt(is2 / double(inn)) : 0.0;
       std::printf("  div u:  RMS %.3e (max %.3e) over %lld cells 3 clear of every face\n",
-                  inn ? std::sqrt(is2 / double(inn)) : 0.0, imx, inn);
+                  rms_int, imx, inn);
       std::printf("          peak |u| there %.4f lattice = %.2f m/s\n",
                   iu, iu * g.dx / sc.dt);
     }
@@ -715,6 +716,25 @@ int main(int argc, char** argv) {
                   "             vs RMS |div u| %.4e  ->  margin %.0fx   <- the test\n"
                   "             vs max |div u| %.4e  ->  margin %.1fx\n",
                   sc.D_lat(), damping, rms_div, margin, max_div, margin_max);
+      // A SOLVED WIND INVERTS WHICH NUMBER IS MISLEADING. For a prescribed
+      // field the whole-domain and interior rms agree to within 2% -- the error
+      // is spread through the city -- so the test above is the whole story. A
+      // solved field is divergence-free everywhere it is solved and carries its
+      // entire error at the boundary, so the whole-domain figure is set by the
+      // outlet/top edge and understates the interior by more than an order of
+      // magnitude. Manchester: 2.64e-3 whole-domain against 7.40e-5 interior,
+      // a margin of 16x against 561x. The plume is kept away from those edges
+      // anyway, so the interior number is the one it actually experiences --
+      // but only the first is a guarantee, so the warning stays on it.
+      if (rms_int > 0) {
+        const double margin_int = damping / rms_int;
+        std::printf("             vs RMS interior %.4e  ->  margin %.0fx\n",
+                    rms_int, margin_int);
+        if (margin_int > 3.0 * margin)
+          std::printf("             the whole-domain figure is BOUNDARY-DOMINATED (%.0fx vs\n"
+                      "             %.0fx interior); a plume kept clear of the outlet and top\n"
+                      "             edges sees the interior one.\n", margin, margin_int);
+      }
       if (margin < 100.0) {
         std::printf("  *** MARGIN IS LOW. The spurious C div(u) source is close to\n"
                     "  *** outrunning diffusion, and this run may exponentiate rather\n"
