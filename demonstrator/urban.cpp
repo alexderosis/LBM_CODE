@@ -501,7 +501,7 @@ int main(int argc, char** argv) {
 
     //--------------------------------------------------------------------------
     // div(u): the diagnostic that CAN see a bad wind, unlike a mass budget.
-    double max_div = 0.0;
+    double max_div = 0.0, rms_div = 0.0;
     {
       double s2 = 0, s2w = 0, mx = 0, mxw = 0;
       long long nn = 0, nw = 0;
@@ -528,6 +528,7 @@ int main(int argc, char** argv) {
       std::printf("          a divergence-free field gives 0. This is the error the\n");
       std::printf("          wind injects into CONCENTRATION, and no mass budget sees it.\n");
       max_div = mx;
+      rms_div = nn ? std::sqrt(s2 / double(nn)) : 0.0;
       // Where the worst divergence sits matters more than its value: at a
       // domain face it is a boundary-condition artefact, in the interior it is
       // the wind model.
@@ -567,38 +568,57 @@ int main(int argc, char** argv) {
     // look plausible for a few thousand steps and then by nine orders of
     // magnitude per frame.
     //
-    // The margin is not a theorem, it is measured points, and the threshold
-    // below has moved because of the fourth one:
+    // THE MAX IS THE WRONG STATISTIC, and it took two cities to see it.
     //
-    //     synthetic     8.5x   stable to steady state
-    //     Manchester    7.2x   stable to steady state
-    //     Manhattan     4.6x   EXPONENTIATED
-    //     Manchester    1.8x   reached 1e70 without ever producing a NaN
+    //   case                 max|div u|  margin   RMS |div u|  margin   outcome
+    //   Manchester diagonal   3.278e-2    5.1x     9.208e-4     180x    stable
+    //   Manhattan, D = 20     3.345e-2    4.6x     2.432e-3      63x    EXPONENTIATED
+    //   Manhattan, D = 35     3.345e-2    8.0x     2.432e-3     110x    stable
     //
-    // 4.6x is the one that matters. It sat comfortably above the old 4x
-    // threshold, printed no warning, and produced a run whose mass budget and
-    // peak concentration both looked healthy for nine frames while the
-    // undershoot grew by a factor of two every eighteen seconds. So the
-    // threshold is 8x, which is where the two stable points are, and not 4x,
-    // which is where nothing has ever been shown to work.
+    // Those two cities have the SAME peak divergence to two per cent, and the
+    // max-based margin puts a stable run and a divergent one eleven per cent
+    // apart -- it cannot separate them, and using it to set a threshold means
+    // drawing a line through the middle of a coin flip. The RMS separates the
+    // same pair by a factor of 2.9.
+    //
+    // Which makes sense. The spurious source is damped at the cell scale by
+    // D_lat pi^2, so a single bad cell is held down by diffusion from its
+    // neighbours; what outruns diffusion is an EXTENDED region of divergence,
+    // and how much of the domain is in that state is what the RMS measures and
+    // the max does not. The decomposition is exact and worth knowing:
+    //
+    //     RMS over open cells = sqrt(wall-adjacent fraction) x RMS at walls
+    //
+    // (0.112 x 8.216e-3 for Manchester, 0.183 x 1.329e-2 for Manhattan, both to
+    // three figures), so this really is "how much city", not "how bad is the
+    // worst cell". Manhattan has 4.3 times as many wall-adjacent cells.
+    //
+    // The threshold below is 100x, which sits just under the lowest verified
+    // stable point and well above the one failure. It is calibrated on ONE
+    // failure and should be treated as such: it is a warning, not a proof. Both
+    // margins are printed, because the max is still worth seeing.
     //
     // Note that D_lat = D_phys u_lat_max / (u_peak dx) has no dt in it, so
     // shortening the time step does NOT buy margin -- only a larger
     // diffusivity, a slower wind or a finer grid does. u_lat_max does not buy
     // it either: it scales D_lat and div u by the same factor and cancels.
-    if (!diffusion_only && max_div > 0) {
-      const double margin = sc.D_lat() * M_PI * M_PI / max_div;
-      std::printf("\n  stability: D_lat %.5f, damping %.4f vs max|div u| %.4f  ->  margin %.1fx\n",
-                  sc.D_lat(), sc.D_lat() * M_PI * M_PI, max_div, margin);
-      if (margin < 8.0) {
+    if (!diffusion_only && max_div > 0 && rms_div > 0) {
+      const double damping = sc.D_lat() * M_PI * M_PI;
+      const double margin_max = damping / max_div;
+      const double margin = damping / rms_div;
+      std::printf("\n  stability: D_lat %.5f, damping %.4f\n"
+                  "             vs RMS |div u| %.4e  ->  margin %.0fx   <- the test\n"
+                  "             vs max |div u| %.4e  ->  margin %.1fx\n",
+                  sc.D_lat(), damping, rms_div, margin, max_div, margin_max);
+      if (margin < 100.0) {
         std::printf("  *** MARGIN IS LOW. The spurious C div(u) source is close to\n"
                     "  *** outrunning diffusion, and this run may exponentiate rather\n"
                     "  *** than diverge visibly. Raise -diff (the turbulent diffusivity\n"
                     "  *** is a calibrated stand-in, not a measured constant) or use a\n"
                     "  *** solved, divergence-free wind. A shorter time step will NOT\n"
                     "  *** help: D_lat does not depend on dt.\n");
-        std::printf("  *** For reference, -diff %.0f would give a margin of about 8x.\n",
-                    std::ceil(D_phys * 8.0 / margin));
+        std::printf("  *** For reference, -diff %.0f would give a margin of about 100x.\n",
+                    std::ceil(D_phys * 100.0 / margin));
       }
     }
 

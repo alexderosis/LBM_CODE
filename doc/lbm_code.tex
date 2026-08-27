@@ -3481,38 +3481,58 @@ at all}, because $\Delta t$ cancels between the diffusivity and the velocity
 scaling. Only a larger diffusivity, a slower wind or a finer grid helps.
 
 \begin{center}
-\begin{tabular}{lccccl}
+\begin{tabular}{lcccccl}
 \toprule
-case & $\Delta x$ & $D_{\rm lat}$ & $D_{\rm lat}\pi^2$ &
-$\max|\nabla\!\cdot\!\uu|$ & margin \\
+case & $D_{\rm lat}\pi^2$ &
+$\max|\nabla\!\cdot\!\uu|$ & margin &
+$\mathrm{rms}\,|\nabla\!\cdot\!\uu|$ & margin & outcome \\
 \midrule
-synthetic          & 2 m & $0.0162$ & $0.159$ & $0.0187$ & $8.5\times$ stable \\
-Manchester, $D=5$  & 5 m & $0.0042$ & $0.042$ & $0.0232$ & $1.8\times$ diverged \\
-Manchester, $D=20$ & 5 m & $0.0168$ & $0.166$ & $0.0232$ & $7.2\times$ stable \\
-Manchester, diagonal & 5 m & $0.0168$ & $0.166$ & $0.0334$ & $5.1\times$ \emph{unverified} \\
-Manhattan, $D=20$  & 5 m & $0.0154$ & $0.152$ & $0.0334$ & $4.6\times$ exponentiated \\
-Manhattan, $D=35$  & 5 m & $0.0270$ & $0.267$ & $0.0334$ & $8.0\times$ stable \\
+synthetic              & $0.159$ & $1.87\!\times\!10^{-2}$ & $8.5\times$ & $1.06\!\times\!10^{-3}$ & $150\times$ & stable \\
+Manchester, E, $D=5$   & $0.041$ & $2.32\!\times\!10^{-2}$ & $1.8\times$ & $9.42\!\times\!10^{-4}$ & $44\times$  & diverged \\
+Manchester, E, $D=20$  & $0.166$ & $2.32\!\times\!10^{-2}$ & $7.2\times$ & $9.42\!\times\!10^{-4}$ & $176\times$ & stable \\
+Manchester, NE, $D=20$ & $0.166$ & $3.28\!\times\!10^{-2}$ & $5.1\times$ & $9.21\!\times\!10^{-4}$ & $180\times$ & stable \\
+Manhattan, $D=20$      & $0.152$ & $3.35\!\times\!10^{-2}$ & $4.6\times$ & $2.43\!\times\!10^{-3}$ & $63\times$  & \textbf{exponentiated} \\
+Manhattan, $D=35$      & $0.267$ & $3.35\!\times\!10^{-2}$ & $8.0\times$ & $2.43\!\times\!10^{-3}$ & $110\times$ & stable \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\noindent The margin is not a theorem; it is those measured points, and the
-last two are why the threshold in the code is now $8\times$ rather than the
-$4\times$ it was first set to. The diagonal Manchester row is marked unverified
-deliberately. It was judged stable by the mass test, and the mass test is not
-sensitive enough to make that judgement (below); its $\max|\nabla\!\cdot\!\uu|$
-is the same $3.3\times10^{-2}$ as Manhattan's, because a diagonal wind zeroes
-both horizontal components inside buildings, and it sits at $5.1\times$ against
-the $4.6\times$ that demonstrably exponentiated. \textbf{That run should be
-repeated and its undershoot examined before the figure it produced is relied
-on.} Manhattan at $D=20$ sat comfortably above the old
-threshold, printed no warning, and exponentiated anyway. Note where its extra
-divergence comes from: $\max|\nabla\!\cdot\!\uu|$ is $44\%$ larger than
-Manchester's on the same grid at the same wind, because the city is denser and
-its towers are taller --- $50.4\%$ of columns built against $29.9\%$, $6.87\%$ of
-the domain solid against $1.79\%$, and buildings to $472$~m against $200$~m. \textbf{The margin is a property of the
-geometry}, so a diffusivity calibrated on one city is not transferable to
-another, and the code now says so at setup rather than after fourteen minutes.
+\noindent \textbf{The maximum is the wrong statistic}, and it took a second city
+to see it. Read the max-based column on its own: the failures sit at $1.8\times$
+and $4.6\times$, the successes at $5.1\times$, $7.2\times$, $8.0\times$ and
+$8.5\times$. There is no threshold to draw --- $4.6$ diverges and $5.1$ does not,
+eleven per cent apart, and those two runs have the same peak divergence to within
+two per cent. Read the rms-based column instead and the failures are at
+$44\times$ and $63\times$, the successes at $110\times$, $150\times$, $176\times$
+and $180\times$, with a clear gap between. That is where the threshold now sits,
+at $100\times$.
+
+The reason is not hard to see once the numbers force the question. The spurious
+source is damped at the cell scale by $D_{\rm lat}\pi^2$, so an isolated bad cell
+is held down by diffusion from its neighbours; what outruns diffusion is an
+\emph{extended} region of divergence. How much of the domain is in that state is
+exactly what the rms measures and the max does not. The decomposition is exact,
+\begin{equation}
+  \mathrm{rms}_{\rm open}|\nabla\!\cdot\!\uu|
+  = \sqrt{N_{\rm wall}/N_{\rm open}}\;\,
+    \mathrm{rms}_{\rm wall}|\nabla\!\cdot\!\uu|,
+\end{equation}
+$0.112\times8.22\times10^{-3}$ for Manchester and $0.183\times1.33\times10^{-2}$
+for Manhattan, both reproducing the table to three figures --- so the quantity
+really is \emph{how much city}, not \emph{how bad is the worst cell}. Manhattan
+has $4.3$ times as many wall-adjacent cells as Manchester, $485\,982$ against
+$113\,863$, from $50.4\%$ of columns built against $29.9\%$, $6.87\%$ of the
+domain solid against $1.79\%$, and buildings to $472$~m against $200$~m.
+\textbf{The margin is a property of the geometry}, so a diffusivity calibrated on
+one city does not transfer to another, and the code now says so at setup rather
+than after fourteen minutes.
+
+Two caveats on the threshold. It is calibrated on \emph{one} failure that was
+diagnosed properly --- Manhattan at $63\times$ --- so it is a warning, not a
+proof, and both margins are printed because the max is still worth seeing. And
+the rms is taken over open cells, so a domain carrying a great deal of empty air
+above the rooflines dilutes it; the decomposition above is how to check whether
+that has happened.
 
 Neither is $u^{\max}_{\rm lat}$ a lever, which is worth stating because it looks
 like one. It scales $D_{\rm lat}$ through Eq.~\eqref{eq:dlat} and it scales
@@ -3680,19 +3700,23 @@ over-injection, visible within eighteen seconds as more scalar in the domain
 than had been released, and invisible for any source clearing $z=2$. The two are
 now one named predicate, asked twice.
 
-The diagonal wind also costs stability margin: zeroing both horizontal
+The diagonal wind appears to cost stability margin: zeroing both horizontal
 components inside buildings raises $\max|\nabla\!\cdot\!\uu|$ from
-$2.3\times10^{-2}$ to $3.3\times10^{-2}$, so the margin of
+$2.3\times10^{-2}$ to $3.3\times10^{-2}$, and the max-based margin of
 \S\ref{sec:urbanstab} falls from $7.2$ to $5.1$. That was described here as
 ``comfortably clear of the $1.8$ that diverged'', on the strength of a mass
-budget that stayed sensible for the whole run. \textbf{It should not have been.}
-Manhattan at $4.6\times$ --- essentially the same margin, and the same
-$\max|\nabla\!\cdot\!\uu|$, differing only in $D_{\rm lat}$ through the wind
-speed at a deeper domain's top --- exponentiated while its mass budget tracked
-injection to within a per cent throughout. The correct statement is that this
-configuration has never been checked with the diagnostic that can detect the
-failure, and until it has, the margin it ran at should be read as unverified
-rather than as evidence.
+budget that stayed sensible for the whole run --- which, as \S\ref{sec:urbanstab}
+now records, is not a judgement a mass budget can make.
+
+The configuration was therefore repeated and its undershoot examined. It is
+stable, and not marginally so: $\min C$ is bit-identical at $-1.11\times10^{-7}$
+for six consecutive frames from $t=45$ to $t=120$~s, while a Manhattan run at
+nominally the same margin had grown its undershoot twentyfold over the same span.
+What the max-based number was hiding is that the diagonal wind barely changes the
+rms at all --- $9.42\times10^{-4}$ to $9.21\times10^{-4}$, a $2\%$ \emph{fall} ---
+because it redistributes divergence among the same wall-adjacent cells rather
+than adding any. On the statistic that predicts the outcome this is the safest
+configuration in the table, at $180\times$.
 
 \paragraph{Negative concentrations.} The scheme undershoots. A first-order
 equilibrium with no limiter produces small negative concentrations at sharp
