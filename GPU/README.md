@@ -17,6 +17,19 @@ a fraction of the parent's.** Read the scope table before assuming anything work
 | BGK | 128^3 | 980.3 | 211.8 | 0.000e+00 |
 | central moments | 128^3 | 973.3 | 210.2 | 0.000e+00 |
 
+## Measured, on an NVIDIA H200 (sm_90, CUDA 12.8, FP32, 512^3)
+
+| operator | MLUPS | GB/s | % of 4814 GB/s peak | mass drift |
+|---|---|---|---|---|
+| BGK | 17233.4 | 3722.4 | 77.3% | 0.000e+00 |
+| central moments | 17171.4 | 3709.0 | 77.0% | 0.000e+00 |
+
+Central moments at **99.6% of BGK**, now on two GPU generations, which closes
+the question this code was written to answer. The efficiency is *higher* than
+the T4's 66%, so the H200 delivers 17.6x the T4's throughput against a 15.0x
+bandwidth ratio. Taylor-Green at 512^3 -- 134M nodes, 256000 steps -- runs in
+2046 s at 16792 MLUPS with zero mass drift.
+
 Central moments runs at **99% of BGK speed**, and 211.8 GB/s is **66% of the
 T4's 320 GB/s peak** — i.e. the kernel is memory-bound, which is what a
 correctly written LBM kernel should be. Going from 64^3 to 128^3 buys only ~4%,
@@ -49,9 +62,22 @@ FP32 round-off alone would predict. 32,000 steps in 9.12 s (920 MLUPS).
 
 The peak rises 6.8% and less energy is lost, both being the under-resolution
 signature lifting: at 64^3 the cascade reaches the grid scale early and
-dissipates energy prematurely, damping the vorticity peak. 128^3 is still far
-short of the 256^3-512^3 the published DNS uses, so this is the right trend
-rather than agreement with the benchmark.
+dissipates energy prematurely, damping the vorticity peak.
+
+**This case is NOT the published Taylor-Green benchmark, and cannot be compared
+to it.** An earlier version of this file said 128^3 was "far short of the
+256^3-512^3 the published DNS uses", which implies the same problem at lower
+resolution. It is a different problem, for two independent reasons. The initial
+condition here has three non-zero velocity components with factors of 1/2, where
+the benchmark has w = 0. And Re is defined as u0*D/nu, where the benchmark uses
+Re = V0*L/nu on a box of side 2*pi*L -- so L = D/(2 pi) and the two differ by a
+factor of 2 pi: what this case calls Re = 1600 is Re = 255 in benchmark terms.
+
+`src/tgv3d_bench.cu` runs the benchmark configuration proper, with the w = 0
+initial condition, Re on L, and the dissipation rate reported both ways so the
+gap between them measures resolution. Its Kokkos twin is
+`../validation/tgv3d_bench.cpp`; the two share the initial condition, the
+viscosity and the non-dimensionalisation line for line.
 
 ## Running on another card
 

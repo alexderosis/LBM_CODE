@@ -49,7 +49,7 @@ if(LBM_PTXAS_VERBOSE)
     $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-v>)
 endif()
 
-foreach(app tgv3d bench)
+foreach(app tgv3d tgv3d_bench bench)
   add_executable(${app} src/${app}.cu)
   target_link_libraries(${app} PRIVATE lbm_cuda_core)
 endforeach()
