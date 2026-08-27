@@ -567,24 +567,38 @@ int main(int argc, char** argv) {
     // look plausible for a few thousand steps and then by nine orders of
     // magnitude per frame.
     //
-    // The margin is not a theorem, it is two measured points: a synthetic case
-    // at 8.5x ran stably to steady state, and Manchester at 1.8x diverged after
-    // about four thousand steps. Note that D_lat = D_phys u_lat_max / (u_peak
-    // dx) has no dt in it, so shortening the time step does NOT buy margin --
-    // only a larger diffusivity, a slower wind or a finer grid does.
+    // The margin is not a theorem, it is measured points, and the threshold
+    // below has moved because of the fourth one:
+    //
+    //     synthetic     8.5x   stable to steady state
+    //     Manchester    7.2x   stable to steady state
+    //     Manhattan     4.6x   EXPONENTIATED
+    //     Manchester    1.8x   reached 1e70 without ever producing a NaN
+    //
+    // 4.6x is the one that matters. It sat comfortably above the old 4x
+    // threshold, printed no warning, and produced a run whose mass budget and
+    // peak concentration both looked healthy for nine frames while the
+    // undershoot grew by a factor of two every eighteen seconds. So the
+    // threshold is 8x, which is where the two stable points are, and not 4x,
+    // which is where nothing has ever been shown to work.
+    //
+    // Note that D_lat = D_phys u_lat_max / (u_peak dx) has no dt in it, so
+    // shortening the time step does NOT buy margin -- only a larger
+    // diffusivity, a slower wind or a finer grid does. u_lat_max does not buy
+    // it either: it scales D_lat and div u by the same factor and cancels.
     if (!diffusion_only && max_div > 0) {
       const double margin = sc.D_lat() * M_PI * M_PI / max_div;
       std::printf("\n  stability: D_lat %.5f, damping %.4f vs max|div u| %.4f  ->  margin %.1fx\n",
                   sc.D_lat(), sc.D_lat() * M_PI * M_PI, max_div, margin);
-      if (margin < 4.0) {
+      if (margin < 8.0) {
         std::printf("  *** MARGIN IS LOW. The spurious C div(u) source is close to\n"
                     "  *** outrunning diffusion, and this run may exponentiate rather\n"
                     "  *** than diverge visibly. Raise -diff (the turbulent diffusivity\n"
                     "  *** is a calibrated stand-in, not a measured constant) or use a\n"
                     "  *** solved, divergence-free wind. A shorter time step will NOT\n"
                     "  *** help: D_lat does not depend on dt.\n");
-        std::printf("  *** For reference, -diff %.0f would give a margin of about 4x.\n",
-                    std::ceil(D_phys * 4.0 / margin));
+        std::printf("  *** For reference, -diff %.0f would give a margin of about 8x.\n",
+                    std::ceil(D_phys * 8.0 / margin));
       }
     }
 
@@ -712,10 +726,33 @@ int main(int argc, char** argv) {
           std::printf("  Check the stability margin reported above.\n");
           rc = 1; break;
         }
+        // THE UNDERSHOOT IS THE EARLY WARNING, and the mass test is not.
+        //
+        // A first-order equilibrium undershoots at sharp gradients, so a few
+        // parts in ten thousand of the peak are expected and are not a fault.
+        // An exponentiating C div(u) is different: it shows up here first, and
+        // by a long way. The Manhattan run at margin 4.6x went 0.03% -> 0.4% ->
+        // 3% -> 10% of the peak over nine frames, doubling every eighteen
+        // seconds, while mass tracked injection to within a per cent the whole
+        // time and never came close to the factor-of-two test above. Whatever
+        // is growing geometrically will eventually trip that test, but only
+        // after the field has been garbage for several minutes of simulated
+        // time -- and on a run that writes a frame a minute, that is the whole
+        // animation.
+        if (cmax > 0 && -cmin > 0.5 * cmax) {
+          std::printf("  DIVERGED at t = %.1f s: undershoot %.3e is %.0f%% of the "
+                      "peak %.3e\n", now, cmin, -100.0 * cmin / cmax, cmax);
+          std::printf("  Check the stability margin reported above.\n");
+          rc = 1; break;
+        }
+        if (cmax > 0 && -cmin > 0.05 * cmax)
+          std::printf("  *** undershoot is %.0f%% of the peak and a first-order\n"
+                      "  *** equilibrium does not do that. If it is still growing at\n"
+                      "  *** the next frame, the run is exponentiating -- stop it.\n",
+                      -100.0 * cmin / cmax);
         std::printf("  %9.1f %12.4e %12.4e %9.1f%% %8.1f%% %10.2e %11.3e\n",
                     now, mass, injected, injected > 0 ? 100.0 * mass / injected : 0.0,
                     mass > 0 ? 100.0 * fluid / mass : 0.0, cmin, dM);
-        (void)cmax;
         std::fflush(stdout);
         char p[512];
         std::snprintf(p, sizeof p, "%s/conc_%04d.vtk", outdir.c_str(), frame++);
