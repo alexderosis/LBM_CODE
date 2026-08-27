@@ -197,6 +197,11 @@ int main(int argc, char** argv) {
     else if (s == "-visc")      nu_phys = num(nu_phys);
     else if (s == "-flow-steps") flow_max = std::size_t(num(double(flow_max)));
     else if (s == "-flow-tol")  flow_tol = num(flow_tol);
+    // Kokkos parses its own --kokkos-* flags out of the argc/argv handed to
+    // initialize() below, so they must reach it rather than being rejected
+    // here. That matters more than it sounds: the Threads backend defaults to
+    // ONE thread, and --kokkos-num-threads=4 is 2.1x on this grid.
+    else if (s.rfind("--kokkos-", 0) == 0) continue;
     else { std::printf("unknown argument %s\n", s.c_str()); return 2; }
   }
 
