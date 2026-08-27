@@ -40,7 +40,14 @@ def text(x, y, s, size, weight="400", fill=FG, anchor="start", op="1"):
 # be generous: the scrim is nearly the ground colour, so overshooting it is
 # invisible and undershooting it is not.
 def panel_label(x, y, title, sub, tsize=30, ssize=20):
-    w = max(len(title) * tsize * 0.58, len(sub) * ssize * 0.52) + 26
+    # The subtitle is measured text of unknown length -- it is generated from the
+    # run, so it can be a sentence -- and at the right-hand panels there are only
+    # 700 px before the canvas edge. Shrink it to fit rather than let it run off,
+    # which is what the first Manhattan render did.
+    avail = W - x - 20
+    while ssize > 13 and len(sub) * ssize * 0.52 > avail:
+        ssize -= 1
+    w = min(max(len(title) * tsize * 0.58, len(sub) * ssize * 0.52) + 26, avail + 13)
     h = tsize + ssize + 26
     return [f'<rect x="{x - 13}" y="{y - tsize - 8}" width="{w:.0f}" '
             f'height="{h:.0f}" rx="5" fill="{GROUND}" fill-opacity="0.80"/>',
@@ -90,16 +97,27 @@ class Run:
         # dM/dt, from the table the solver printed. Steady state is a property
         # of THIS run: when the last column has settled to a few per cent of the
         # injection rate and stays there. Nothing is claimed if it never does.
-        rows = re.findall(r"^ +([\d.]+) +([\d.eE+-]+) +([\d.eE+-]+) +[\d.]+% +"
-                          r"[\d.eE+-]+ +([\d.eE+-]+)$", self.raw, re.M)
-        self.t_end = float(rows[-1][0]) / 60.0 if rows else 0.0
+        # Matched by SHAPE, not by column count. The first version of this
+        # pinned every column of the table into one regex; a column was added to
+        # the solver's output and the regex then matched nothing at all, which
+        # silently dropped the steady-state annotation from every frame rather
+        # than failing. A row here is: leading space, a time, then numbers.
+        num = re.compile(r"-?[\d.]+(?:[eE][+-]?\d+)?%?$")
+        rows = []
+        for line in self.raw.splitlines():
+            if not line.startswith(" "): continue
+            f = line.split()
+            if len(f) < 5 or not re.fullmatch(r"[\d.]+", f[0]): continue
+            if not all(num.match(v) for v in f[1:]): continue
+            rows.append((float(f[0]), float(f[-1])))
+        self.t_end = rows[-1][0] / 60.0 if rows else 0.0
         self.steady = -1.0
         if len(rows) > 3:
             rate = self.maybe(r"open cells, ([\d.eE+-]+) units/s", float) or 1.0
             run = None
-            for t, _m, _i, dm in rows[1:]:
-                if abs(float(dm)) < 0.02 * rate:
-                    run = float(t) / 60.0 if run is None else run
+            for t, dm in rows[1:]:
+                if abs(dm) < 0.02 * rate:
+                    run = t / 60.0 if run is None else run
                 else:
                     run = None
             self.steady = run if run is not None else -1.0

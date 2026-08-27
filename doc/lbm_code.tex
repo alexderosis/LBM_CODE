@@ -3730,6 +3730,110 @@ Figure~\ref{fig:urbanplume} initially tested \texttt{v < 0} for the building
 mask, which is how it came to paint three million undershooting cells as
 buildings and hide most of the city.
 
+\subsection{A second city}
+\label{sec:urbannyc}
+
+Midtown Manhattan, $400\times400\times100$ cells at $5$~m --- the same $2$~km
+square, $500$~m deep, $10\,210$ buildings --- with the same
+$5\,\mathrm{m\,s^{-1}}$ wind at $10$~m and $z_0=1$~m, and the same continuous
+release of one unit per second from street level at $7.5$~m. Everything that
+could be held fixed against \S\ref{sec:urban} was. What could not is the
+diffusivity: $D=35\,\mathrm{m^2s^{-1}}$ against Manchester's $20$, for the
+reason \S\ref{sec:urbanstab} sets out. Fifteen minutes of physical time is
+$46\,665$ steps and $51$ frames.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{fig/urban_nyc_collage.png}
+\caption{Midtown Manhattan at steady state, fifteen minutes into a continuous
+street-level release. Three shells of concentration, at the levels enclosing
+$95\%$, $80\%$ and $50\%$ of the plume's mass --- chosen from this frame rather
+than carried over from another run, since the same release spread over $2$~km
+carries an order of magnitude less than it does over $200$~m. \emph{Left}: the
+skyline broadside to the plume, which runs left to right along the avenues.
+\emph{Top right}: the same view from street level, showing the release
+threading between the towers. \emph{Bottom right}: plan view, with the
+Commissioners' grid visible; the wind bearing was measured out of the height
+field, not looked up. Every figure in the caption strip is read from the run's
+own log, and the plan-view line is measured from this frame. The animation is
+\texttt{doc/fig/manhattan\_dispersion.mp4}.}
+\label{fig:urbannyc}
+\end{figure}
+
+\paragraph{The wind direction was measured, not assumed.} Manhattan's street
+grid is not aligned with north, and rather than look the angle up it was
+recovered from the height field: rays marched from every open column, in every
+direction, recording how far they travel before meeting a building. The mean
+free run peaks at two orthogonal bearings, $28^\circ$ and $118^\circ$ --- $385$~m
+along the second, $285$~m along the first --- which is the Commissioners' Plan of
+1811, extracted from a $400\times400$ array of heights with no knowledge of what
+city it is. The wind was then aimed along $28^\circ$, up the avenues, giving
+$2.10$~km of fetch from a source in an open pocket in the south of the domain.
+
+\paragraph{Steady state, and a budget that now says what it means.} The plume
+reaches steady state at about $11.4$~min, where $\mathrm{d}M/\mathrm{d}t$ falls
+below $2\%$ of the injection rate; by the last frame it is $1.8\times10^{-3}$ and
+the mass in the domain has plateaued at $3.670\times10^{2}$ against
+$8.817\times10^{2}$ injected. That $41.6\%$ retained is a real statement about
+where the release has gone --- the remaining $58\%$ has left through the outlets
+--- which it was not before \S\ref{sec:wallslots}: the same run reported under the
+old fluid-only sum would have shown $87\%$ and held there while the plume was
+still in the middle of the domain. The companion column reads $92.0\%$ for the
+whole run, unchanging: that is the fraction the plotted field sees, and the $8\%$
+gap is Manhattan's wall area.
+
+The undershoot is $-8.08\times10^{-9}$ and does not move for any of the $51$
+frames --- the total negative mass is $3\times10^{-7}$, or $0.00\%$ of the plume.
+At $D=20$ the same configuration reached $-1.3\times10^{-2}$ by $t=162$~s and was
+doubling every eighteen seconds.
+
+\paragraph{The canyons hold the plume, but only near the source.} The plan view
+of a city plume invites a claim about street channelling, and the caption on the
+Manchester animation made one: \emph{isotropic lateral spread --- the streets do
+not steer it}. On a regular grid of canyons with the wind aimed along one of its
+axes that is worth measuring rather than asserting, so
+\texttt{doc/fig/plume\_stats.py} bins the last frame by downwind distance along
+the plume's own axis and compares the concentration-weighted crosswind spread
+below and above the rooflines:
+
+\begin{center}
+\begin{tabular}{rccccc}
+\toprule
+$s$ (m) & $\sigma_n$ street & $\sigma_n$ aloft & ratio &
+$\langle z\rangle$ street & street fraction \\
+\midrule
+ 131 & $39.5$  & $53.8$  & $0.73$ & $26.2$ & $75.5\%$ \\
+ 394 & $57.7$  & $72.1$  & $0.80$ & $31.5$ & $47.8\%$ \\
+ 656 & $78.1$  & $80.6$  & $0.97$ & $31.9$ & $33.8\%$ \\
+ 919 & $99.3$  & $94.9$  & $1.05$ & $32.1$ & $32.4\%$ \\
+1181 & $99.8$  & $99.9$  & $1.00$ & $33.2$ & $25.7\%$ \\
+1706 & $120.0$ & $123.0$ & $0.98$ & $31.3$ & $22.7\%$ \\
+1969 & $130.3$ & $120.4$ & $1.08$ & $33.0$ & $19.7\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Within the first $130$~m the plume is $27\%$ narrower below the
+rooflines than above them, and by $650$~m the two are the same. The last column
+says why: the fraction of the plume still below roof level falls from $76\%$ to
+$20\%$, so there is progressively less left for the canyons to hold. The
+street-level material that remains does not rise --- its mean height sits at
+$32$~m the whole way --- while the part aloft climbs from $91$~m to $164$~m as it
+mixes into faster air.
+
+That is a confinement effect and \emph{not} a channelling one, and the
+distinction matters here more than it would in a solved wind. The prescribed
+field blows in a straight line by construction: nothing in this model can steer
+a plume along a street. What the buildings do is block, and being opaque to the
+scalar is on its own enough to produce the near-field narrowing. A solved wind
+would add the channelling this one cannot represent, and the honest reading of
+the table is as a lower bound on how much the geometry matters.
+
+The caption on the animation is generated from exactly this measurement rather
+than written by hand, for the reason the Manchester caption illustrates: pointed
+at a second city, a caption made of literals states the first city's name, cell
+count and fetch with complete confidence.
+
 \subsection{Solving the wind}
 \label{sec:urbansolved}
 

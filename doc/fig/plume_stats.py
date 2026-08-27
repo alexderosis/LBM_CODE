@@ -132,21 +132,33 @@ def main():
     # from a bin holding 0.1% of the plume below the rooflines is noise, and
     # including it is how a caption ends up quoting a number nothing supports.
     if "--brief" in argv:
-        num = den = 0.0
+        # A single mass-weighted ratio is true and misleading. On the Manhattan
+        # run at steady state it comes out at 0.87, which reads as uniform
+        # confinement; the bins say 0.73 in the first 130 m and 1.0 beyond
+        # 650 m, because by then most of the plume is ABOVE the rooflines and
+        # the canyons have nothing left to hold. So the line reports the
+        # near-field ratio and where it stops applying.
+        usable = []
         for b in range(nbins):
             lo, hi = low[b], high[b]
             sl, sh = lo.sigma_n(), hi.sigma_n()
             if not (sl and sh and sh > 0): continue
             if lo.m + hi.m <= 0 or lo.m / (lo.m + hi.m) < 0.05: continue
-            num += lo.m * (sl / sh); den += lo.m
-        if den <= 0:
+            usable.append(((b + 0.5) * width, sl / sh))
+        if not usable:
             print("no street-level material to measure")
-        elif num / den < 0.95:
-            print(f"canyon-confined — crosswind spread below the rooflines is "
-                  f"{num / den:.2f}\u00d7 that above")
-        else:
+            return
+        s0, r0 = usable[0]
+        level = next((s for s, r in usable if s > s0 and r >= 0.95), None)
+        if r0 >= 0.95:
             print(f"the canyons do not hold it — spread below the rooflines is "
-                  f"{num / den:.2f}\u00d7 that above")
+                  f"{r0:.2f}\u00d7 that above from {s0:.0f} m out")
+        elif level is None:
+            print(f"canyon-confined the whole way — crosswind spread below the "
+                  f"rooflines is {r0:.2f}\u00d7 that above")
+        else:
+            print(f"canyon-confined near the source — {r0:.2f}\u00d7 the spread "
+                  f"aloft at {s0:.0f} m, level with it by {level:.0f} m")
         return
 
     print(f"\n  {os.path.basename(vtk)}   {run.place}")
