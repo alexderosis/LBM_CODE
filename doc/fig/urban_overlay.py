@@ -21,6 +21,8 @@ import math, re, sys
 
 W, H = 1920, 1080
 FG, MUTE, WARN, GOOD = "#1b1b1d", "#5c5c62", "#9a3b2f", "#2f7d5a"
+# The canvas make_urban_anim.sh composites onto; the scrims match it.
+GROUND = "#f2f1ee"
 FONT = "Helvetica Neue, Helvetica, Arial, sans-serif"
 
 def esc(s):
@@ -30,6 +32,20 @@ def text(x, y, s, size, weight="400", fill=FG, anchor="start", op="1"):
     return (f'<text x="{x}" y="{y}" font-family="{FONT}" font-size="{size}" '
             f'font-weight="{weight}" fill="{fill}" fill-opacity="{op}" '
             f'text-anchor="{anchor}">{esc(s)}</text>')
+
+# Panel labels sit ON the render, and over Manhattan the render is buildings all
+# the way to the panel edge -- dark text on a busy mid-grey. A scrim in the page
+# colour fixes it without moving the labels off the image. Width is estimated
+# from the character count rather than measured, which is crude but only has to
+# be generous: the scrim is nearly the ground colour, so overshooting it is
+# invisible and undershooting it is not.
+def panel_label(x, y, title, sub, tsize=30, ssize=20):
+    w = max(len(title) * tsize * 0.58, len(sub) * ssize * 0.52) + 26
+    h = tsize + ssize + 26
+    return [f'<rect x="{x - 13}" y="{y - tsize - 8}" width="{w:.0f}" '
+            f'height="{h:.0f}" rx="5" fill="{GROUND}" fill-opacity="0.80"/>',
+            text(x, y, title, tsize, "700"),
+            text(x, y + ssize + 6, sub, ssize, "400", MUTE)]
 
 # ---------------------------------------------------------------------------
 # The run log, parsed.
@@ -154,13 +170,12 @@ def main():
 
     # --- panel labels --------------------------------------------------------
     f = fetch_km(run)
-    o.append(text(40, H - 74, "skyline sweep", 30, "700"))
     sub = f"street-level release at {run.src_z:g} m"
     if f: sub += f", {f:.1f} km of fetch to the {compass(run.bearing - 180.0)}"
-    o.append(text(40, H - 46, sub, 20, "400", MUTE))
+    o += panel_label(40, H - 74, "skyline sweep", sub)
 
-    o.append(text(1196, 520, "low oblique", 26, "700"))
-    o.append(text(1196, 546, "the plume lifts into faster air as it runs", 18, "400", MUTE))
+    o += panel_label(1196, 512, "low oblique",
+                     "the plume lifts into faster air as it runs", 26, 18)
 
     # The plan-view subtitle is a claim about what the picture shows, so it is
     # MEASURED (doc/fig/plume_stats.py --brief) and passed in rather than typed
@@ -172,8 +187,7 @@ def main():
     if not note:
         sys.exit("urban_overlay: --plan-note is required -- it is a claim about "
                  "the picture, so it has to be measured, not assumed")
-    o.append(text(1196, H - 46, "plan view", 26, "700"))
-    o.append(text(1196, H - 22, note, 18, "400", MUTE))
+    o += panel_label(1196, H - 52, "plan view", note, 26, 18)
 
     # --- isosurface key ------------------------------------------------------
     # These MUST match the band levels the renderer was given; make_urban_anim.sh
