@@ -1351,32 +1351,61 @@ ill-posedness that made a zero-gradient \emph{fluid} outlet drive $\rho$ to
 $181$. Until it is understood, keep the outlet far from anything being measured.
 
 %------------------------------------------------------------------------------
-\paragraph{A race that does not fire, and where it would.}
+\paragraph{A race that does not fire, and two repairs that made it worse.}
 \label{sec:outflowrace}
 The arbitrary-face closure reads its donor's populations from inside the main
 \texttt{stream\_collide} kernel. Under Esoteric Pull the two slots a node reads
 are exactly the two it writes, so the donor --- an ordinary fluid cell, updated
-in the same pass --- is rewriting the slots the outflow node is reading. That is
-a data race by construction, and whether the pre- or post-collision state is
-obtained is not determined by the program.
+in the same pass --- is rewriting the slots the outflow node is reading. Whether
+the pre- or post-collision state is obtained is not determined by the program.
 
 Measured on the aorta of \S\ref{sec:aorta}, $4000$ steps with $2000$ outlet
 nodes, the output is \textbf{byte-identical on 1, 2, 4 and 8 threads}. The
 reason is layout, not correctness: \texttt{rebuild\_lists} builds the active
 list by scanning node indices in ascending order, and a donor is an immediate
-spatial neighbour, so an outflow node and its donor sit close together in that
-list and fall inside one thread's contiguous chunk. Only a pair straddling a
-chunk boundary can race, and with eight threads there are seven boundaries
-against two thousand outlet nodes.
+spatial neighbour, so an outflow node and its donor fall inside one thread's
+contiguous chunk. Only a pair straddling a chunk boundary can race, and with
+eight threads there are seven boundaries against two thousand outlet nodes.
+\textbf{That guarantee is a property of contiguous CPU chunking and will not
+survive a GPU}, where every node is its own work item.
 
-\textbf{That guarantee is a property of contiguous CPU chunking and does not
-survive a GPU.} There, every node is its own work item and all of them are
-concurrent; no ordering between an outflow node and its donor is implied at all.
-The aorta has never been run on a GPU, so this is untested rather than broken ---
-but it is the first thing to fix when the fluid solver is ported, and the fix is
-known: the scalar solver's open boundary (\S\ref{sec:scalaroutflow}) avoids the
-same hazard by handling those cells in a second pass after a fence, reading the
-macroscopic field rather than populations.
+\paragraph{Both obvious repairs are worse than the race.} The natural fix is the
+one the scalar's open boundary uses (\S\ref{sec:scalaroutflow}): read what
+cannot be read safely in a separate pass, so the ordering is defined. Two
+versions were built and measured against the documented steady case of
+\S\ref{sec:aortasteady}, $13\,500$ steps at $\mathrm{Re}=50$:
+
+\begin{center}\small
+\begin{tabular}{lcccl}
+\toprule
+donor read & $|\uu|_{\max}$ & $|\Delta m|$ & $\rho_{\rm out}$ & behaviour \\
+\midrule
+in-kernel (current) & $0.0720$ & $\sim\!10^{-5}$ & $0.9934$ & converges by step $7000$ \\
+pre-collision, prefetched & $0.0400$ & $2\e{-3}$ & oscillating & \textbf{limit cycle} \\
+post-collision, gathered & $0.0335$ & $7.3\e{-4}$ & $0.9929$ & converges \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Reading the donor \emph{pre}-collision replaces a fixed point with a
+limit cycle, which is unambiguously a regression. Reading it
+\emph{post}-collision is the correct phase --- the result is written through
+\texttt{store\_pair}, which stores post-collision populations --- and it does
+remove the limit cycle and bring $\rho_{\rm out}$ within $0.05\%$ of the
+documented value. But it still leaves mass conservation seventy-three times
+worse and the peak speed at half. Mass conservation is the only quantity here
+with a known correct value, so the in-kernel read stands.
+
+\textbf{Why defining the read should cost mass conservation is not understood.}
+One untested story: the closure rescales the donor's distribution to a fixed
+density, and under the racy mixed read adjacent outlet cells received slightly
+different treatments whose errors partly cancelled, where a uniform read makes
+the error systematic. That is speculation, recorded as such.
+
+The practical conclusion is not ``leave it alone'' but a sharper one: the GPU
+port needs a closure that is \emph{right}, not merely one that is
+\emph{ordered}. Imposing an order on the existing closure is exactly what was
+tried, twice, and it costs one to two orders of magnitude of mass conservation.
 
 \subsection{Forcing: every component, every axis, and a fully 3D case}
 \label{sec:forceval}
@@ -3153,6 +3182,7 @@ stress into the inlet. The local closure is used instead until that path is made
 geometry-aware.
 
 \subsection{Steady inflow}
+\label{sec:aortasteady}
 
 $\mathrm{Re}=50$ on the inlet cap's equivalent diameter $D = 2\sqrt{A/\pi} =
 32.9$ lattice units, $U=0.02$, $\nu=1.3167\e{-2}$, $\tau=0.5395$, D3Q27 central
