@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
   double rate = 1.0;
   int src_i = -1, src_j = -1, src_k = -1, src_r = 2;
   bool diffusion_only = false;
-  std::string top = "lid", mode = "prescribed", wind_out;
+  std::string top = "lid", mode = "prescribed", lateral = "prescribed", wind_out;
   double nu_phys = 2.0;              // effective (turbulent) viscosity, m2/s
   std::size_t flow_max = 40000;
   double flow_tol = 1e-6;
@@ -193,6 +193,7 @@ int main(int argc, char** argv) {
     else if (s == "-diffusion-only") diffusion_only = true;
     else if (s == "-top")       top = argv[++a];
     else if (s == "-mode")      mode = argv[++a];
+    else if (s == "-lateral")   lateral = argv[++a];
     else if (s == "-wind-out")  wind_out = argv[++a];
     else if (s == "-visc")      nu_phys = num(nu_phys);
     else if (s == "-flow-steps") flow_max = std::size_t(num(double(flow_max)));
@@ -245,7 +246,31 @@ int main(int argc, char** argv) {
       std::printf("  WARNING tau is close to 1/2; raise the diffusivity or dt\n");
 
     //--------------------------------------------------------------------------
-    Domain d(g.nx, g.ny, g.nz, false, false, false);
+    // PERIODIC LATERALS: the standard atmospheric arrangement, and the fix the
+    // -mode solved header has been pointing at since it was written.
+    //
+    // The wind runs along x, so the y faces are the lateral pair. Making them
+    // periodic deletes two of the four faces where a velocity-prescribed wall
+    // meets a pressure outlet, and it is at those junctions that the corner jet
+    // forms. It is not a cosmetic improvement: on a real city the prescribed
+    // arrangement does not merely jet, it fails to converge at all.
+    //
+    // What it costs is a modelling choice rather than accuracy. The domain
+    // becomes an infinite strip: the city repeats every ny cells across the
+    // wind, and a plume that drifts sideways out of one edge re-enters at the
+    // other. That is the usual idealisation of an extended urban canopy, and it
+    // is exactly right for a cross-wind-homogeneous problem and wrong for one
+    // where the city has an edge that matters. The seam is also not smooth --
+    // real building heights at y = 0 and y = ny-1 were never chosen to match --
+    // so the mismatch is counted and reported below rather than left implicit.
+    //
+    // Periodicity is handled inside Domain::fill_neighbours, which wraps within
+    // the interior range and allocates no halo in a periodic direction, so
+    // neither solver needs to know.
+    const bool per_y = (lateral == "periodic");
+    if (lateral != "periodic" && lateral != "prescribed")
+      throw std::runtime_error("-lateral takes 'prescribed' or 'periodic'");
+    Domain d(g.nx, g.ny, g.nz, false, per_y, false);
     Coll coll; coll.omega = omega;
     Solver s(d, coll);
 
@@ -257,6 +282,29 @@ int main(int argc, char** argv) {
     double ex = 0, ey = 0;
     if (!diffusion_only) wind.direction(ex, ey);
     const bool in_xm = ex > 1e-9, in_xp = ex < -1e-9;
+    if (per_y) {
+      // The city wraps across the y seam, and real building heights at y = 0
+      // and y = ny-1 were never chosen to match. Counting the mismatch is the
+      // difference between a stated idealisation and a hidden one.
+      Index seam = 0; double worst = 0;
+      for (Index x = 0; x < g.nx; ++x) {
+        const double a = g.at(x, 0), b = g.at(x, g.ny - 1);
+        if (std::abs(a - b) > 1e-6) { ++seam; worst = std::max(worst, std::abs(a - b)); }
+      }
+      std::printf("\n  lateral: PERIODIC in y. The domain is an infinite strip across the\n"
+                  "           wind: the city repeats every %.0f m and a plume drifting\n"
+                  "           sideways out of one edge re-enters at the other.\n"
+                  "           Seam: %d of %d columns disagree in height, worst %.1f m.\n",
+                  g.ny * g.dx, int(seam), int(g.nx), worst);
+      // Periodicity in y is the right idealisation for a wind ALONG x. With a
+      // cross-wind component the strip is still well posed, but the plume is
+      // then advected into the seam rather than merely diffusing across it, and
+      // the wrap stops being a detail.
+      if (!diffusion_only && std::abs(ey) > 0.05)
+        std::printf("           WARNING the wind has a %.0f%% cross-wind component, so the\n"
+                    "           plume is ADVECTED through the seam, not just diffused.\n",
+                    100.0 * std::abs(ey));
+    }
     const bool in_ym = ey > 1e-9, in_yp = ey < -1e-9;
 
     // ONE classification, named, used by set_geometry AND by the source-cell
@@ -277,7 +325,7 @@ int main(int argc, char** argv) {
       // lowest layer of air and lifts the ground to z = dx. That is a 5 m error
       // on this grid, in the layer where the source sits.
       const bool inflow = (x == 0 && in_xm) || (x == g.nx - 1 && in_xp) ||
-                          (y == 0 && in_ym) || (y == g.ny - 1 && in_yp);
+                          (!per_y && ((y == 0 && in_ym) || (y == g.ny - 1 && in_yp)));
       if (inflow) return ScalarDirichlet;
       // THE TOP IS A MODELLING CHOICE, not a technicality, and the two options
       // differ by more than the boundary layer.
@@ -295,7 +343,8 @@ int main(int argc, char** argv) {
       // boundary layer -- at the cost of forcing C = 0 there, so it is wrong in
       // the other direction if the plume genuinely reaches the top.
       if (z == g.nz - 1) return (top == "open") ? ScalarDirichlet : ScalarOutflow;
-      const bool face = (x == 0 || x == g.nx - 1 || y == 0 || y == g.ny - 1);
+      const bool face = (x == 0 || x == g.nx - 1 ||
+                         (!per_y && (y == 0 || y == g.ny - 1)));
       return face ? ScalarOutflow : ScalarBulk;
     };
     s.set_geometry(classify);
@@ -379,19 +428,64 @@ int main(int argc, char** argv) {
                   nu_phys, nu_lat, 1.0 / double(fcoll.omega_p));
 
       flow = std::make_unique<Flow>(d, fcoll);
+      // A FACE CELL SHADOWED BY A BUILDING IS ILL-POSED, and on a real city
+      // there are thousands of them.
+      //
+      // The regularised condition reconstructs density at a wall node from the
+      // populations that streamed into it, splitting them by the wall normal
+      // into known and unknown. That split assumes the known ones arrived from
+      // the interior. When the cell one step inward is a building, what
+      // actually arrives is bounce-back off that building, the reconstructed
+      // density is not a density, and the solve diverges: Manchester has 3975
+      // built columns touching the domain edge and NaNs within 500 steps.
+      // Clearing an 8-cell band around the edge removes the NaN outright, which
+      // is what identified the cause; periodic laterals alone do NOT, because
+      // they leave the inlet and outlet faces where the same thing happens.
+      //
+      // Making such a cell Solid extends the building by the one cell it was
+      // already effectively occupying, and turns an ill-posed node into a
+      // well-posed wall. It also subsumes the "outflow node has no fluid
+      // neighbour and is inert" case, which was the same geometry seen from the
+      // outlet side and left frozen rather than closed.
+      Index shadowed = 0;
+      for (Index z = 0; z < g.nz; ++z)
+        for (Index y = 0; y < g.ny; ++y)
+          for (Index x = 0; x < g.nx; ++x)
+            if (!g.solid(x, y, z) &&
+                ((x == 0 && g.solid(x + 1, y, z)) ||
+                 (x == g.nx - 1 && g.solid(x - 1, y, z)) ||
+                 (z == g.nz - 1 && g.solid(x, y, z - 1)) ||
+                 (!per_y && y == 0 && g.solid(x, y + 1, z)) ||
+                 (!per_y && y == g.ny - 1 && g.solid(x, y - 1, z)))) ++shadowed;
+      if (shadowed)
+        std::printf("  [walls] %d face cell(s) shadowed by a building, closed as solid\n",
+                    int(shadowed));
+
       flow->set_geometry([&](Index x, Index y, Index z) -> CellType {
         if (g.solid(x, y, z)) return Solid;
+        if ((x == 0 && g.solid(x + 1, y, z)) ||
+            (x == g.nx - 1 && g.solid(x - 1, y, z)) ||
+            (z == g.nz - 1 && g.solid(x, y, z - 1)) ||
+            (!per_y && y == 0 && g.solid(x, y + 1, z)) ||
+            (!per_y && y == g.ny - 1 && g.solid(x, y - 1, z))) return Solid;
         // z = 0 is deliberately NOT a wall here, for the same reason as in the
         // scalar: Esoteric Pull already bounces it off the layer below, putting
         // the no-slip ground at z = 0 exactly.
-        const bool face = (x == 0 || x == g.nx - 1 || y == 0 || y == g.ny - 1 ||
-                           z == g.nz - 1);
+        const bool face = (x == 0 || x == g.nx - 1 || z == g.nz - 1 ||
+                           (!per_y && (y == 0 || y == g.ny - 1)));
         return face ? RegWall : Fluid;
       });
 
       using WS = Flow::WallSpec;
       flow->set_regularized_walls([&](Index x, Index y, Index z) -> WS {
         if (g.solid(x, y, z)) return WS{};
+        // Same predicate as the geometry above: a closed cell is a wall, not a
+        // boundary node, and must not be handed a velocity to impose.
+        if ((x == 0 && g.solid(x + 1, y, z)) ||
+            (x == g.nx - 1 && g.solid(x - 1, y, z)) ||
+            (z == g.nz - 1 && g.solid(x, y, z - 1)) ||
+            (!per_y && y == 0 && g.solid(x, y + 1, z)) ||
+            (!per_y && y == g.ny - 1 && g.solid(x, y - 1, z))) return WS{};
         const double ul = sc.to_u_lat(wind.speed((double(z) + 0.5) * g.dx));
         const Real vx = Real(ul * ex), vy = Real(ul * ey), vz = Real(0);
         // A face is an inlet where the wind enters it, an outlet where it
@@ -411,13 +505,13 @@ int main(int argc, char** argv) {
         // there, while the interior was meanwhile perfectly well behaved at
         // 9.1 m/s and 7.3e-3. Prescribing the undisturbed profile on the edges
         // is both defined and defensible -- they are far field by construction.
-        const int faces = int(x == 0) + int(x == g.nx - 1) + int(y == 0) +
-                          int(y == g.ny - 1) + int(z == g.nz - 1);
+        const int faces = int(x == 0) + int(x == g.nx - 1) + int(z == g.nz - 1) +
+                          (per_y ? 0 : int(y == 0) + int(y == g.ny - 1));
         if (faces > 1) return WS{NrmCorner, vx, vy, vz, Real(1)};
         if (x == 0)         return face( ex, NrmXm);
         if (x == g.nx - 1)  return face(-ex, NrmXp);
-        if (y == 0)         return face( ey, NrmYm);
-        if (y == g.ny - 1)  return face(-ey, NrmYp);
+        if (!per_y && y == 0)        return face( ey, NrmYm);
+        if (!per_y && y == g.ny - 1) return face(-ey, NrmYp);
         if (z == g.nz - 1)  return face(Real(0), NrmZp);
         return WS{};
       });
@@ -506,18 +600,25 @@ int main(int argc, char** argv) {
       double s2 = 0, s2w = 0, mx = 0, mxw = 0;
       long long nn = 0, nw = 0;
       Index mxi = 0, mxj = 0, mxk = 0;
+      // With periodic laterals the y = 0 and y = ny-1 planes are ordinary
+      // interior cells and belong in the statistics; their neighbours wrap.
+      // Leaving them out would drop 0.5% of the domain from an rms the
+      // stability threshold is now built on.
+      const Index y0 = per_y ? 0 : 1, y1 = per_y ? g.ny : g.ny - 1;
+      auto wy = [&](Index y) { return per_y ? (y + g.ny) % g.ny : y; };
       for (Index z = 1; z < g.nz - 1; ++z)
-        for (Index y = 1; y < g.ny - 1; ++y)
+        for (Index y = y0; y < y1; ++y)
           for (Index x = 1; x < g.nx - 1; ++x) {
             if (g.solid(x, y, z)) continue;
+            const Index yp = wy(y + 1), ym = wy(y - 1);
             const double dv =
                 0.5 * (double(h_ux(d.id(x+1,y,z))) - double(h_ux(d.id(x-1,y,z)))) +
-                0.5 * (double(h_uy(d.id(x,y+1,z))) - double(h_uy(d.id(x,y-1,z)))) +
+                0.5 * (double(h_uy(d.id(x,yp,z)))  - double(h_uy(d.id(x,ym,z)))) +
                 0.5 * (double(h_uz(d.id(x,y,z+1))) - double(h_uz(d.id(x,y,z-1))));
             s2 += dv * dv; ++nn;
             if (std::abs(dv) > mx) { mx = std::abs(dv); mxi = x; mxj = y; mxk = z; }
             const bool wall = g.solid(x+1,y,z) || g.solid(x-1,y,z) ||
-                              g.solid(x,y+1,z) || g.solid(x,y-1,z) ||
+                              g.solid(x,yp,z)  || g.solid(x,ym,z) ||
                               g.solid(x,y,z+1) || g.solid(x,y,z-1);
             if (wall) { s2w += dv * dv; ++nw; mxw = std::max(mxw, std::abs(dv)); }
           }
@@ -532,19 +633,23 @@ int main(int argc, char** argv) {
       // Where the worst divergence sits matters more than its value: at a
       // domain face it is a boundary-condition artefact, in the interior it is
       // the wind model.
+      const bool on_face = mxi <= 1 || mxi >= g.nx - 2 || mxk >= g.nz - 2 ||
+                           (!per_y && (mxj <= 1 || mxj >= g.ny - 2));
       std::printf("          worst at (%d,%d,%d)%s\n", int(mxi), int(mxj), int(mxk),
-                  (mxi <= 1 || mxi >= g.nx - 2 || mxj <= 1 || mxj >= g.ny - 2 ||
-                   mxk >= g.nz - 2) ? "  <- ON A DOMAIN FACE" : "  (interior)");
+                  on_face ? "  <- ON A DOMAIN FACE" : "  (interior)");
       // Interior-only statistics, three cells clear of every face, so a
       // boundary artefact cannot masquerade as a bulk error.
       double is2 = 0, imx = 0, iu = 0; long long inn = 0;
+      // "Clear of every face" means the faces that exist: a periodic direction
+      // has none, so the whole span is interior there.
+      const Index iy0 = per_y ? 0 : 3, iy1 = per_y ? g.ny : g.ny - 3;
       for (Index z = 1; z < g.nz - 3; ++z)
-        for (Index y = 3; y < g.ny - 3; ++y)
+        for (Index y = iy0; y < iy1; ++y)
           for (Index x = 3; x < g.nx - 3; ++x) {
             if (g.solid(x, y, z)) continue;
             const double dv =
                 0.5 * (double(h_ux(d.id(x+1,y,z))) - double(h_ux(d.id(x-1,y,z)))) +
-                0.5 * (double(h_uy(d.id(x,y+1,z))) - double(h_uy(d.id(x,y-1,z)))) +
+                0.5 * (double(h_uy(d.id(x,wy(y+1),z))) - double(h_uy(d.id(x,wy(y-1),z)))) +
                 0.5 * (double(h_uz(d.id(x,y,z+1))) - double(h_uz(d.id(x,y,z-1))));
             is2 += dv * dv; ++inn; imx = std::max(imx, std::abs(dv));
             const Index nn2 = d.id(x, y, z);
