@@ -316,25 +316,6 @@ class FluidSolver {
                     int(degenerate));
       Kokkos::deep_copy(bc_don_, h_don);
       Kokkos::deep_copy(bc_onrm_, h_onrm);
-
-      // Compact list of the outflow cells, and the per-node row into the
-      // prefetch buffer. Built here because this is where the donors are known.
-      std::vector<Index> ofl;
-      for (Index n = 0; n < dom_.n_padded; ++n)
-        if (h_nrm(n) == NrmOutFree) ofl.push_back(n);
-      n_outfree_ = Index(ofl.size());
-      outfree_   = View1D<Index>("outfree", std::max<std::size_t>(1, ofl.size()));
-      bc_oslot_  = View1D<Index>("oslot", dom_.n_padded);
-      outbuf_    = View2D<Real>("outbuf", std::max<std::size_t>(1, ofl.size()), Q);
-      auto h_ofl  = Kokkos::create_mirror_view(outfree_);
-      auto h_slot = Kokkos::create_mirror_view(bc_oslot_);
-      for (Index n = 0; n < dom_.n_padded; ++n) h_slot(n) = Index(-1);
-      for (std::size_t k = 0; k < ofl.size(); ++k) {
-        h_ofl(k) = ofl[k];
-        h_slot(ofl[k]) = Index(k);
-      }
-      Kokkos::deep_copy(outfree_, h_ofl);
-      Kokkos::deep_copy(bc_oslot_, h_slot);
     }
 
     if (table.size() > std::size_t(std::numeric_limits<std::uint16_t>::max()))
@@ -394,14 +375,9 @@ class FluidSolver {
   //----------------------------------------------------------------------------
   void step(bool store_macroscopic = false) {
     if (has_corners_) { if (t_ % 2 == 0) corner_density<0>(); else corner_density<1>(); }
-    // The prefetch must SEE the pre-step state and the main kernel must not
-    // start writing until it has, hence the fence. Skipped entirely when no
-    // cell is an arbitrary-face outflow, so a problem without one pays nothing.
     if (t_ % 2 == 0) {
-      if (n_outfree_) { outflow_prefetch<0>(); Kokkos::fence(); }
       if (store_macroscopic) run_step<0, true>(); else run_step<0, false>();
     } else {
-      if (n_outfree_) { outflow_prefetch<1>(); Kokkos::fence(); }
       if (store_macroscopic) run_step<1, true>(); else run_step<1, false>();
     }
     pop_.end_of_step();
@@ -478,29 +454,6 @@ class FluidSolver {
   // the same state as everything else -- reading a stale parity here would put
   // a one-step lag into the corner density and quietly spoil the order.
   //----------------------------------------------------------------------------
-  //--------------------------------------------------------------------------
-  // Read every outflow node's donor distribution into outbuf_. Pure reads, run
-  // before the step writes anything, so nothing here can race.
-  //--------------------------------------------------------------------------
-  template <int P>
-  void outflow_prefetch() {
-    const auto acc = pop_.template access<P>();
-    const Domain d = dom_;
-    auto don = bc_don_; auto ofl = outfree_; auto buf = outbuf_;
-    Kokkos::parallel_for("outflow_prefetch", Range(0, n_outfree_),
-      KOKKOS_LAMBDA(Index k) {
-        const Index src = don(ofl(k));
-        Neighbours<L> nb;
-        d.template fill_neighbours<L, NF, NS>(src, nb);
-        buf(k, 0) = acc.load_rest(nb);
-        for (int i = 1; i < Q; i += 2) {
-          Real a, b;
-          acc.load_pair(nb, i, a, b);
-          buf(k, i) = a; buf(k, i + 1) = b;
-        }
-      });
-  }
-
   template <int P>
   void corner_density() {
     const auto acc = pop_.template access<P>();
@@ -555,7 +508,6 @@ class FluidSolver {
     auto flags = flags_;
     auto bc_nrm = bc_nrm_; auto bc_tag = bc_tag_; auto wall_u = wall_u_;
     auto bc_rho = bc_rho_; auto bc_unk = bc_unk_; auto bc_don = bc_don_; auto bc_onrm = bc_onrm_;
-    auto bc_oslot = bc_oslot_; auto outbuf = outbuf_;
     const bool fd_corners = fd_corners_ && has_shear_omega<Collision>;
     const bool force_bc   = force_bc_;
     const int  out_order  = out_order_;
@@ -661,20 +613,12 @@ class FluidSolver {
           // non-equilibrium stress, and rescale it to the imposed density. That
           // is zero-gradient on the shape of the distribution and Dirichlet on
           // the pressure, which anchors rho without over-specifying anything.
-          //
-          // The distribution comes from outflow_prefetch, which read it before
-          // this step wrote anything. Reading the donor HERE is a race: under
-          // Esoteric Pull the two slots a node reads are the two it writes, so
-          // the donor -- an ordinary fluid cell in this same pass -- rewrites
-          // what this read sees. It was measured byte-identical on 1 to 8
-          // threads, but only because the active list is index-ordered and a
-          // donor is an immediate neighbour, so the pair shares a thread chunk.
-          // That is CPU chunking, not correctness, and it does not survive a
-          // GPU. The identical read in the `macro` kernel is left alone: that
-          // pass writes no populations, so nothing there can race.
-          const Index slot = bc_oslot(n);
+          const Index src = bc_don(n);
+          Neighbours<L> nbu;
+          d.template fill_neighbours<L, NF, NS>(src, nbu);
           Real g[Q];
-          for (int i = 0; i < Q; ++i) g[i] = outbuf(slot, i);
+          g[0] = acc.load_rest(nbu);
+          for (int i = 1; i < Q; i += 2) acc.load_pair(nbu, i, g[i], g[i + 1]);
           if constexpr (Collision::Storage::shifted)
             for (int i = 0; i < Q; ++i) g[i] += weight<L, Real>(i);
           Real sm = Real(0);
@@ -998,26 +942,6 @@ class FluidSolver {
   // voxelised cap is a staircase of axis-aligned faces, so each node HAS an
   // exact axis normal even though the cap as a whole does not.
   View1D<std::uint8_t>  bc_onrm_;
-  //--------------------------------------------------------------------------
-  // Arbitrary-face outflow needs its donor's WHOLE distribution -- see the
-  // closure in run_step for why a moment condition does not work here. Reading
-  // it inside the main kernel is a data race: under Esoteric Pull the two slots
-  // a node reads are exactly the two it writes, so a donor updated in the same
-  // pass rewrites what the outflow node is reading.
-  //
-  // Measured byte-identical on 1, 2, 4 and 8 threads before this change, but
-  // only by layout: the active list is in ascending node index and a donor is
-  // an immediate neighbour, so the pair lands in one thread's contiguous chunk.
-  // That is a property of CPU chunking and does not survive a GPU, where every
-  // node is its own work item and nothing orders the two.
-  //
-  // So the donors are read into a compact buffer by a pass that runs BEFORE
-  // anything is written, and the main kernel reads the buffer. One extra fence
-  // and n_outfree * Q reals -- 432 kB on the aorta's 2000 outlet nodes.
-  View1D<Index>         outfree_;      // node index of each outflow cell
-  View1D<Index>         bc_oslot_;     // node -> row in outbuf_, or -1
-  View2D<Real>          outbuf_;       // (n_outfree_, Q) donor populations
-  Index                 n_outfree_ = 0;
   View1D<std::uint32_t> bc_unk_;
   View1D<Real>         bc_rho_;
   bool                 has_corners_ = false;
