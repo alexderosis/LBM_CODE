@@ -116,6 +116,12 @@ class EsotericPull {
 
   void end_of_step() {}   // nothing to swap: the array is updated in place
 
+  // The whole lattice, unmediated by the read pattern. A diagnostic that has to
+  // count every population -- not the ones some particular node reads -- needs
+  // this, because an in-flight population lives in the slot of whichever node
+  // owns it, and a wall node owns slots even though it never runs.
+  View2D<Real> storage() const { return f_; }
+
   static constexpr std::size_t bytes_per_node() { return Q * sizeof(Real); }
 
  private:

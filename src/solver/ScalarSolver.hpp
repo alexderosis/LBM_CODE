@@ -172,6 +172,27 @@ class ScalarSolver {
   View1D<std::uint8_t> flags() const { return flags_; }
 
   //--------------------------------------------------------------------------
+  // Every population in the lattice, wall slots included.
+  //
+  // This is NOT the same number as summing temperature() over the fluid, and
+  // the difference is the point. The macroscopic field is zero at an adiabatic
+  // node by definition, so a budget built on it answers "how much is in the
+  // fluid"; under an in-place scheme part of the material is, at any instant,
+  // sitting in a slot owned by a wall. Only this sum answers "how much exists",
+  // which is what a conservation check needs. See validation/scalar_mass.cpp.
+  //--------------------------------------------------------------------------
+  Real total_population() const {
+    auto f = pop_.storage();
+    Real s = Real(0);
+    Kokkos::parallel_reduce(
+        "scalar_total",
+        Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0, 0},
+            {Index(f.extent(0)), Index(f.extent(1))}),
+        KOKKOS_LAMBDA(Index n, Index i, Real& acc) { acc += f(n, i); }, s);
+    return s;
+  }
+
+  //--------------------------------------------------------------------------
   // Rebuild the unknown-direction masks used by ScalarMoment nodes. Call once
   // after set_geometry; geometry is static, so this is setup-time work.
   //--------------------------------------------------------------------------

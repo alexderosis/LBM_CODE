@@ -24,6 +24,7 @@ Pure standard library: no numpy on this machine. 16M cells as array('f') is
 
   usage: plume_stats.py <conc.vtk> --log <run.log> [--roof 60] [--bins 8]
          plume_stats.py ... --brief      one line, for a figure caption
+         plume_stats.py ... --levels     three shell levels, by enclosed mass
 """
 import array, math, os, sys
 
@@ -103,6 +104,28 @@ def main():
                 if b >= nbins: continue
                 band[b].add(c, xx * px + yy * py, z)
                 total += c
+
+    # Transfer-function levels, chosen from the field rather than guessed. The
+    # renderer draws three shells; putting them at the concentrations that
+    # enclose 95%, 80% and 50% of the plume's mass makes the outer shell mean
+    # "almost all of it is inside here" and the inner one "half of it is in
+    # here", which is a statement about the release. Levels carried over from
+    # another run mean nothing at all: this plume's 50% level moves by an order
+    # of magnitude between one minute and fifteen as it spreads.
+    if "--levels" in argv:
+        v = sorted(c for c in C if c > 1e-12)
+        tot = sum(v)
+        # Integrating from the highest concentration down, the 50% level is
+        # reached FIRST and is the highest of the three; the renderer wants them
+        # ascending, so the list is reversed on the way out.
+        want, out, run = [0.50, 0.80, 0.95], [], 0.0
+        for x in reversed(v):
+            run += x
+            while want and run >= want[0] * tot:
+                out.append(x); want.pop(0)
+            if not want: break
+        print(",".join(f"{x:.3g}" for x in reversed(out)))
+        return
 
     # One line, for a caption that then cannot disagree with the picture.
     # Averaged over the bins that actually carry street-level material: a ratio

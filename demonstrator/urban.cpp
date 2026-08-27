@@ -648,9 +648,10 @@ int main(int argc, char** argv) {
     // downstream that takes a logarithm or treats "negative" as "solid" has to
     // know: the plan-view plot in doc/fig/plot_urban.py originally painted three
     // million undershooting cells as buildings for exactly that reason.
-    std::printf("  %9s %12s %12s %10s %10s %11s\n",
-                "t (s)", "in domain", "injected", "retained", "min C", "dM/dt");
-    std::printf("  %s\n", std::string(70, '-').c_str());
+    std::printf("  %9s %12s %12s %10s %9s %10s %11s\n",
+                "t (s)", "in domain", "injected", "retained", "in fluid",
+                "min C", "dM/dt");
+    std::printf("  %s\n", std::string(80, '-').c_str());
 
     std::vector<float> Cout(std::size_t(d.n_padded));
     const auto t0 = std::chrono::steady_clock::now();
@@ -660,16 +661,36 @@ int main(int argc, char** argv) {
       if (t % every == 0) {
         s.compute_field();
         auto h = Kokkos::create_mirror_view_and_copy(HostSpace{}, s.temperature());
-        double mass = 0.0, cmin = 0.0, cmax = 0.0;
+        double fluid = 0.0, cmin = 0.0, cmax = 0.0;
         for (Index z = 0; z < g.nz; ++z)
           for (Index y = 0; y < g.ny; ++y)
             for (Index x = 0; x < g.nx; ++x) {
               const Index n = d.id(x, y, z);
               const double c = g.solid(x, y, z) ? -1.0 : double(h(n));
-              mass += g.solid(x, y, z) ? 0.0 : c;
+              fluid += g.solid(x, y, z) ? 0.0 : c;
               if (!g.solid(x, y, z)) { cmin = std::min(cmin, c); cmax = std::max(cmax, c); }
               Cout[std::size_t(n)] = float(c);
             }
+        // THE BUDGET IS THE WHOLE LATTICE, NOT THE FLUID.
+        //
+        // Summing the macroscopic field over fluid cells is the obvious thing
+        // to do and it is systematically short. Under Esoteric Pull a
+        // population emitted toward a wall spends a step in a slot the WALL
+        // owns, and no node's field includes it while it is there. The
+        // shortfall is a standing boundary-layer quantity -- it grows with wall
+        // area and with the advective flux into walls, and it does not
+        // oscillate with the parity -- so on a city it is large: 0.7% for a
+        // bare box, 2.4% once there is a block in it, 6.9% with advection on,
+        // and 13% over Manhattan's 6.87% solid fraction. Thirteen per cent
+        // reads exactly like a leak, which is how it was first read here, and
+        // it took a closed box with an exact answer to show it was not one.
+        // validation/scalar_mass.cpp is that box: the total over the whole
+        // lattice comes back as the injection to round-off in every case, with
+        // and without buildings, with and without a divergent wind.
+        //
+        // So the budget uses the conserved total and the fluid sum is reported
+        // beside it, as a fraction, rather than in place of it.
+        const double mass = double(s.total_population());
         const double now = sc.seconds(t);
         const double dM = (now > prev_t) ? (mass - prev_mass) / (now - prev_t) : 0.0;
         // Finiteness is NOT a sufficient check. An exponentiating run stays
@@ -691,9 +712,9 @@ int main(int argc, char** argv) {
           std::printf("  Check the stability margin reported above.\n");
           rc = 1; break;
         }
-        std::printf("  %9.1f %12.4e %12.4e %9.1f%% %10.2e %11.3e\n",
+        std::printf("  %9.1f %12.4e %12.4e %9.1f%% %8.1f%% %10.2e %11.3e\n",
                     now, mass, injected, injected > 0 ? 100.0 * mass / injected : 0.0,
-                    cmin, dM);
+                    mass > 0 ? 100.0 * fluid / mass : 0.0, cmin, dM);
         (void)cmax;
         std::fflush(stdout);
         char p[512];
@@ -708,10 +729,16 @@ int main(int argc, char** argv) {
     std::printf("\n  %zu steps in %.1f s wall  (%.1f MLUPS), %d frames in %s/\n\n",
                 nsteps, wall,
                 double(g.cells()) * double(nsteps) / wall / 1e6, frame, outdir.c_str());
-    std::printf("  \"retained\" is the fraction of the release still inside the domain.\n");
-    std::printf("  It is NOT a conservation check: the outflow condition prescribes its\n");
-    std::printf("  cells, so what left is injected minus retained by construction. What\n");
-    std::printf("  it does show is when the plume reaches steady state -- dM/dt -> 0.\n\n");
+    std::printf("  \"retained\" is the fraction of the release still inside the domain,\n");
+    std::printf("  summed over the WHOLE lattice. It is NOT a conservation check: the\n");
+    std::printf("  outflow condition prescribes its cells, so what left is injected minus\n");
+    std::printf("  retained by construction. What it does show is when the plume reaches\n");
+    std::printf("  steady state -- dM/dt -> 0.\n\n");
+    std::printf("  \"in fluid\" is how much of that total the macroscopic field sees. The\n");
+    std::printf("  rest is sitting in slots owned by walls, in flight for one step, and it\n");
+    std::printf("  is the plotted field that is missing it -- not the solver. The fraction\n");
+    std::printf("  is set by wall area and by the advective flux into walls; see\n");
+    std::printf("  validation/scalar_mass.cpp, which measures it against an exact answer.\n\n");
   } catch (const std::exception& e) {
     std::printf("\nerror: %s\n\n", e.what());
     rc = 1;
