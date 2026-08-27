@@ -17,7 +17,7 @@ factor of a few, not decades, and a log ramp would flatten precisely the
 contrast this plot exists to show.
 
   usage: plot_slice.py <field.vtk> <nx> <ny> <nz> <k> <out.png>
-                       [--vmax V | --pct 98] [--dx 5]
+                       [--vmax V | --pct 98] [--dx 5] [--scale N] [--trim N]
 """
 import array, math, struct, sys, zlib
 
@@ -64,7 +64,16 @@ def main():
     src, nx, ny, nz, k, out = a[0], int(a[1]), int(a[2]), int(a[3]), int(a[4]), a[5]
     dx = float(opt('--dx', '5'))
     F = read_vtk(src, nx * ny * nz)
-    at = lambda x, y: F[(k * ny + y) * nx + x]
+    # --trim drops cells from each STREAMWISE edge. The inlet and outlet faces
+    # carry the over-determined-corner artefact of sec:urbansolvedcity, which is
+    # several times the free stream and occupies a fifth of the frame at each
+    # end; the document's own position is that the field is usable away from the
+    # boundary. Trimming is therefore showing the part that is claimed, not
+    # hiding the part that is not -- and the untrimmed frame is kept alongside.
+    trim = int(opt('--trim', '0'))
+    x0, nx_full = trim, nx
+    nx = nx - 2 * trim
+    at = lambda x, y: F[(k * ny + y) * nx_full + (x + x0)]
 
     vals = [at(x, y) for y in range(ny) for x in range(nx) if at(x, y) > -0.5]
     # SCALE TO A PERCENTILE, NOT THE MAXIMUM. The outlet/top corner artefact of
@@ -81,14 +90,24 @@ def main():
     else:
         vmax = 1.0
 
+    # Integer nearest-neighbour upscale, so a 200-cell domain is legible as a
+    # video frame. Nearest-neighbour rather than smooth for the same reason
+    # vol_urban samples buildings that way: the data is voxels and pretending
+    # otherwise puts artefacts exactly at the rooflines where the eye goes.
+    sc = max(1, int(opt('--scale', '1')))
     pad = 14
-    W, H = nx + 2 * pad, ny + 2 * pad + 22
+    W, H = nx * sc + 2 * pad, ny * sc + 2 * pad + 22
     buf = bytearray([12, 13, 20] * (W * H))
 
     def put(px, py, rgb):
         if 0 <= px < W and 0 <= py < H:
             i = (py * W + px) * 3
             buf[i:i+3] = bytes(rgb)
+
+    def block(cx, cy, rgb):
+        for a in range(sc):
+            for b in range(sc):
+                put(pad + cx * sc + a, pad + (ny - 1 - cy) * sc + b, rgb)
 
     solid_n = 0
     for y in range(ny):
@@ -98,17 +117,18 @@ def main():
                 rgb = (86, 88, 96); solid_n += 1     # building, at this height
             else:
                 rgb = ramp(v / vmax if vmax > 0 else 0.0)
-            put(pad + x, pad + (ny - 1 - y), rgb)
+            block(x, y, rgb)
 
     # 200 m scale bar
-    n = int(round(200.0 / dx))
+    n = int(round(200.0 / dx)) * sc
     for i in range(n):
-        put(pad + 8 + i, pad + ny - 8, (240, 240, 245))
-        put(pad + 8 + i, pad + ny - 7, (240, 240, 245))
+        put(pad + 8 + i, pad + ny * sc - 8, (240, 240, 245))
+        put(pad + 8 + i, pad + ny * sc - 7, (240, 240, 245))
 
     png(out, W, H, buf)
-    print("  %s  z = %.0f m  vmax %.2f  solid %d/%d cells in plane"
-          % (out.split('/')[-1], (k + 0.5) * dx, vmax, solid_n, nx * ny))
+    print("  %s  z = %.0f m  vmax %.2f  solid %d/%d in plane%s"
+          % (out.split('/')[-1], (k + 0.5) * dx, vmax, solid_n, nx * ny,
+             ("  (trimmed %d cells each streamwise edge)" % trim) if trim else ""))
 
 
 main()
