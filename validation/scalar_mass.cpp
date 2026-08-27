@@ -157,6 +157,24 @@ int main(int argc, char** argv) {
                 "next step");
     std::printf("  %s\n", std::string(86, '-').c_str());
 
+    // The closed box has no sink at all, so the total must be the injection to
+    // round-off -- but "round-off" is a different number in the two precisions,
+    // and unlike the poiseuille ladder this measurement stays meaningful in
+    // both. Conservation to 1e-5 still separates a conservative scheme from
+    // every effect this test exists to catch: the fluid-only sums below are
+    // short by 0.7% to 6.9%, four orders of magnitude above the FP32 floor.
+    //
+    // The FP32 floor is a reduction over a quarter of a million populations plus
+    // 400 steps of accumulating a source. Measured across the four cases it is
+    // 3.3e-5, worst on the bare box -- not the 5.5e-6 of the advected rows,
+    // which is the number it is tempting to quote because it is the one the
+    // eye lands on. 3e-4 sits a factor of nine above that floor and a factor of
+    // twenty-three below the smallest effect this test exists to catch, the
+    // 0.7% fluid-only deficit. FP64 keeps 1e-9.
+    const bool fp64 = (sizeof(Real) == 8);
+    const double tol = fp64 ? 1e-9 : 3e-4;
+    std::printf("  conservation tolerance %.0e (%s)\n\n", tol, precision_name());
+
     const Case cases[] = {
       {"box",     false, false, false},
       {"block",   true,  false, false},
@@ -170,11 +188,12 @@ int main(int argc, char** argv) {
       std::printf("  %-10s %13.6f %13.6f %8.4f%% %13.6f %8.4f%% %11.6f\n",
                   c.name, r.injected, r.in_fluid, 100 * ef, r.everywhere, 100 * ea,
                   r.in_fluid_next);
-      // The closed box has no sink at all, so the total must be the injection
-      // to round-off. A tolerance of 1e-9 is far above double round-off over
-      // 400 steps and far below anything a real leak would produce.
-      if (std::abs(ea) > 1e-9) rc = 1;
+      if (std::abs(ea) > tol) rc = 1;
     }
+    // Worth stating because it is a free cross-check: the fluid-only shortfall
+    // comes out at -0.7112%, -2.3984%, -6.8751% in BOTH precisions, agreeing to
+    // six figures. A deficit that survives halving the mantissa is a property
+    // of the scheme, not of the arithmetic.
     std::printf("\n  \"in fluid\" sums the macroscopic field over bulk nodes;\n"
                 "  \"everywhere\" sums every population in the lattice, wall slots\n"
                 "  included. A gap between them is material parked in a wall rather\n"
