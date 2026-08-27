@@ -4028,23 +4028,55 @@ seam, wrapping it into itself; moved $30$~m, the seam mismatch on the tallest
 column falls from $169$~m to $42$~m.
 
 Effective viscosity had to be found rather than assumed. $\nu=2$ and $\nu=4\,
-\mathrm{m^2s^{-1}}$ both NaN on the crop, at the tower's Reynolds number where a
-steady solve would be expected to fail --- that failure IS the point of using
-this mode, not a defect in it. $\nu=8$ runs and never settles: its residual
-oscillates, $8.2\times10^{-3}$ at $4000$ steps against $7.0\times10^{-2}$ three
-hundred steps earlier, which is what a genuinely unsteady field looks like on
-the same probe a converged one uses to declare itself finished.
+\mathrm{m^2s^{-1}}$ both NaN on the crop; $\nu=8$ runs. During spin-up its
+residual oscillates --- $8.2\times10^{-3}$ at $4000$ steps against
+$7.0\times10^{-2}$ three hundred steps earlier --- and it was tempting to read
+that as an unsteady field. It is not. \textbf{The flow settles.} Measured
+between consecutive output frames, four seconds apart, once the coupling is
+running:
+
+\begin{center}\small
+\begin{tabular}{lccc}
+\toprule
+frames & $\mathrm{rms}|\uu_{i+1}-\uu_i|$ & as \% of $\mathrm{rms}|\uu|$ & max \\
+\midrule
+$30\!\to\!31$ & $1.66\times10^{-3}$ & $0.015\%$ & $0.022$ \\
+$31\!\to\!32$ & $1.37\times10^{-3}$ & $0.012\%$ & $0.014$ \\
+$45\!\to\!46$ & $5.5\times10^{-4}$  & $0.005\%$ & $0.006$ \\
+$59\!\to\!60$ & $3.2\times10^{-4}$  & $0.003\%$ & $0.005$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Monotonically decaying to three parts in a hundred thousand. The
+oscillating spin-up residual was a decaying transient, not shedding, and the
+field the plume rides is steady to within round-off by the end. At $\nu=8$ the
+$169$~m tower sits at $Re\approx250$ on its own width, which is enough for a
+free-standing bluff body to shed --- but this one is wall-mounted in a rough
+boundary layer among neighbours, and at $6.7\times10^{-3}$ lattice viscosity the
+shear layers are damped before they can roll up. Reaching a shedding regime
+needs a lower viscosity, and $\nu=4$ is where this configuration stops
+converging at all. \textbf{That is the gap: between the viscosity at which the
+solve survives and the viscosity at which the flow becomes unsteady, there is
+currently no overlap on this geometry.}
+
+So this section demonstrates that the coupling MECHANISM works --- the flow
+advances with the scalar, the plume rides an instantaneous field, and $D=5$ is
+stable throughout --- and does not demonstrate turbulent dispersion. What the
+plume experiences here is a steady solved wind with recirculation and
+channelling, which is still something no prescribed profile can produce, and is
+not turbulence.
 
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{fig/urban_mcr_coupled_collage.png}
-\caption{Coupled unsteady dispersion, Manchester crop, $3.7$~min into a
-street-level release at $7.5$~m with $0.9$~km of fetch. The plume threads
-between towers rather than following their time-averaged outline, and the
-filamented plan view is the signature of the difference: the frozen-wind plan
-views elsewhere in this section are smooth cones. $D=5\,\mathrm{m^2s^{-1}}$, the
-value that diverged outright under the prescribed wind (\S\ref{sec:urbanstab}).
-The animation is \texttt{doc/fig/mcr\_coupled\_unsteady.mp4}.}
+\caption{Coupled dispersion, Manchester crop, $3.7$~min into a street-level
+release at $7.5$~m with $0.9$~km of fetch, at
+$D=5\,\mathrm{m^2s^{-1}}$ --- the value that diverged outright under the
+prescribed wind (\S\ref{sec:urbanstab}). The flow is advanced one step per
+scalar step, but it converges rather than shedding (above), so the plume is
+riding a steady solved wind, not a turbulent one. The animation is
+\texttt{doc/fig/mcr\_coupled\_unsteady.mp4}.}
 \label{fig:urbancoupled}
 \end{figure}
 
@@ -4082,19 +4114,39 @@ $s$ (m) & $\sigma_n$ street & $\sigma_n$ aloft & ratio \\
 \end{center}
 
 \noindent The ratio rises \emph{above} one in the near-to-mid field before
-settling back near it. A wind that can recirculate spreads the street-level
-plume sideways \emph{faster} than the air above the roofs, rather than merely
-failing to confine it, and this is the wake mechanism \S\ref{sec:urban}'s header
-lists as absent from the prescribed profile: turbulent structure shed off one
-building disperses material laterally in a way a straight-line wind, solved or
-not, cannot produce. Row one, at $s=55$~m, is still the source's immediate
-vicinity and reads like the confined case for the same reason it did in
-\S\ref{sec:urbannyc} --- the plume has not yet had a wake to encounter.
+settling back near it: the street-level plume spreads sideways \emph{faster}
+than the air above the roofs, rather than merely failing to be confined.
+
+The cause is steady recirculation, not turbulence --- the field is steady, as
+measured above. A prescribed profile is zeroed inside buildings and otherwise
+flows straight, so it can only fail to confine; a solved field has standing
+lateral recirculation in the lee of every block, and that alone moves material
+across the flow faster than diffusion does. It is a weaker claim than turbulent
+dispersion and it is the one the data supports. Row one, at $s=55$~m, is still
+the source's immediate vicinity and reads like the confined case of
+\S\ref{sec:urbannyc} for the same reason --- the plume has not yet reached a
+recirculation zone.
 
 This is one release over four minutes on one crop, and the numbers above should
 be read as a demonstration that the mechanism is there and measurable, not as a
 converged statistic. \texttt{-mode unsteady} is new in this section and has had
-one city and one geometry through it.
+one city and one geometry through it --- and, as recorded above, has not yet
+been run at a viscosity where the flow is actually unsteady.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{fig/urban_wind_3heights.png}
+\caption{The solved wind at three heights: $12$~m inside the canyons,
+$42$~m around roof level, $82$~m in the free stream. One colour scale across
+all three, so they are comparable --- dark is slow. The wake streaks trailing
+downwind of the tall blocks in the $82$~m panel are the structure a volume
+render could not show: a wake field is a boundary layer that fills the lower
+domain, $45\%$ of fluid cells carrying a positive velocity deficit, so
+front-to-back compositing accumulates along every ray and returns an opaque
+slab at any threshold. Stacked slices work where shells do not. The animation
+is \texttt{doc/fig/mcr\_wind\_3heights.mp4}.}
+\label{fig:urbanwind3h}
+\end{figure}
 
 \subsection{The top boundary is a modelling choice}
 
