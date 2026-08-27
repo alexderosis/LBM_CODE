@@ -789,19 +789,44 @@ int main(int argc, char** argv) {
     //--------------------------------------------------------------------------
     // The wind itself, in m/s, in the same format as the concentration frames.
     // Solid is written as -1 so a renderer masks it the same way.
+    // A frozen wind needs one dump; an UNSTEADY one needs a dump per frame, or
+    // the plot shows a single instant of a field whose whole point is that it
+    // changes. In unsteady mode the velocity Views are re-read each time rather
+    // than reusing the spin-up mirrors, since those are a snapshot of step 0.
+    std::vector<float> W;
+    auto dump_wind = [&](const std::string& path) {
+      if (W.empty()) W.assign(std::size_t(d.n_padded), 0.f);
+      if (flow) {
+        auto mx = Kokkos::create_mirror_view_and_copy(HostSpace{}, flow->ux());
+        auto my = Kokkos::create_mirror_view_and_copy(HostSpace{}, flow->uy());
+        auto mz = Kokkos::create_mirror_view_and_copy(HostSpace{}, flow->uz());
+        for (Index z = 0; z < g.nz; ++z)
+          for (Index y = 0; y < g.ny; ++y)
+            for (Index x = 0; x < g.nx; ++x) {
+              const Index n = d.id(x, y, z);
+              W[std::size_t(n)] = g.solid(x, y, z) ? -1.f : float(
+                  std::sqrt(double(mx(n))*double(mx(n)) +
+                            double(my(n))*double(my(n)) +
+                            double(mz(n))*double(mz(n))) * g.dx / sc.dt);
+            }
+      } else {
+        for (Index z = 0; z < g.nz; ++z)
+          for (Index y = 0; y < g.ny; ++y)
+            for (Index x = 0; x < g.nx; ++x) {
+              const Index n = d.id(x, y, z);
+              W[std::size_t(n)] = g.solid(x, y, z) ? -1.f : float(
+                  std::sqrt(double(h_ux(n))*double(h_ux(n)) +
+                            double(h_uy(n))*double(h_uy(n)) +
+                            double(h_uz(n))*double(h_uz(n))) * g.dx / sc.dt);
+            }
+      }
+      write_vtk(path, d, g, W, 0, "speed");
+    };
     if (!wind_out.empty()) {
-      std::vector<float> W(std::size_t(d.n_padded), 0.f);
-      for (Index z = 0; z < g.nz; ++z)
-        for (Index y = 0; y < g.ny; ++y)
-          for (Index x = 0; x < g.nx; ++x) {
-            const Index n = d.id(x, y, z);
-            W[std::size_t(n)] = g.solid(x, y, z) ? -1.f : float(
-                std::sqrt(double(h_ux(n))*double(h_ux(n)) +
-                          double(h_uy(n))*double(h_uy(n)) +
-                          double(h_uz(n))*double(h_uz(n))) * g.dx / sc.dt);
-          }
-      write_vtk(wind_out, d, g, W, 0, "speed");
-      std::printf("  wind written to %s (m/s)\n", wind_out.c_str());
+      dump_wind(wind_out);
+      std::printf("  wind written to %s (m/s)%s\n", wind_out.c_str(),
+                  unsteady ? " -- and per frame alongside the concentration"
+                           : "");
     }
 
     if (src_i < 0) { src_i = g.nx / 2; src_j = g.ny / 2; src_k = 1; }
@@ -939,8 +964,14 @@ int main(int argc, char** argv) {
                     mass > 0 ? 100.0 * fluid / mass : 0.0, cmin, dM);
         std::fflush(stdout);
         char p[512];
-        std::snprintf(p, sizeof p, "%s/conc_%04d.vtk", outdir.c_str(), frame++);
+        std::snprintf(p, sizeof p, "%s/conc_%04d.vtk", outdir.c_str(), frame);
         write_vtk(p, d, g, Cout, int(t));
+        if (unsteady && !wind_out.empty()) {
+          char q[512];
+          std::snprintf(q, sizeof q, "%s/wind_%04d.vtk", outdir.c_str(), frame);
+          dump_wind(q);
+        }
+        ++frame;
         prev_mass = mass; prev_t = now;
       }
       if (t < nsteps) {
