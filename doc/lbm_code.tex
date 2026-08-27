@@ -3489,6 +3489,7 @@ $\max|\nabla\!\cdot\!\uu|$ & margin \\
 synthetic          & 2 m & $0.0162$ & $0.159$ & $0.0187$ & $8.5\times$ stable \\
 Manchester, $D=5$  & 5 m & $0.0042$ & $0.042$ & $0.0232$ & $1.8\times$ diverged \\
 Manchester, $D=20$ & 5 m & $0.0168$ & $0.166$ & $0.0232$ & $7.2\times$ stable \\
+Manchester, diagonal & 5 m & $0.0168$ & $0.166$ & $0.0334$ & $5.1\times$ \emph{unverified} \\
 Manhattan, $D=20$  & 5 m & $0.0154$ & $0.152$ & $0.0334$ & $4.6\times$ exponentiated \\
 Manhattan, $D=35$  & 5 m & $0.0270$ & $0.267$ & $0.0334$ & $8.0\times$ stable \\
 \bottomrule
@@ -3497,7 +3498,14 @@ Manhattan, $D=35$  & 5 m & $0.0270$ & $0.267$ & $0.0334$ & $8.0\times$ stable \\
 
 \noindent The margin is not a theorem; it is those measured points, and the
 last two are why the threshold in the code is now $8\times$ rather than the
-$4\times$ it was first set to. Manhattan at $D=20$ sat comfortably above the old
+$4\times$ it was first set to. The diagonal Manchester row is marked unverified
+deliberately. It was judged stable by the mass test, and the mass test is not
+sensitive enough to make that judgement (below); its $\max|\nabla\!\cdot\!\uu|$
+is the same $3.3\times10^{-2}$ as Manhattan's, because a diagonal wind zeroes
+both horizontal components inside buildings, and it sits at $5.1\times$ against
+the $4.6\times$ that demonstrably exponentiated. \textbf{That run should be
+repeated and its undershoot examined before the figure it produced is relied
+on.} Manhattan at $D=20$ sat comfortably above the old
 threshold, printed no warning, and exponentiated anyway. Note where its extra
 divergence comes from: $\max|\nabla\!\cdot\!\uu|$ is $44\%$ larger than
 Manchester's on the same grid at the same wind, because the city is denser and
@@ -3675,8 +3683,16 @@ now one named predicate, asked twice.
 The diagonal wind also costs stability margin: zeroing both horizontal
 components inside buildings raises $\max|\nabla\!\cdot\!\uu|$ from
 $2.3\times10^{-2}$ to $3.3\times10^{-2}$, so the margin of
-\S\ref{sec:urbanstab} falls from $7.2$ to $5.1$. Still comfortably clear of the
-$1.8$ that diverged, but it is the narrowest configuration run to completion.
+\S\ref{sec:urbanstab} falls from $7.2$ to $5.1$. That was described here as
+``comfortably clear of the $1.8$ that diverged'', on the strength of a mass
+budget that stayed sensible for the whole run. \textbf{It should not have been.}
+Manhattan at $4.6\times$ --- essentially the same margin, and the same
+$\max|\nabla\!\cdot\!\uu|$, differing only in $D_{\rm lat}$ through the wind
+speed at a deeper domain's top --- exponentiated while its mass budget tracked
+injection to within a per cent throughout. The correct statement is that this
+configuration has never been checked with the diagnostic that can detect the
+failure, and until it has, the margin it ran at should be read as unverified
+rather than as evidence.
 
 \paragraph{Negative concentrations.} The scheme undershoots. A first-order
 equilibrium with no limiter produces small negative concentrations at sharp
