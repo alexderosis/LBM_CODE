@@ -171,6 +171,7 @@ int main(int argc, char** argv) {
   bool diffusion_only = false;
   std::string top = "lid", mode = "prescribed", lateral = "prescribed", wind_out;
   double nu_phys = 2.0;              // effective (turbulent) viscosity, m2/s
+  Index crop_i = 0, crop_j = 0, crop_nx = 0, crop_ny = 0;
   std::size_t flow_max = 40000;
   double flow_tol = 1e-6;
 
@@ -194,6 +195,8 @@ int main(int argc, char** argv) {
     else if (s == "-top")       top = argv[++a];
     else if (s == "-mode")      mode = argv[++a];
     else if (s == "-lateral")   lateral = argv[++a];
+    else if (s == "-crop")    { crop_i  = Index(num(0)); crop_j  = Index(num(0));
+                                crop_nx = Index(num(0)); crop_ny = Index(num(0)); }
     else if (s == "-wind-out")  wind_out = argv[++a];
     else if (s == "-visc")      nu_phys = num(nu_phys);
     else if (s == "-flow-steps") flow_max = std::size_t(num(double(flow_max)));
@@ -212,7 +215,31 @@ int main(int argc, char** argv) {
     std::printf("\nUrban pollutant dispersion   D3Q7   %s\n", precision_name());
     std::printf("%s\n\n", std::string(70, '=').c_str());
 
-    const HeightField g = load_height_field(prefix + "_heights.npy", prefix + "_meta.json");
+    HeightField g = load_height_field(prefix + "_heights.npy", prefix + "_meta.json");
+
+    // A CROP, because a coupled unsteady run costs a flow step per scalar step
+    // and the full city is then hours rather than minutes. Cropping keeps the
+    // resolution -- which is what resolves the wakes -- and spends the saving
+    // on footprint, which is the right trade when the question is what the
+    // turbulence does to the plume rather than where the plume goes.
+    if (crop_nx > 0 && crop_ny > 0) {
+      if (crop_i < 0 || crop_j < 0 ||
+          crop_i + crop_nx > g.nx || crop_j + crop_ny > g.ny)
+        throw std::runtime_error("-crop window falls outside the height field");
+      HeightField c;
+      c.nx = crop_nx; c.ny = crop_ny; c.nz = g.nz; c.dx = g.dx;
+      c.place = g.place + " (crop)";
+      c.height.resize(std::size_t(crop_nx) * std::size_t(crop_ny));
+      for (Index i = 0; i < crop_nx; ++i)
+        for (Index j = 0; j < crop_ny; ++j)
+          c.height[std::size_t(i) * std::size_t(crop_ny) + std::size_t(j)] =
+              g.height[std::size_t(crop_i + i) * std::size_t(g.ny) +
+                       std::size_t(crop_j + j)];
+      std::printf("\n  crop: %d x %d columns at (%d,%d) of %d x %d\n",
+                  int(crop_nx), int(crop_ny), int(crop_i), int(crop_j),
+                  int(g.nx), int(g.ny));
+      g = std::move(c);
+    }
     report(g, "geometry");
 
     //--------------------------------------------------------------------------
@@ -412,8 +439,19 @@ int main(int argc, char** argv) {
     // Until then: the field is usable away from the boundary, the plume must
     // not be allowed to reach the outlet edges, and -mode prescribed remains
     // the default.
+    // -mode unsteady is -mode solved that never stops solving: the flow is spun
+    // up for -flow-steps and then advanced ONE STEP PER SCALAR STEP, so the
+    // plume is carried by the instantaneous field rather than a frozen mean.
+    // That is the only way the wakes do anything to it -- a converged field has
+    // a steady recirculation behind every building, and a steady recirculation
+    // stirs nothing.
+    const bool solve_flow = (mode == "solved" || mode == "unsteady");
+    const bool unsteady   = (mode == "unsteady");
+    if (mode != "prescribed" && !solve_flow)
+      throw std::runtime_error("-mode takes 'prescribed', 'solved' or 'unsteady'");
+
     std::unique_ptr<Flow> flow;
-    if (mode == "solved") {
+    if (solve_flow) {
       if (diffusion_only) throw std::runtime_error("-mode solved and -diffusion-only conflict");
       const double nu_lat = nu_phys * sc.dt / (g.dx * g.dx);
       FOp fcoll;
@@ -423,8 +461,9 @@ int main(int argc, char** argv) {
       // Lambda = 3/16 additionally puts the bounce-back wall exactly halfway,
       // which is what makes a voxelised building the size it looks.
       fcoll.omega_m = FOp::omega_minus_for(fcoll.omega_p, FOp::magic_3_16);
-      std::printf("\n  SOLVING the wind: D3Q27 TRT, nu %.2f m2/s -> nu_lat %.3e,"
+      std::printf("\n  %s the wind: D3Q27 TRT, nu %.2f m2/s -> nu_lat %.3e,"
                   " tau+ %.6f, Lambda 3/16\n",
+                  unsteady ? "SOLVING, then COUPLING," : "SOLVING",
                   nu_phys, nu_lat, 1.0 / double(fcoll.omega_p));
 
       flow = std::make_unique<Flow>(d, fcoll);
@@ -904,7 +943,14 @@ int main(int argc, char** argv) {
         write_vtk(p, d, g, Cout, int(t));
         prev_mass = mass; prev_t = now;
       }
-      if (t < nsteps) { s.add_source(source); s.step(); injected += rate * sc.dt; }
+      if (t < nsteps) {
+        // The flow advances first, then its macroscopic field is refreshed --
+        // ux/uy/uz are the very Views the scalar was handed, so refreshing them
+        // IS the coupling; there is nothing to copy. compute_macroscopic is an
+        // extra pass over the domain every step and is the price of the mode.
+        if (unsteady) { flow->step(); flow->compute_macroscopic(); }
+        s.add_source(source); s.step(); injected += rate * sc.dt;
+      }
     }
     const double wall = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();

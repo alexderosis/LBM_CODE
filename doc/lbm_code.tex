@@ -4003,6 +4003,99 @@ rate on this machine that is four to seven hours. And the outlet/top edge is
 still over-determined, so a plume must be kept clear of it. The prescribed wind
 therefore remains the default.
 
+\subsection{Coupling the wind, unsteadily}
+\label{sec:urbanunsteady}
+
+Everything in \S\ref{sec:urbansolvedcity} freezes the wind: solve once, hand the
+converged field to the scalar, transport. A converged field has a steady
+recirculation behind every building, and a steady recirculation stirs nothing
+--- so nothing in a frozen-wind run can show the plume being torn apart by a
+building's wake, only advected around its time-averaged shape. \texttt{-mode
+unsteady} spins the flow up as before and then advances it \emph{one step per
+scalar step}, refreshing \texttt{ux/uy/uz} in place: they are the very Views the
+scalar was handed, so the refresh \emph{is} the coupling and nothing is copied.
+The added cost is one \texttt{compute\_macroscopic} pass per step, which is the
+price of an instantaneous rather than a mean field.
+
+\paragraph{A crop, and a viscosity found the hard way.} A coupled run costs a
+flow step every scalar step, so the full $2$~km city is hours rather than
+minutes; a $1\times0.75$~km, $200\times150\times60$ crop at the same $5$~m
+resolution keeps what resolves the wakes and spends the saving on footprint.
+The crop was chosen for density, not the emptiest corner: a $169$~m tower, the
+tallest in the whole city, sits inside it, together with $49\%$ of columns
+built. The obvious first choice happened to put that tower on the periodic
+seam, wrapping it into itself; moved $30$~m, the seam mismatch on the tallest
+column falls from $169$~m to $42$~m.
+
+Effective viscosity had to be found rather than assumed. $\nu=2$ and $\nu=4\,
+\mathrm{m^2s^{-1}}$ both NaN on the crop, at the tower's Reynolds number where a
+steady solve would be expected to fail --- that failure IS the point of using
+this mode, not a defect in it. $\nu=8$ runs and never settles: its residual
+oscillates, $8.2\times10^{-3}$ at $4000$ steps against $7.0\times10^{-2}$ three
+hundred steps earlier, which is what a genuinely unsteady field looks like on
+the same probe a converged one uses to declare itself finished.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{fig/urban_mcr_coupled_collage.png}
+\caption{Coupled unsteady dispersion, Manchester crop, $3.7$~min into a
+street-level release at $7.5$~m with $0.9$~km of fetch. The plume threads
+between towers rather than following their time-averaged outline, and the
+filamented plan view is the signature of the difference: the frozen-wind plan
+views elsewhere in this section are smooth cones. $D=5\,\mathrm{m^2s^{-1}}$, the
+value that diverged outright under the prescribed wind (\S\ref{sec:urbanstab}).
+The animation is \texttt{doc/fig/mcr\_coupled\_unsteady.mp4}.}
+\label{fig:urbancoupled}
+\end{figure}
+
+\paragraph{$D=5$ is comfortable, not marginal.} Under the prescribed wind this
+diffusivity diverged outright. Coupled and unsteady, $\min C$ --- the early
+warning of \S\ref{sec:urbanstab} --- holds at $-2.5\times10^{-4}$ for the entire
+second half of a four-minute release, drifting by less than $3\%$ step to step
+despite riding on a field that is itself fluctuating by tens of per cent. The
+interior divergence is $319\times$ the damping rate against the prescribed
+field's $43\times$ at the same $D$, and the peak interior speed is $15.4\,
+\mathrm{m\,s^{-1}}$ against an $11.9\,\mathrm{m\,s^{-1}}$ free stream --- a
+$29\%$ speed-up over the buildings, against $14\%$ in the converged synthetic
+case of \S\ref{sec:urbansolved}. An unsteady field is not merely divergence-free
+on average; the instant-by-instant acceleration over a roof is larger than a
+time-averaged solve ever shows.
+
+\paragraph{The confinement result reverses.} \S\ref{sec:urbannyc} found Manhattan's
+plume narrower below the rooflines than above near the source, widening to equal
+by $650$~m --- confinement, from buildings simply blocking a wind that cannot
+itself be steered. Measured the same way here:
+
+\begin{center}\small
+\begin{tabular}{rccc}
+\toprule
+$s$ (m) & $\sigma_n$ street & $\sigma_n$ aloft & ratio \\
+\midrule
+ 55  & $23.6$ & $42.2$ & $0.56$ \\
+165  & $30.0$ & $24.9$ & $1.20$ \\
+275  & $41.9$ & $32.5$ & $1.29$ \\
+385  & $52.3$ & $37.5$ & $\bm{1.39}$ \\
+495  & $51.7$ & $42.8$ & $1.21$ \\
+605  & $42.1$ & $43.4$ & $0.97$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The ratio rises \emph{above} one in the near-to-mid field before
+settling back near it. A wind that can recirculate spreads the street-level
+plume sideways \emph{faster} than the air above the roofs, rather than merely
+failing to confine it, and this is the wake mechanism \S\ref{sec:urban}'s header
+lists as absent from the prescribed profile: turbulent structure shed off one
+building disperses material laterally in a way a straight-line wind, solved or
+not, cannot produce. Row one, at $s=55$~m, is still the source's immediate
+vicinity and reads like the confined case for the same reason it did in
+\S\ref{sec:urbannyc} --- the plume has not yet had a wake to encounter.
+
+This is one release over four minutes on one crop, and the numbers above should
+be read as a demonstration that the mechanism is there and measurable, not as a
+converged statistic. \texttt{-mode unsteady} is new in this section and has had
+one city and one geometry through it.
+
 \subsection{The top boundary is a modelling choice}
 
 A horizontal wind has $u_z = 0$ at the top face, so a zero-gradient condition
