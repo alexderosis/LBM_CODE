@@ -4245,7 +4245,8 @@ NVIDIA H200 & central moments & $512^3$ & 17171.4 & 3709.0 \\
 \end{tabular}
 \end{center}
 
-\noindent Mass drift is exactly $0.000\e{0}$ on every row. Central moments runs
+\noindent The H200 rows were measured by Yang; see \S\ref{sec:h200}. Mass drift
+is exactly $0.000\e{0}$ on every row. Central moments runs
 at $99.6\%$ of BGK on two card generations, and $3722$\,GB/s is $77.3\%$ of the
 H200's $4814$\,GB/s peak --- i.e.\ the kernel is memory-bound, which is what a
 correctly written lattice Boltzmann kernel should be. Taylor--Green at $512^3$
@@ -4256,6 +4257,57 @@ correctly written lattice Boltzmann kernel should be. Taylor--Green at $512^3$
 Pull run at BGK speed when written directly. Whatever is wrong is in how the
 Kokkos code reaches the device, and the next step there is measurement
 (\code{ncu --set full} on one kernel), not another hypothesis.
+
+\definecolor{h200red}{HTML}{B3121B}
+\subsection{\texorpdfstring{\color{h200red}}{}The H200 measurement, and what it says}
+\label{sec:h200}
+
+{\color{h200red}\bfseries\boldmath
+The $512^3$ figures above were measured by Yang on an NVIDIA H200
+(sm\_90, CUDA 12.8, FP32). They are the strongest performance statement this
+project has, and they say three things that the T4 alone could not.
+
+\medskip
+\emph{Seventy-seven per cent of peak bandwidth is the result, not the MLUPS.}
+A lattice Boltzmann kernel does almost no arithmetic per byte moved, so a correct
+one is bound by the memory system and its only meaningful efficiency measure is
+the fraction of peak bandwidth it sustains. At $3722$\,GB/s against the card's
+$4814$\,GB/s the kernel reaches $77.3\%$, which is close to what a plain
+streaming benchmark achieves on the same hardware. The remaining quarter is the
+irreducible cost of the neighbour access pattern: 27 directions, each landing in
+a different cache line. A kernel far below this figure has arithmetic to remove;
+one far above it is not moving the data the scheme requires.
+
+\medskip
+\emph{The efficiency rose with the card, which is not automatic.} On the T4 the
+same code sustains $66\%$ of $320$\,GB/s; on the H200, $77\%$ of $4814$\,GB/s.
+The throughput ratio between the two is $17.6\times$ against a bandwidth ratio of
+$15.0\times$ --- the code gains more than the memory system alone gives it. That
+is the signature of a kernel whose limit is bandwidth rather than latency or
+occupancy: a latency-bound kernel would have fallen behind the bandwidth ratio on
+the larger machine, not moved ahead of it. It also means the figure should be
+read as a floor for future hardware rather than a ceiling.
+
+\medskip
+\emph{Central moments at $99.6\%$ of BGK now holds on two architectures.} One
+card could be a coincidence of that card's particular ratio of arithmetic
+throughput to bandwidth. Turing and Hopper are three years and two memory
+technologies apart, and the operator is free on both. Taken with
+\S\ref{sec:cmcollapse}, this is what settles the question: the central-moment
+collision is not intrinsically expensive on a GPU, and the collapse in the Kokkos
+build is a property of that build.
+
+\medskip
+\emph{Two things the measurement does not say.} It is FP32, and it is the
+\emph{fluid} kernel alone --- no thermal, magnetic or geometry coupling was run
+on the H200, so the multiphysics figures of \S\ref{sec:cuda} remain T4-only.
+And the problem had to be sized to the card to obtain it: $512^3$ is 134 million
+nodes and $14.5$\,GB in FP32, which fits only because Esoteric Pull keeps one
+population set instead of two. The same case in a two-lattice scheme would need
+$29$\,GB and would not have run at this size. Taylor--Green at $512^3$ over
+$256\,000$ steps completes in $2046$\,s at $16\,792$ MLUPS, with mass drift
+exactly $0.000\e{0}$ throughout.
+}
 
 \subsection{Written so it can be checked without a device}
 \label{sec:hostsim}
