@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(LBM_CODE VERSION 0.1.0 LANGUAGES CXX)
+project(M3LB VERSION 0.1.0 LANGUAGES CXX)
 
 #-------------------------------------------------------------------------------
 # Options
@@ -20,11 +20,17 @@ endif()
 #-------------------------------------------------------------------------------
 # GPU backend.
 #
-# NOTHING IN THIS REPOSITORY HAS BEEN RUN ON A GPU. The code is written for one
-# -- Esoteric Pull exists to halve GPU memory traffic, and every kernel is a
-# Kokkos lambda capturing by value with no `this` on the device -- but every
-# number in doc/ is the Threads backend. Treat a first GPU build as a port, and
-# run ctest on the device before any production case.
+# THIS BACKEND HAS BEEN RUN ON A GPU, WITH A MIXED RESULT. On a Tesla T4, seven
+# validation executables build after six fixes for nvcc restrictions the CPU
+# backends cannot see, and BGK and TRT reach ~420-447 MLUPS at 64^3 with mass
+# drift exactly 0. But the two CENTRAL-MOMENT configurations did not finish in
+# seventeen minutes at the same size, where BGK took 0.03 s, and -Xptxas -v rules
+# out register spilling. Since the campaign and the aorta both run central
+# moments, that 447 MLUPS is a BGK-ONLY figure. See doc/m3lb.pdf, section 14.
+#
+# The independent CUDA implementation in GPU/ does not have the problem -- the
+# same scheme runs at 99.6% of BGK there -- so run production central moments
+# through that until this is understood.
 #
 # Two things that otherwise cost a day each:
 #

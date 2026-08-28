@@ -1,4 +1,11 @@
-# LBM_CODE
+# M3LB
+
+**M**anchester **M**ultiphysics **M**odelling &mdash; **L**attice-**B**oltzmann.
+
+Write it **`M3LB`** everywhere a machine reads it: repository, filenames,
+commands, BibTeX keys, DOIs, citations. **M³LB** is the typeset form, for the
+document cover, slides and figures. One ASCII spelling means the name stays
+searchable and citable.
 
 Modular lattice Boltzmann solver in C++20 on Kokkos.
 
@@ -19,7 +26,7 @@ All three MATLAB generator questions are resolved and the scripts under
 
 ## Documentation
 
-[`doc/lbm_code.pdf`](doc/lbm_code.pdf) is the release document: every scheme with
+[`doc/m3lb.pdf`](doc/m3lb.pdf) is the release document: every scheme with
 its equations, the methodology behind each design decision, the complete
 validation record with numbers, the performance figures and their caveats, and a
 list of known limitations. Rebuild with `make -C doc` (needs a LaTeX install).

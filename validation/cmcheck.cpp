@@ -1,5 +1,5 @@
 // Verify the documented equilibrium central moments of MhdCentralMoments<D3Q27>
-// (doc/lbm_code.tex, eq:cm3dho) against what the operator actually produces.
+// (doc/m3lb.tex, eq:cm3dho) against what the operator actually produces.
 #include "collision/MhdCentralMoments.hpp"
 #include "equilibrium/Equilibrium.hpp"
 #include "core/Types.hpp"

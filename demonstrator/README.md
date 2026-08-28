@@ -9,7 +9,7 @@ accuracy, and nothing here is registered with `add_test`.
 
 Passive-scalar dispersion through a voxelised city, D3Q7 advection-diffusion on
 a prescribed logarithmic wind. Written up as the urban section of
-`doc/lbm_code.tex`. Two cities have been run, from the same OSM-derived height
+`doc/m3lb.tex`. Two cities have been run, from the same OSM-derived height
 fields: Manchester city centre (400x400x60 at 5 m, 1.79% solid) and Midtown
 Manhattan (400x400x100 at 5 m, 6.87% solid, towers to 472 m).
 
@@ -71,7 +71,7 @@ release spread over 2 km carries an order of magnitude less than it does over
 ## aorta
 
 Flow through a voxelised patient-specific aorta (SimVascular case
-`0074_H_AO_H`), D3Q27 central moments. Written up as §12 of `doc/lbm_code.tex`.
+`0074_H_AO_H`), D3Q27 central moments. Written up as §12 of `doc/m3lb.tex`.
 
 | file | what it is |
 |---|---|

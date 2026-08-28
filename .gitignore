@@ -13,7 +13,7 @@ build-*/
 # Raw field dumps consumed by doc/fig/*.py to make the figures. 21 MB of binary
 # that would sit in history forever, and every one is regenerable by re-running
 # its case with FIGDUMP=1 (or FIGVOL=1 / FIGVEC=1 for the aorta). The PNGs they
-# produce ARE tracked, because doc/lbm_code.tex needs them to build.
+# produce ARE tracked, because doc/m3lb.tex needs them to build.
 doc/fig/*.bin
 *.ppm
 

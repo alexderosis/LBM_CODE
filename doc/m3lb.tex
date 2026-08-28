@@ -25,6 +25,7 @@
 \definecolor{opTRT}{HTML}{A8562A}
 \definecolor{opMRT}{HTML}{2D7A8C}
 \definecolor{opCM}{HTML}{8B3A62}
+\definecolor{h200red}{HTML}{B3121B}   % \S14.3 is set in this colour
 
 
 \newcommand{\code}[1]{\texttt{\small #1}}
@@ -38,7 +39,7 @@
 
 \captionsetup{font=small,labelfont=bf}
 
-\title{\vspace{-1.4cm}\textbf{LBM\_CODE}\\[2mm]
+\title{\vspace{-1.4cm}\textbf{M\textsuperscript{3}LB}\\[2mm]
 \large A modular lattice Boltzmann solver on Kokkos\\[1mm]
 \normalsize Scheme description, methodology and validation}
 \author{}
@@ -54,7 +55,7 @@
 \begin{abstract}
 \noindent
 This document describes the numerical schemes, the software architecture and the
-complete validation record of \code{LBM\_CODE}, a portable lattice Boltzmann
+complete validation record of \code{M3LB}, a portable lattice Boltzmann
 solver written in C\texttt{++}20 on top of Kokkos. The code targets NVIDIA GPUs
 and CPU clusters from a single source. It supports five lattices, two streaming
 schemes (including the in-place Esoteric Pull), two population storage
@@ -75,7 +76,7 @@ assumed.
 
 \subsection{What the code is}
 
-\code{LBM\_CODE} solves the weakly compressible Navier--Stokes equations by the
+\code{M3LB} solves the weakly compressible Navier--Stokes equations by the
 lattice Boltzmann method, optionally coupled to a passive scalar (temperature)
 and to a magnetic field. It is written once and compiled for any Kokkos backend:
 Serial, Threads, OpenMP, CUDA, HIP or SYCL. Scalar precision is selected at
@@ -4258,7 +4259,6 @@ Pull run at BGK speed when written directly. Whatever is wrong is in how the
 Kokkos code reaches the device, and the next step there is measurement
 (\code{ncu --set full} on one kernel), not another hypothesis.
 
-\definecolor{h200red}{HTML}{B3121B}
 \subsection{\texorpdfstring{\color{h200red}}{}The H200 measurement, and what it says}
 \label{sec:h200}
 

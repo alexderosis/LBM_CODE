@@ -24,8 +24,8 @@ simulations on a laptop before you touch a cluster. Nothing about this is a toy:
 it is the same per-node functions the CUDA kernels call, driven by a for-loop.
 
 ```bash
-git clone https://github.com/alexderosis/LBM_CODE.git
-cd LBM_CODE/GPU
+git clone https://github.com/alexderosis/M3LB.git
+cd M3LB/GPU
 cmake -S . -B build-host -DLBM_HOST_ONLY=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build-host -j
 ctest --test-dir build-host --output-on-failure
@@ -186,7 +186,7 @@ Forgetting this is the single most common way to conclude the code is slow.
 
 ## 5. Where to read next
 
-* [`doc/lbm_code.pdf`](doc/lbm_code.pdf) — 65 pages: every scheme with its
+* [`doc/m3lb.pdf`](doc/m3lb.pdf) — 73 pages: every scheme with its
   equations, why each design decision was made, the complete validation record
   with numbers, and a **list of known limitations**. Read the limitations first;
   they will save you more time than the rest.
