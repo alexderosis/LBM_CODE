@@ -66,9 +66,13 @@ struct FluidParams {
 // step in a slot the WALL owns, so a sum over fluid cells alone does not see it.
 // Nothing is lost; the macroscopic field is what is missing it.
 //------------------------------------------------------------------------------
-template <int Parity, int OpKind, int FKind, bool Mhd>
+template <int Parity, int OpKind, int FKind, bool Mhd, bool HasGeometry>
 LBM_HD LBM_INLINE void fluid_node_update(const FluidParams& p, long N, long n) {
-  if (p.flags[n] != Fluid) return;
+  // Short-circuit on a compile-time constant: with HasGeometry false the load
+  // is not merely predicted away, it is never emitted. Measured worth 5.6% on a
+  // T4 -- see the note in streaming.cuh on why a one-byte-per-node array costs
+  // ten times what its byte count suggests.
+  if (HasGeometry && p.flags[n] != Fluid) return;
 
   int x, y, z;
   coords(n, p.nx, p.ny, x, y, z);
@@ -119,11 +123,11 @@ LBM_HD LBM_INLINE void macro_node(const Real* f, const std::uint8_t* flags, long
 //==============================================================================
 #if defined(__CUDACC__)
 
-template <int Parity, int OpKind, int FKind, bool Mhd>
+template <int Parity, int OpKind, int FKind, bool Mhd, bool HasGeometry>
 __global__ void fluid_kernel(FluidParams p, long N) {
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
-  fluid_node_update<Parity, OpKind, FKind, Mhd>(p, N, n);
+  fluid_node_update<Parity, OpKind, FKind, Mhd, HasGeometry>(p, N, n);
 }
 
 template <int Parity>
@@ -201,6 +205,7 @@ class Solver {
     }
     LBM_CUDA_CHECK(cudaMemcpy(flags_, flags.data(), sizeof(std::uint8_t) * N_,
                               cudaMemcpyHostToDevice));
+    has_geometry_ = true;
   }
 
   void set_force(const BodyForce& b, int kind) { force_ = b; fkind_ = kind; }
@@ -319,8 +324,12 @@ class Solver {
     }
   }
   template <int P, int O, int F, bool M> void run() {
+    if (has_geometry_) launch<P, O, F, M, true>();
+    else               launch<P, O, F, M, false>();
+  }
+  template <int P, int O, int F, bool M, bool G> void launch() {
     const int B = 128;
-    fluid_kernel<P, O, F, M><<<int((N_ + B - 1) / B), B>>>(params(), N_);
+    fluid_kernel<P, O, F, M, G><<<int((N_ + B - 1) / B), B>>>(params(), N_);
     LBM_CUDA_CHECK(cudaGetLastError());
   }
 
@@ -335,6 +344,7 @@ class Solver {
   BodyForce force_{};
   int fkind_ = ForceNone;
   bool mhd_ = false;
+  bool has_geometry_ = false;
   std::size_t t_ = 0;
 };
 

@@ -63,25 +63,22 @@ namespace lbm {
 //  Excluded not part of the simulation at all; never visited, never seeded with
 //           anything meaningful.
 //
-//  The flags array is ALWAYS allocated, even for a periodic box where every cell
-//  is Fluid, which removes an entire template dimension from every kernel.
+//  The flags array is always allocated, but the kernels are TEMPLATED on whether
+//  any geometry exists, so a periodic run never issues the load at all.
 //
-//  THAT IS NOT FREE, AND AN EARLIER VERSION OF THIS COMMENT SAID IT WAS. One byte
-//  per node against 216 of population traffic is half a per cent, so the cost was
-//  written down as "a rounding error in bandwidth". Measured on a T4 at 128^3,
-//  against the commit immediately before geometry existed:
+//  THAT TEMPLATE PARAMETER LOOKS LIKE OVER-ENGINEERING AND IS NOT. The first
+//  version of this code loaded the flags unconditionally, on the reasoning that
+//  one byte per node against 216 of population traffic is half a per cent -- "a
+//  rounding error in bandwidth", as the comment then said. Measured on a T4 at
+//  128^3 against the commit immediately before geometry existed:
 //
 //      BGK              978.67 -> 924.14 MLUPS   (-5.6%)
 //      central moments  977.99 -> 921.85 MLUPS   (-5.7%)
 //
-//  Ten times the predicted cost, because what a bandwidth-bound kernel pays for
-//  is not the byte but the extra memory STREAM: more transactions, more cache
-//  pressure, another address to keep in flight. Predicting this kind of cost from
-//  a byte count is how it gets got wrong.
-//
-//  Recovering it means templating the kernels on whether any geometry exists, so
-//  a periodic run never issues the load. That is a real option and it is not
-//  taken here; the number above is what it would buy.
+//  Ten times the predicted cost. What a bandwidth-bound kernel pays for is not
+//  the byte but the extra memory STREAM: more transactions, more cache pressure,
+//  another address to keep in flight. Predicting this kind of cost from a byte
+//  count is how it gets got wrong, and the fix is a compile-time bool.
 //==============================================================================
 enum CellType : std::uint8_t {
   Fluid    = 0,

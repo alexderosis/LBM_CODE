@@ -56,9 +56,11 @@ struct ScalarParams {
 // still writes back into the same two slots it read, so the in-place scheme is
 // undisturbed either way.
 //------------------------------------------------------------------------------
-template <int Parity, bool Advected>
+template <int Parity, bool Advected, bool HasGeometry>
 LBM_HD LBM_INLINE void scalar_node_update(const ScalarParams& p, long N, long n) {
-  const std::uint8_t fl = p.flags[n];
+  // With HasGeometry false every cell is bulk and the flags load is never
+  // emitted -- see solver.cuh. `fl` is then a compile-time constant.
+  const std::uint8_t fl = HasGeometry ? p.flags[n] : std::uint8_t(ScalarBulk);
   if (fl == ScalarExcluded || fl == ScalarAdiabatic) return;
 
   int x, y, z;
@@ -92,9 +94,9 @@ LBM_HD LBM_INLINE void scalar_node_update(const ScalarParams& p, long N, long n)
 // cannot supply it, because the value it computes is consumed and overwritten in
 // the same launch. Seven reads per node.
 //------------------------------------------------------------------------------
-template <int Parity>
+template <int Parity, bool HasGeometry>
 LBM_HD LBM_INLINE void scalar_field_node(const ScalarParams& p, long N, long n) {
-  const std::uint8_t fl = p.flags[n];
+  const std::uint8_t fl = HasGeometry ? p.flags[n] : std::uint8_t(ScalarBulk);
   if (fl == ScalarExcluded) return;
   if (fl == ScalarDirichlet) { p.T_out[n] = p.wall[n]; return; }
 
@@ -107,18 +109,18 @@ LBM_HD LBM_INLINE void scalar_field_node(const ScalarParams& p, long N, long n) 
 
 #if defined(__CUDACC__)
 
-template <int Parity, bool Advected>
+template <int Parity, bool Advected, bool HasGeometry>
 __global__ void scalar_kernel(ScalarParams p, long N) {
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
-  scalar_node_update<Parity, Advected>(p, N, n);
+  scalar_node_update<Parity, Advected, HasGeometry>(p, N, n);
 }
 
-template <int Parity>
+template <int Parity, bool HasGeometry>
 __global__ void scalar_field_kernel(ScalarParams p, long N) {
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
-  scalar_field_node<Parity>(p, N, n);
+  scalar_field_node<Parity, HasGeometry>(p, N, n);
 }
 
 //------------------------------------------------------------------------------
@@ -172,6 +174,7 @@ class ScalarSolver {
                               cudaMemcpyHostToDevice));
     LBM_CUDA_CHECK(cudaMemcpy(wall_, wall.data(), sizeof(Real) * N_,
                               cudaMemcpyHostToDevice));
+    has_geometry_ = true;
   }
 
   // Device pointers owned by the fluid solver. Without this the scalar diffuses
@@ -193,13 +196,8 @@ class ScalarSolver {
 
   void step() {
     const int B = 128, G = int((N_ + B - 1) / B);
-    if (t_ % 2 == 0) {
-      if (ux_) scalar_kernel<0, true><<<G, B>>>(params(), N_);
-      else     scalar_kernel<0, false><<<G, B>>>(params(), N_);
-    } else {
-      if (ux_) scalar_kernel<1, true><<<G, B>>>(params(), N_);
-      else     scalar_kernel<1, false><<<G, B>>>(params(), N_);
-    }
+    if (t_ % 2 == 0) launch_advect<0>(G, B);
+    else             launch_advect<1>(G, B);
     LBM_CUDA_CHECK(cudaGetLastError());
     ++t_;
   }
@@ -208,8 +206,13 @@ class ScalarSolver {
   // see the coupling-order note in solver.cuh.
   void compute_field() {
     const int B = 128, G = int((N_ + B - 1) / B);
-    if (t_ % 2 == 0) scalar_field_kernel<0><<<G, B>>>(params(), N_);
-    else             scalar_field_kernel<1><<<G, B>>>(params(), N_);
+    if (t_ % 2 == 0) {
+      if (has_geometry_) scalar_field_kernel<0, true><<<G, B>>>(params(), N_);
+      else               scalar_field_kernel<0, false><<<G, B>>>(params(), N_);
+    } else {
+      if (has_geometry_) scalar_field_kernel<1, true><<<G, B>>>(params(), N_);
+      else               scalar_field_kernel<1, false><<<G, B>>>(params(), N_);
+    }
     LBM_CUDA_CHECK(cudaGetLastError());
   }
 
@@ -226,6 +229,15 @@ class ScalarSolver {
   std::size_t timestep() const { return t_; }
 
  private:
+  template <int P> void launch_advect(int G, int B) {
+    if (ux_) launch_geom<P, true>(G, B);
+    else     launch_geom<P, false>(G, B);
+  }
+  template <int P, bool A> void launch_geom(int G, int B) {
+    if (has_geometry_) scalar_kernel<P, A, true><<<G, B>>>(params(), N_);
+    else               scalar_kernel<P, A, false><<<G, B>>>(params(), N_);
+  }
+
   ScalarParams params() const {
     ScalarParams p;
     p.h = h_; p.flags = flags_; p.wall = wall_;
@@ -244,6 +256,7 @@ class ScalarSolver {
   Real* wall_ = nullptr;
   Real* T_ = nullptr;
   const Real *ux_ = nullptr, *uy_ = nullptr, *uz_ = nullptr;
+  bool has_geometry_ = false;
   std::size_t t_ = 0;
 };
 

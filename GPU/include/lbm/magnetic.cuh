@@ -57,9 +57,9 @@ LBM_HD LBM_INLINE long magnetic_offset(int a, long N) {
 // `Advected` is false for a motionless conductor -- resistive decay isolates the
 // induction equation and its resistivity with no coupling to a flow at all, and
 // it is the first thing to check when a magnetic result looks wrong.
-template <int Parity, bool Advected>
+template <int Parity, bool Advected, bool HasGeometry>
 LBM_HD LBM_INLINE void magnetic_node_update(const MagneticParams& p, long N, long n) {
-  if (p.flags[n] != Fluid) return;
+  if (HasGeometry && p.flags[n] != Fluid) return;
 
   int x, y, z;
   coords(n, p.nx, p.ny, x, y, z);
@@ -82,9 +82,9 @@ LBM_HD LBM_INLINE void magnetic_node_update(const MagneticParams& p, long N, lon
   }
 }
 
-template <int Parity>
+template <int Parity, bool HasGeometry>
 LBM_HD LBM_INLINE void magnetic_field_node(const MagneticParams& p, long N, long n) {
-  if (p.flags[n] != Fluid) { p.Bx[n] = p.By[n] = p.Bz[n] = Real(0); return; }
+  if (HasGeometry && p.flags[n] != Fluid) { p.Bx[n] = p.By[n] = p.Bz[n] = Real(0); return; }
   int x, y, z;
   coords(n, p.nx, p.ny, x, y, z);
   Real g[MagneticLattice::Q], B[3];
@@ -99,18 +99,18 @@ LBM_HD LBM_INLINE void magnetic_field_node(const MagneticParams& p, long N, long
 
 #if defined(__CUDACC__)
 
-template <int Parity, bool Advected>
+template <int Parity, bool Advected, bool HasGeometry>
 __global__ void magnetic_kernel(MagneticParams p, long N) {
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
-  magnetic_node_update<Parity, Advected>(p, N, n);
+  magnetic_node_update<Parity, Advected, HasGeometry>(p, N, n);
 }
 
-template <int Parity>
+template <int Parity, bool HasGeometry>
 __global__ void magnetic_field_kernel(MagneticParams p, long N) {
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
-  magnetic_field_node<Parity>(p, N, n);
+  magnetic_field_node<Parity, HasGeometry>(p, N, n);
 }
 
 // Seeded at equilibrium with the initial velocity, not at rest: the equilibrium
@@ -163,6 +163,7 @@ class MagneticSolver {
   void set_geometry(const std::vector<std::uint8_t>& flags) {
     LBM_CUDA_CHECK(cudaMemcpy(flags_, flags.data(), sizeof(std::uint8_t) * N_,
                               cudaMemcpyHostToDevice));
+    has_geometry_ = true;
   }
   void advect_with(const Real* ux, const Real* uy, const Real* uz) {
     ux_ = ux; uy_ = uy; uz_ = uz;
@@ -180,21 +181,21 @@ class MagneticSolver {
 
   void step() {
     const int B = 128, G = int((N_ + B - 1) / B);
-    if (t_ % 2 == 0) {
-      if (ux_) magnetic_kernel<0, true><<<G, B>>>(params(), N_);
-      else     magnetic_kernel<0, false><<<G, B>>>(params(), N_);
-    } else {
-      if (ux_) magnetic_kernel<1, true><<<G, B>>>(params(), N_);
-      else     magnetic_kernel<1, false><<<G, B>>>(params(), N_);
-    }
+    if (t_ % 2 == 0) launch_advect<0>(G, B);
+    else             launch_advect<1>(G, B);
     LBM_CUDA_CHECK(cudaGetLastError());
     ++t_;
   }
 
   void compute_field() {
     const int B = 128, G = int((N_ + B - 1) / B);
-    if (t_ % 2 == 0) magnetic_field_kernel<0><<<G, B>>>(params(), N_);
-    else             magnetic_field_kernel<1><<<G, B>>>(params(), N_);
+    if (t_ % 2 == 0) {
+      if (has_geometry_) magnetic_field_kernel<0, true><<<G, B>>>(params(), N_);
+      else               magnetic_field_kernel<0, false><<<G, B>>>(params(), N_);
+    } else {
+      if (has_geometry_) magnetic_field_kernel<1, true><<<G, B>>>(params(), N_);
+      else               magnetic_field_kernel<1, false><<<G, B>>>(params(), N_);
+    }
     LBM_CUDA_CHECK(cudaGetLastError());
   }
 
@@ -215,6 +216,15 @@ class MagneticSolver {
   std::size_t timestep() const { return t_; }
 
  private:
+  template <int P> void launch_advect(int G, int B) {
+    if (ux_) launch_geom<P, true>(G, B);
+    else     launch_geom<P, false>(G, B);
+  }
+  template <int P, bool A> void launch_geom(int G, int B) {
+    if (has_geometry_) magnetic_kernel<P, A, true><<<G, B>>>(params(), N_);
+    else               magnetic_kernel<P, A, false><<<G, B>>>(params(), N_);
+  }
+
   MagneticParams params() const {
     MagneticParams p;
     p.g = g_; p.flags = flags_;
@@ -232,6 +242,7 @@ class MagneticSolver {
   std::uint8_t* flags_ = nullptr;
   Real *Bx_ = nullptr, *By_ = nullptr, *Bz_ = nullptr;
   const Real *ux_ = nullptr, *uy_ = nullptr, *uz_ = nullptr;
+  bool has_geometry_ = false;
   std::size_t t_ = 0;
 };
 

@@ -45,7 +45,7 @@ class Fluid {
     flags_.assign(std::size_t(N_), Fluid_);
   }
 
-  void set_geometry(const std::vector<std::uint8_t>& fl) { flags_ = fl; }
+  void set_geometry(const std::vector<std::uint8_t>& fl) { flags_ = fl; has_geometry_ = true; }
   void set_force(const BodyForce& b, int kind) { force_ = b; fkind_ = kind; }
   void couple_magnetic(const Real* bx, const Real* by, const Real* bz) {
     Bx_ = bx; By_ = by; Bz_ = bz; mhd_ = true;
@@ -152,7 +152,10 @@ class Fluid {
   }
   template <int P, int O, int F, bool M> void run() {
     const FluidParams p = params();
-    for (long n = 0; n < N_; ++n) fluid_node_update<P, O, F, M>(p, N_, n);
+    if (has_geometry_)
+      for (long n = 0; n < N_; ++n) fluid_node_update<P, O, F, M, true>(p, N_, n);
+    else
+      for (long n = 0; n < N_; ++n) fluid_node_update<P, O, F, M, false>(p, N_, n);
   }
 
   int nx_, ny_, nz_;
@@ -166,6 +169,7 @@ class Fluid {
   BodyForce force_{};
   int fkind_ = ForceNone;
   bool mhd_ = false;
+  bool has_geometry_ = false;
   std::size_t t_ = 0;
 };
 
@@ -185,7 +189,7 @@ class Scalar {
   }
 
   void set_geometry(const std::vector<std::uint8_t>& fl, const std::vector<Real>& wall) {
-    flags_ = fl; wall_ = wall;
+    flags_ = fl; wall_ = wall; has_geometry_ = true;
   }
   void advect_with(const Real* ux, const Real* uy, const Real* uz) {
     ux_ = ux; uy_ = uy; uz_ = uz;
@@ -208,21 +212,20 @@ class Scalar {
   }
 
   void step() {
-    const ScalarParams p = params();
-    if (t_ % 2 == 0) {
-      if (ux_) for (long n = 0; n < N_; ++n) scalar_node_update<0, true>(p, N_, n);
-      else     for (long n = 0; n < N_; ++n) scalar_node_update<0, false>(p, N_, n);
-    } else {
-      if (ux_) for (long n = 0; n < N_; ++n) scalar_node_update<1, true>(p, N_, n);
-      else     for (long n = 0; n < N_; ++n) scalar_node_update<1, false>(p, N_, n);
-    }
+    if (t_ % 2 == 0) run_step<0>();
+    else             run_step<1>();
     ++t_;
   }
 
   void compute_field() {
     const ScalarParams p = params();
-    if (t_ % 2 == 0) for (long n = 0; n < N_; ++n) scalar_field_node<0>(p, N_, n);
-    else             for (long n = 0; n < N_; ++n) scalar_field_node<1>(p, N_, n);
+    if (t_ % 2 == 0) {
+      if (has_geometry_) for (long n = 0; n < N_; ++n) scalar_field_node<0, true>(p, N_, n);
+      else               for (long n = 0; n < N_; ++n) scalar_field_node<0, false>(p, N_, n);
+    } else {
+      if (has_geometry_) for (long n = 0; n < N_; ++n) scalar_field_node<1, true>(p, N_, n);
+      else               for (long n = 0; n < N_; ++n) scalar_field_node<1, false>(p, N_, n);
+    }
   }
 
   const std::vector<Real>& field() { compute_field(); return T_; }
@@ -243,6 +246,17 @@ class Scalar {
   std::size_t timestep() const { return t_; }
 
  private:
+  template <int P> void run_step() {
+    const ScalarParams p = params();
+    if (ux_) {
+      if (has_geometry_) for (long n = 0; n < N_; ++n) scalar_node_update<P, true, true>(p, N_, n);
+      else               for (long n = 0; n < N_; ++n) scalar_node_update<P, true, false>(p, N_, n);
+    } else {
+      if (has_geometry_) for (long n = 0; n < N_; ++n) scalar_node_update<P, false, true>(p, N_, n);
+      else               for (long n = 0; n < N_; ++n) scalar_node_update<P, false, false>(p, N_, n);
+    }
+  }
+
   ScalarParams params() {
     ScalarParams p;
     p.h = h_.data(); p.flags = flags_.data(); p.wall = wall_.data();
@@ -259,6 +273,7 @@ class Scalar {
   std::vector<Real> h_, wall_, T_;
   std::vector<std::uint8_t> flags_;
   const Real *ux_ = nullptr, *uy_ = nullptr, *uz_ = nullptr;
+  bool has_geometry_ = false;
   std::size_t t_ = 0;
 };
 
@@ -277,7 +292,7 @@ class Magnetic {
     Bz_.assign(std::size_t(N_), Real(0));
   }
 
-  void set_geometry(const std::vector<std::uint8_t>& fl) { flags_ = fl; }
+  void set_geometry(const std::vector<std::uint8_t>& fl) { flags_ = fl; has_geometry_ = true; }
   void advect_with(const Real* ux, const Real* uy, const Real* uz) {
     ux_ = ux; uy_ = uy; uz_ = uz;
   }
@@ -303,21 +318,20 @@ class Magnetic {
   }
 
   void step() {
-    const MagneticParams p = params();
-    if (t_ % 2 == 0) {
-      if (ux_) for (long n = 0; n < N_; ++n) magnetic_node_update<0, true>(p, N_, n);
-      else     for (long n = 0; n < N_; ++n) magnetic_node_update<0, false>(p, N_, n);
-    } else {
-      if (ux_) for (long n = 0; n < N_; ++n) magnetic_node_update<1, true>(p, N_, n);
-      else     for (long n = 0; n < N_; ++n) magnetic_node_update<1, false>(p, N_, n);
-    }
+    if (t_ % 2 == 0) run_step<0>();
+    else             run_step<1>();
     ++t_;
   }
 
   void compute_field() {
     const MagneticParams p = params();
-    if (t_ % 2 == 0) for (long n = 0; n < N_; ++n) magnetic_field_node<0>(p, N_, n);
-    else             for (long n = 0; n < N_; ++n) magnetic_field_node<1>(p, N_, n);
+    if (t_ % 2 == 0) {
+      if (has_geometry_) for (long n = 0; n < N_; ++n) magnetic_field_node<0, true>(p, N_, n);
+      else               for (long n = 0; n < N_; ++n) magnetic_field_node<0, false>(p, N_, n);
+    } else {
+      if (has_geometry_) for (long n = 0; n < N_; ++n) magnetic_field_node<1, true>(p, N_, n);
+      else               for (long n = 0; n < N_; ++n) magnetic_field_node<1, false>(p, N_, n);
+    }
   }
 
   void field_to_host(std::vector<Real>& bx, std::vector<Real>& by, std::vector<Real>& bz) {
@@ -335,6 +349,17 @@ class Magnetic {
   std::size_t timestep() const { return t_; }
 
  private:
+  template <int P> void run_step() {
+    const MagneticParams p = params();
+    if (ux_) {
+      if (has_geometry_) for (long n = 0; n < N_; ++n) magnetic_node_update<P, true, true>(p, N_, n);
+      else               for (long n = 0; n < N_; ++n) magnetic_node_update<P, true, false>(p, N_, n);
+    } else {
+      if (has_geometry_) for (long n = 0; n < N_; ++n) magnetic_node_update<P, false, true>(p, N_, n);
+      else               for (long n = 0; n < N_; ++n) magnetic_node_update<P, false, false>(p, N_, n);
+    }
+  }
+
   MagneticParams params() {
     MagneticParams p;
     p.g = g_.data(); p.flags = flags_.data();
@@ -351,6 +376,7 @@ class Magnetic {
   std::vector<Real> g_, Bx_, By_, Bz_;
   std::vector<std::uint8_t> flags_;
   const Real *ux_ = nullptr, *uy_ = nullptr, *uz_ = nullptr;
+  bool has_geometry_ = false;
   std::size_t t_ = 0;
 };
 
