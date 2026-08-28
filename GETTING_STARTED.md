@@ -220,6 +220,57 @@ a wall-bounded MHD result off this code — a non-fluid cell is skipped, which i
 bounce-back on the induction distribution and is not a physical magnetic wall.
 Every MHD case here is periodic, by design.
 
+## 3c. Throughput: the cubic box, for comparing MLUPS with other codes
+
+The simplest thing this code runs, and the one to quote against other GPU LBM
+codes: a cube, no-slip walls on all six faces, no forcing, no coupled fields.
+
+```bash
+./build/box                        # BGK and CM, 520^3 / 720^3 / 1390^3
+./build/box -n 720 -op bgk         # one size, one operator
+./build/box -n 720 -periodic       # walls off, for codes that time an empty box
+```
+
+FP32 is the default and is what you want here. The initial condition is a
+divergence-free vortex built from a vector potential, `u = curl A`, chosen so
+that all three velocity components vanish on all six wall planes — so the run is
+stable and conserves mass rather than merely being fast. The `mass drift` column
+is the check: it sums every slot in the lattice, wall slots included, which is
+the quantity Esoteric Pull conserves exactly. If it is not ~1e-7, the MLUPS
+figure beside it means nothing.
+
+### Read the two caveats before quoting a number
+
+**1. `1390^3` does not fit on an H200, and the tool will tell you so.**
+This code stores D3Q27 in FP32: 27 × 4 = 108 B/node, plus one geometry byte.
+
+| grid | nodes | memory | on a 141 GB H200 |
+|---|---|---|---|
+| 520³ | 1.41 × 10⁸ | 15.3 GB | fits easily |
+| 720³ | 3.73 × 10⁸ | 40.7 GB | fits |
+| 1076³ | 1.25 × 10⁹ | 136 GB | the largest cube that fits |
+| 1390³ | 2.69 × 10⁹ | **293 GB** | **needs 2.1 H200s** |
+
+There is exactly one lattice and nothing streams from host memory or splits
+across devices, so capacity alone fixes the ceiling. `box` prints the largest
+cube for whatever card it finds and skips the rest instead of dying inside
+`cudaMalloc`. If `1390^3` came from another code's table, note what it implies:
+2.69 × 10⁹ nodes in 141 GB is a budget of **52 B/node**, which is half-precision
+storage (D3Q19 FP16 is 38 B, D3Q27 FP16 is 54 B) — not an FP32 comparison.
+
+**2. MLUPS is not comparable across velocity sets.** An LBM step is
+bandwidth-bound, so MLUPS ≈ achieved bandwidth ÷ bytes per node. D3Q27 FP32
+moves 108 B where D3Q19 FP32 moves 76 and a D3Q19 FP16 code moves 38 — so a
+D3Q19 FP16 code can report 2.8× our MLUPS while using the machine no better.
+`box` therefore prints **GB/s and % of theoretical pin bandwidth** beside every
+MLUPS figure. That percentage is the portable number, and it is the one to put
+in front of somebody comparing implementations.
+
+Expect the three grids to give nearly the same MLUPS. Past the L2 cache the rate
+is set by bytes per node and by the memory system, not by how many nodes there
+are; a sweep that climbs steeply with size is usually measuring launch overhead
+at the small end.
+
 ## 4. The larger validation suite
 
 `validation/` in the parent directory has 29 cases the CUDA code does not — the

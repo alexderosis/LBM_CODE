@@ -172,6 +172,40 @@ __global__ void initialise(Real* __restrict__ f, const std::uint8_t* __restrict_
   init_scatter<0>(f, N, x, y, z, nx, ny, nz, fl);   // NOT scatter -- see above
 }
 
+//------------------------------------------------------------------------------
+// Total population, as a small array of partial sums.
+//
+// The sum runs over EVERY slot, wall slots included, because that -- not a sum
+// over fluid cells -- is what Esoteric Pull conserves exactly: collision keeps
+// the local sum, and streaming only permutes values between slots each of which
+// has exactly one writer per step. A geometry bug that visited a node twice, or
+// skipped one it should not have, shows up here and nowhere else.
+//
+// Two details that matter at 10^9 nodes:
+//
+//   * the accumulator is double even in an FP32 build. Summing 2.9e10 FP32
+//     values pairwise-naively loses the low half of the mantissa, and the drift
+//     this check exists to detect is smaller than that.
+//   * the result comes back as G partial sums summed on the host, not through
+//     atomicAdd on a double. Same answer, no compute-capability floor, and the
+//     order of accumulation is deterministic run to run.
+//------------------------------------------------------------------------------
+__global__ void reduce_population(const Real* __restrict__ f, long M,
+                                  double* __restrict__ partial) {
+  extern __shared__ double sm[];
+  const long stride = long(blockDim.x) * gridDim.x;
+  double acc = 0;
+  for (long i = long(blockIdx.x) * blockDim.x + threadIdx.x; i < M; i += stride)
+    acc += double(f[i]);
+  sm[threadIdx.x] = acc;
+  __syncthreads();
+  for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (threadIdx.x < s) sm[threadIdx.x] += sm[threadIdx.x + s];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) partial[blockIdx.x] = sm[0];
+}
+
 //==============================================================================
 //  Host-side driver.
 //==============================================================================
@@ -284,6 +318,23 @@ class Solver {
     LBM_CUDA_CHECK(cudaMemcpy(uy.data(),  dy, sizeof(Real) * N_, cudaMemcpyDeviceToHost));
     LBM_CUDA_CHECK(cudaMemcpy(uz.data(),  dz, sizeof(Real) * N_, cudaMemcpyDeviceToHost));
     cudaFree(dr); cudaFree(dx); cudaFree(dy); cudaFree(dz);
+  }
+
+  // Summed over every slot, including those owned by solid cells -- see the
+  // kernel above. Costs one full pass over the lattice, so it belongs either
+  // side of a timed loop, never inside one.
+  double total_mass() {
+    const int B = 256, G = 1024;
+    double* d = nullptr;
+    LBM_CUDA_CHECK(cudaMalloc(&d, sizeof(double) * G));
+    reduce_population<<<G, B, sizeof(double) * B>>>(f_, 27 * N_, d);
+    LBM_CUDA_CHECK(cudaGetLastError());
+    std::vector<double> h(G);
+    LBM_CUDA_CHECK(cudaMemcpy(h.data(), d, sizeof(double) * G, cudaMemcpyDeviceToHost));
+    cudaFree(d);
+    double s = 0;
+    for (double v : h) s += v;
+    return s;
   }
 
   long nodes() const { return N_; }
