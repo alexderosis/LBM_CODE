@@ -162,6 +162,64 @@ Two things that will otherwise cost you a day:
 
 ---
 
+## 3b. The 3D MHD vortex on an H200
+
+The Orszag–Tang vortex is the case that actually tests div&nbsp;B, and an H200 is
+where it can be run at a resolution worth quoting.
+
+```bash
+git clone https://github.com/alexderosis/M3LB.git
+cd M3LB/GPU
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLBM_GPU_ARCH=90
+cmake --build build -j
+
+./build/host_check && ./build/host_physics      # seconds, no GPU needed
+./build/orszag_tang -m 256 -tmax 4.0 -op cm     # about a minute
+./build/orszag_tang -m 512 -tmax 4.0 -op cm -probes 8
+```
+
+`-DLBM_GPU_ARCH=90` is Hopper — that flag is the only thing that changes between
+cards. **Run `host_check` and `host_physics` first**: they take ten seconds, need
+no GPU, and if they pass then any later problem is in the setup rather than the
+arithmetic.
+
+**Sizing.** The solver holds 27 fluid populations, 21 magnetic ones and six
+fields per node, so about 217 bytes in FP32:
+
+| M | nodes | memory | steps to t = 4 | expected wall time |
+|---|---|---|---|---|
+| 256 | 16.8M | 3.6 GB | 23,483 | ~1 min |
+| 384 | 56.6M | 12.3 GB | 35,224 | ~5 min |
+| 512 | 134M | 29 GB | 46,966 | ~15 min |
+
+Times are extrapolated from a T4, where the coupled step runs at 41% of the
+uncoupled fluid rate; they have not been measured on an H200 and could be out by
+a factor of two either way. Memory is comfortable in all three cases on 141 GB.
+
+**Use `-probes` on the large grids.** Each probe copies six full fields to the
+host and walks every node there to form the curl and the divergence. At 512³ that
+is 3.2 GB and 134 million host iterations per sample, which can cost more than
+the simulation itself. Eight probes still resolve the history; the summary lines
+do not depend on how many were taken.
+
+**What to check in the output**, in order of what would be most alarming:
+
+1. `largest rise in E_u + E_b` must be `0.000e+00`. Ideal MHD cannot gain energy.
+   It was zero at M = 64, 96 and 128 on a T4.
+2. `worst max|div B| / k|B|` should keep falling at second order. Measured
+   7.177e-02, 3.461e-02, 2.002e-02 at M = 64, 96, 128 — so **M = 256 should land
+   near 5.0e-03 and M = 512 near 1.3e-03**. If it stalls instead, that is a real
+   result and worth reporting rather than tuning away.
+3. The energy history: magnetic energy should sit nearly flat to t ≈ 0.8 while
+   kinetic energy falls by about a third — the flow winding up the field — and
+   only then should the two decay together.
+
+**Two things not to do.** Do not build FP64 (`-DLBM_DOUBLE=ON`) for this: it is
+for checking arithmetic, and it costs a large factor on any card. And do not read
+a wall-bounded MHD result off this code — a non-fluid cell is skipped, which is
+bounce-back on the induction distribution and is not a physical magnetic wall.
+Every MHD case here is periodic, by design.
+
 ## 4. The larger validation suite
 
 `validation/` in the parent directory has 29 cases the CUDA code does not — the

@@ -38,6 +38,7 @@
 //  And b0 = v0, the usual equipartition choice.
 //
 //    usage: orszag_tang [-m M] [-re RE] [-ma MA] [-tmax T] [-op bgk|cm]
+//                       [-probes N]
 //==============================================================================
 #include "lbm/backend.cuh"
 
@@ -137,7 +138,7 @@ static Diag measure(const std::vector<Real>& ux, const std::vector<Real>& uy,
 }
 
 int main(int argc, char** argv) {
-  int M = 64;
+  int M = 64, nprobe = 20;
   double Re = 100.0, Ma = 0.034, tmax = 4.0;
   std::string op = "cm";
 
@@ -148,6 +149,7 @@ int main(int argc, char** argv) {
     if (a == "-ma"   && i + 1 < argc) Ma   = std::atof(argv[++i]);
     if (a == "-tmax" && i + 1 < argc) tmax = std::atof(argv[++i]);
     if (a == "-op"   && i + 1 < argc) op   = argv[++i];
+    if (a == "-probes" && i + 1 < argc) nprobe = std::atoi(argv[++i]);
   }
 
   // Ma on the PEAK initial speed, 2 sqrt(2) v0 -- an assumption, not a reading.
@@ -192,7 +194,11 @@ int main(int argc, char** argv) {
   std::printf("  %8.3f %12.6f %12.6f %12.6f %14.3e\n", 0.0, 1.0, d0.eu / e0,
               d0.eb / e0, d0.divb);
 
-  const std::size_t probe = T / 20 ? T / 20 : 1;
+  // Each probe copies six full fields to the host and walks every node there to
+  // form curl and div. At 512^3 that is 3.2 GB and 134M host iterations per
+  // sample, which can cost more than the simulation. Lower -probes on large
+  // grids; the summary lines do not depend on how many were taken.
+  const std::size_t probe = (nprobe > 0 && T / std::size_t(nprobe)) ? T / std::size_t(nprobe) : 1;
   double worst_div = d0.divb, prev_e = 1.0, worst_rise = 0.0;
   const auto wall0 = std::chrono::steady_clock::now();
 
