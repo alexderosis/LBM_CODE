@@ -229,7 +229,10 @@ int main(int argc, char** argv) {
       // A margin, not a bare comparison: the driver keeps a working set of its
       // own, and total_mass allocates a small partial-sum buffer.
       if (dev.on_gpu && need > 0.97 * dev.free_gb) {
-        std::printf("  %-16s %5d^3 %10.1f   DOES NOT FIT -- needs %.0f GB, %.0f GB free\n",
+        // One decimal, not zero: on a 15.5 GB card a 15.3 GB lattice rounds to
+        // "needs 15 GB, 16 GB free", which reads as a contradiction rather than
+        // as the near miss it is.
+        std::printf("  %-16s %5d^3 %10.1f   DOES NOT FIT -- needs %.1f GB, %.1f GB free\n",
                     name, sz, need, need, dev.free_gb);
         any_skipped = true;
         continue;

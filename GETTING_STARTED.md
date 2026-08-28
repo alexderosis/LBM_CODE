@@ -271,6 +271,30 @@ is set by bytes per node and by the memory system, not by how many nodes there
 are; a sweep that climbs steeply with size is usually measuring launch overhead
 at the small end.
 
+### What it actually measures — one T4, 256³, FP32, 200 steps
+
+| run | BGK | central moments | % of 320 GB/s peak |
+|---|---|---|---|
+| at rest, walls | 908.6 | 912.3 | 61.3 / 61.6 |
+| decaying vortex, walls | 917.3 | 919.9 | 61.9 / 62.1 |
+| at rest, `-periodic` | 932.4 | 933.8 | 62.9 / 63.0 |
+
+Three things worth reading off that table:
+
+* **The initial state does not change the rate.** At rest and stirred differ by
+  ~1%, i.e. run-to-run noise, which is what a kernel with no data-dependent
+  branch should do. So starting at rest costs nothing in realism of the number.
+* **Central moments is not slower than BGK.** 912 against 909 — a 27-moment
+  collision for free, because the step is bandwidth-bound and both move the same
+  108 B/node. (The Kokkos code in the parent directory collapses here instead;
+  that is an artefact of that implementation, not of the scheme.)
+* **Walls cost about 2.6%** on this card, 932 → 909. That is the templated
+  geometry path; loading the flags unconditionally cost twice as much. See the
+  note at the top of `include/lbm/streaming.cuh`.
+
+A T4 reaches ~62% of its theoretical pin bandwidth here. That percentage, not
+the MLUPS, is what should carry across to an H200.
+
 ## 4. The larger validation suite
 
 `validation/` in the parent directory has 29 cases the CUDA code does not — the
