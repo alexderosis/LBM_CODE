@@ -15,7 +15,7 @@
 //
 //    usage: tgv3d [-d N] [-re R] [-tmax T] [-u0 U] [-op bgk|cm]
 //==============================================================================
-#include "lbm/solver.cuh"
+#include "lbm/backend.cuh"
 
 #include <chrono>
 #include <cmath>
@@ -102,7 +102,8 @@ int main(int argc, char** argv) {
   const std::size_t T = std::size_t(tmax * double(D) / double(u0));
   const Op which = (op == "bgk") ? Op::BGK : Op::CentralMoments;
 
-  std::printf("3D Taylor-Green   CUDA native   D3Q27   operator %s   %s\n",
+  std::printf("3D Taylor-Green   %s   D3Q27   operator %s   %s\n",
+              backend::on_device ? "CUDA native" : "HOST reference",
               which == Op::BGK ? "bgk" : "cm",
               sizeof(Real) == 4 ? "FP32" : "FP64");
   std::printf("  D = %d   Re = %.0f   u0 = %.3f   Ma = %.4f   nu = %.6e   tau = %.6f\n",
@@ -111,7 +112,7 @@ int main(int argc, char** argv) {
   std::printf("  t* = t u0 / D up to %.1f   (%zu steps, %d^3 = %ld nodes)\n\n",
               tmax, T, D, long(D) * D * D);
 
-  Solver s(D, D, D, which, nu);
+  backend::Fluid s(D, D, D, which, nu);
   s.initialise_with(TaylorGreenInit{u0, Real(2.0 * M_PI) / Real(D)});
 
   std::vector<Real> rho, ux, uy, uz;

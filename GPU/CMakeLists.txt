@@ -17,7 +17,16 @@
 #  the FP32 rate, so -DLBM_DOUBLE=ON is for checking arithmetic, not for speed.
 #===============================================================================
 cmake_minimum_required(VERSION 3.20)
-project(lbm_cuda LANGUAGES CXX CUDA)
+
+# LBM_HOST_ONLY configures without CUDA at all, for a machine with no toolkit:
+# the checks and the host builds of every driver still work, because the whole
+# numerical core is LBM_HD and compiles as plain C++.
+option(LBM_HOST_ONLY "Configure without CUDA; build only what runs on the host" OFF)
+if(LBM_HOST_ONLY)
+  project(lbm_cuda LANGUAGES CXX)
+else()
+  project(lbm_cuda LANGUAGES CXX CUDA)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,7 +41,9 @@ set(LBM_GPU_ARCH "75" CACHE STRING "CUDA architecture, e.g. 75 for a T4")
 option(LBM_DOUBLE "Build in FP64 (slow on consumer cards)" OFF)
 option(LBM_PTXAS_VERBOSE "Report registers and spills per kernel" OFF)
 
-set(CMAKE_CUDA_ARCHITECTURES ${LBM_GPU_ARCH})
+if(NOT LBM_HOST_ONLY)
+  set(CMAKE_CUDA_ARCHITECTURES ${LBM_GPU_ARCH})
+endif()
 
 add_library(lbm_cuda_core INTERFACE)
 target_include_directories(lbm_cuda_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -49,19 +60,60 @@ if(LBM_PTXAS_VERBOSE)
     $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-v>)
 endif()
 
-foreach(app tgv3d tgv3d_bench bench)
-  add_executable(${app} src/${app}.cu)
-  target_link_libraries(${app} PRIVATE lbm_cuda_core)
+set(LBM_APPS tgv3d tgv3d_bench bench channel rayleigh_benard alfven orszag_tang)
+if(NOT LBM_HOST_ONLY)
+  foreach(app ${LBM_APPS})
+    add_executable(${app} src/${app}.cu)
+    target_link_libraries(${app} PRIVATE lbm_cuda_core)
+  endforeach()
+endif()
+
+#-------------------------------------------------------------------------------
+# HOST BUILDS OF THE SAME DRIVERS.
+#
+# Every driver is written against the aliases in include/lbm/backend.cuh, which
+# resolve to the CUDA solvers under nvcc and to the host reference drivers under
+# a plain C++ compiler. The two sets of classes expose the same interface, so one
+# source builds both ways with no #ifdef of its own.
+#
+# That means a wrong initial condition, a wrong Rayleigh number, a wrong
+# diagnostic or a wrong coupling ORDER can be found on a laptop, at a small grid
+# size, before anything is launched on a device. What a host build cannot check
+# is the launch itself: grid configuration, register pressure, transfers.
+#
+# These targets are built only when LBM_HOST_APPS is ON, since on a machine with
+# a GPU they are redundant. On a machine WITHOUT one, configure with
+# -DLBM_HOST_ONLY=ON and no CUDA compiler is needed at all.
+#-------------------------------------------------------------------------------
+option(LBM_HOST_APPS "Also build every driver as plain C++, runnable with no GPU" OFF)
+if(LBM_HOST_APPS OR LBM_HOST_ONLY)
+  foreach(app ${LBM_APPS})
+    if(NOT ${app} STREQUAL "bench")          # bench is a device benchmark only
+      add_executable(host_${app} src/${app}.cu)
+      set_source_files_properties(src/${app}.cu PROPERTIES LANGUAGE CXX)
+      target_link_libraries(host_${app} PRIVATE lbm_cuda_core)
+    endif()
+  endforeach()
+endif()
+
+#-------------------------------------------------------------------------------
+# The checks build as PLAIN C++ and need no GPU. LBM_HD expands to nothing off
+# nvcc, so the same arithmetic the kernels run is exercised here.
+#
+#   host_check    47 unit checks: velocity sets, transforms, one collision at a
+#                 time. Seconds.
+#   host_physics  whole simulations against closed-form solutions -- Poiseuille,
+#                 conduction, diffusion, advection, buoyancy, resistive decay,
+#                 the shear Alfven wave. Under ten seconds.
+#
+# Run both before trusting anything the device produces.
+#-------------------------------------------------------------------------------
+foreach(t host_check host_physics)
+  add_executable(${t} test/${t}.cpp)
+  target_link_libraries(${t} PRIVATE lbm_cuda_core)
+  set_source_files_properties(test/${t}.cpp PROPERTIES LANGUAGE CXX)
 endforeach()
 
-#-------------------------------------------------------------------------------
-# The numerical checks build as PLAIN C++ and need no GPU. LBM_HD expands to
-# nothing off nvcc, so the same arithmetic the kernels run is exercised here.
-# Run this before trusting anything the device produces.
-#-------------------------------------------------------------------------------
-add_executable(host_check test/host_check.cpp)
-target_link_libraries(host_check PRIVATE lbm_cuda_core)
-set_source_files_properties(test/host_check.cpp PROPERTIES LANGUAGE CXX)
-
 enable_testing()
-add_test(NAME host_check COMMAND host_check)
+add_test(NAME host_check   COMMAND host_check)
+add_test(NAME host_physics COMMAND host_physics)

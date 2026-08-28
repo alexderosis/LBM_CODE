@@ -26,7 +26,7 @@
 //
 //    usage: tgv3d_bench [-d N] [-re R] [-tmax T] [-u0 U] [-op bgk|cm]
 //==============================================================================
-#include "lbm/solver.cuh"
+#include "lbm/backend.cuh"
 
 #include <chrono>
 #include <cmath>
@@ -109,7 +109,8 @@ int main(int argc, char** argv) {
   const std::size_t T = std::size_t(tmax * L / double(u0));
   const Op which = (op == "bgk") ? Op::BGK : Op::CentralMoments;
 
-  std::printf("3D Taylor-Green, BENCHMARK   CUDA native   D3Q27   %s   %s\n",
+  std::printf("3D Taylor-Green, BENCHMARK   %s   D3Q27   %s   %s\n",
+              backend::on_device ? "CUDA native" : "HOST reference",
               which == Op::BGK ? "bgk" : "cm", sizeof(Real) == 4 ? "FP32" : "FP64");
   std::printf("  D = %d   L = D/2pi = %.3f   Re = V0 L/nu = %.0f\n", D, L, Re);
   std::printf("  u0 = %.4f   Ma = %.4f   nu = %.6e   tau = %.6f\n",
@@ -120,7 +121,7 @@ int main(int argc, char** argv) {
   std::printf("  NOTE: src/tgv3d.cu's Re = u0 D/nu would read %.0f for this nu.\n\n",
               double(u0) * double(D) / double(nu));
 
-  Solver s(D, D, D, which, nu);
+  backend::Fluid s(D, D, D, which, nu);
   s.initialise_with(TaylorGreenBenchInit{
       u0, Real(2.0 * M_PI) / Real(D), Real(3.0) * u0 * u0 / Real(16.0)});
 

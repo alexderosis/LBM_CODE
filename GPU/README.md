@@ -5,8 +5,18 @@ It shares no headers with `../src`, is not built by the parent's CMake, and is
 not a port of it — only the physics and the output format are deliberately the
 same, so the two can be compared.
 
-**Status: core complete, built and validated on a Tesla T4. Physics coverage is
-a fraction of the parent's.** Read the scope table before assuming anything works.
+**Status, in two halves.**
+
+*The D3Q27 fluid core* is built and validated on a Tesla T4 and an H200. Numbers
+below are measured on those devices.
+
+*Thermal transport, MHD and geometry* were added afterwards and are verified
+**on the host only**. Every physics number in the section on them was produced by
+the reference driver in `include/lbm/hostsim.hpp`, which runs the same per-node
+update functions the kernels call, in a serial loop. **None of that has been
+compiled with nvcc or run on a GPU.** It compiles cleanly as C++17 and passes
+every check in both precisions; that is a real result and it is not the same
+result as running. Read the scope table before assuming anything works.
 
 ## Measured, on a Tesla T4 (sm_75, CUDA 12.8, FP32)
 
@@ -79,6 +89,157 @@ gap between them measures resolution. Its Kokkos twin is
 `../validation/tgv3d_bench.cpp`; the two share the initial condition, the
 viscosity and the non-dimensionalisation line for line.
 
+## Thermal, MHD and geometry — measured on the host
+
+Everything in this section was produced by `include/lbm/hostsim.hpp`, on a laptop
+with no GPU. **None of it has been compiled with nvcc.** It is a check of the
+physics, not of the port.
+
+That check is worth more than it sounds, because it is not a second
+implementation. The per-node update is a plain `LBM_HD` function —
+`fluid_node_update`, `scalar_node_update`, `magnetic_node_update` — and the CUDA
+kernel is three lines of index arithmetic around it. The host driver calls the
+same function in a serial loop, which is legitimate because under Esoteric Pull
+each storage slot has exactly one writer per step: the nodes of one step commute,
+so a for-loop is not an approximation to the launch, it is the same computation.
+What remains unverified is the launch itself — grid configuration, register
+pressure, transfers.
+
+`test/host_physics.cpp` runs these and passes in **both** precisions:
+
+| case | what it pins down | FP32 | FP64 |
+|---|---|---|---|
+| Poiseuille, bounce-back walls | wall placement, Guo forcing | 1.4e-03 | 1.3e-03 |
+| closed box | every slot written exactly once | 1.6e-06 | 1.4e-14 |
+| insulating box | the scalar is conserved | 9.7e-09 | 1.0e-13 |
+| conduction, Dirichlet walls | anti-bounce-back, plane placement | 1.4e-06 | 2.5e-15 |
+| decaying sinusoid | the D3Q7 diffusivity, cs² = 1/4 | 8.1e-04 | 8.1e-04 |
+| advected sinusoid | the advective flux | 4.4e-04 | 4.4e-04 |
+| uniform buoyancy | the whole Boussinesq path | 6.7e-05 | 2.9e-13 |
+| resistive decay | induction alone, no flow | 4.1e-03 | 4.1e-03 |
+| shear Alfvén wave, BGK | Lorentz coupling + induction + order | 8.1e-04 | 3.3e-04 |
+| shear Alfvén wave, CM | the same, central moments | 8.4e-05 | 3.8e-04 |
+
+Figures are worst relative error against the closed-form answer. Where FP32 and
+FP64 agree, the number is discretisation error and not round-off.
+
+**The wall is exactly where it should be.** For Poiseuille the interesting
+quantity is not the error but how it scales: a wall in the wrong place gives an
+error going like 1/H, a correctly placed one leaves the 1/H² truncation error.
+In FP64, `channel` gives
+
+| H | amplitude error | × H² |
+|---|---|---|
+| 16 | −1.631e-03 | 0.333 |
+| 32 | −4.071e-04 | 0.333 |
+| 64 | −1.017e-04 | 0.333 |
+
+— constant to three digits over two doublings. In FP32 the same run reads 0.336
+at H = 16 and 0.498 at H = 32: the raw-population storage runs out of mantissa
+before the discretisation error does. That is the cost of not having shifted
+storage, and it is why the parent has it.
+
+**Conduction confirms where the thermal plane sits.** With Dirichlet layers at
+y = 0 and y = H+1, the measured gradient is 0.062500 = 1/16 exactly, which is the
+distance between the two PLANES; measuring between the NODES would give 1/15 =
+0.066667. Both walls — no-slip and isothermal — land on the same two planes,
+which they must, or H would mean two different things in the Rayleigh number.
+
+**The D3Q7 sound speed is cs² = 1/4, and the sinusoid proves it.** The decay-rate
+error is −0.327% at L = 16 and −0.081% at L = 32, a ratio of 4.05. A wrong cs²
+would be an offset that does not converge; this converges at k².
+
+### Rayleigh–Bénard brackets a constant of nature
+
+`rayleigh_benard` needs no reference table. Linear stability puts the onset of
+convection between two rigid plates at **Ra_c = 1707.762**, independent of Pr and
+of everything else. At H = 12, BGK:
+
+| Ra | Nu | max &#124;u&#124; | verdict |
+|---|---|---|---|
+| 5000 | 2.043700 | 2.88e-02 | convection sustained |
+| 800 | 0.995366 | 4.27e-05 | convection died |
+
+A factor of 670 in the velocity across the threshold. This is the case that
+exercises everything added here at once — solid walls for the momentum, Dirichlet
+walls for the scalar, and the Boussinesq force that couples them.
+
+**One honest caveat.** Below onset the exact answer is Nu = 1 and the fluid at
+rest; the run gives Nu = 0.9954 and a residual max|u| of 4.3e-05. That residual
+is *independent of the seeded perturbation* — 4.263e-05 with no seed at all
+against 4.271e-05 with a seed a hundred times larger — so it is not a slowly
+decaying mode but a steady spurious flow the body force drives near the walls. It
+is linear in Ra (2.15, 4.26, 8.50 × 10⁻⁵ at Ra = 400, 800, 1600) and the Nu
+offset converges at second order in H, −0.46% at H = 12 against −0.13% at H = 24.
+A discretisation artefact at the scheme's design order, then — but quote Nu from
+two resolutions, not one.
+
+### The Alfvén wave is the case that earns its keep
+
+An exact solution of the full **nonlinear** incompressible MHD equations: u is
+perpendicular to B₀ and everything depends only on x, so (u·∇)u vanishes
+identically while (B·∇)B does not. Both the Lorentz coupling and the induction
+equation are driven, and both must be right.
+
+The two measurements fail differently, which is the whole point. An error in the
+**Lorentz coupling** shows up as the wrong wave *speed*, at any resolution. An
+error in the **coupling order** shows up only in the *damping*, and only under
+refinement — stepping the fluid against a field from the previous step is a
+first-order splitting error, and under diffusive scaling it appears as a damping
+offset that survives every grid refinement. The parent implementation found
+exactly that: its damping error *grew*, 1.55e-2 → 2.79e-2 → 3.16e-2, while the
+phase speed converged cleanly.
+
+`alfven -sweep`, FP64, diffusive scaling (v_A ~ 1/L at fixed ν and η, so the
+Reynolds and Lundquist numbers are the same on every grid):
+
+| L | speed error | ratio | damping error | ratio |
+|---|---|---|---|---|
+| 32 | +2.222e-04 | | +2.080e-03 | |
+| 64 | +5.570e-05 | 3.99 | +4.972e-04 | 4.18 |
+| 128 | +1.397e-05 | 3.99 | +1.249e-04 | 3.98 |
+
+**Both converge at second order.** The coupling is simultaneous, not lagged.
+
+The same sweep in FP32 reads +2.9e-04 → −4.9e-04 → −1.1e-03 on the speed and
++2.7e-03 → +3.8e-03 → +5.1e-02 on the damping — errors that *grow*, which is the
+signature of the bug the sweep exists to find. They are not. Under diffusive
+scaling v_A goes like 1/L, so at L = 128 the perturbation is 5e-04 on populations
+of order 0.3, which leaves about three decimal digits above FP32 noise. **Run the
+sweep in FP64 or do not run it**, and this is a fair warning about how easy it is
+to read a precision failure as a physics failure.
+
+### Orszag–Tang is the only case here that tests div B
+
+In both wave cases div B is structurally zero and reports round-off whatever the
+scheme does. Orszag–Tang's nonlinear dynamics makes every component depend on
+every coordinate, so a scheme that generates monopoles shows it. Max |div B|
+normalised by the field's own gradient scale k|B|, to t = 1, central moments:
+
+| M | 16 | 24 | 32 |
+|---|---|---|---|
+| max &#124;div B&#124; / k&#124;B&#124; | 2.007e-01 | 1.444e-01 | 1.091e-01 |
+
+It converges, at roughly first order in M — these are very coarse grids for this
+flow, and the parent runs it at M = 64 and above. The antisymmetry of the
+induction equilibrium's first moment is what keeps this bounded, and `host_check`
+asserts that antisymmetry directly.
+
+**The energy budget is not clean at coarse M, and it should be said.** Ideal
+incompressible MHD has dE/dt = −ν|∇u|² − η|∇B|², so E_u + E_b must never rise. It
+does: the largest rise between samples to t = 0.5 is 1.10e-02 at M = 12 and
+5.92e-03 at M = 24, reaching exactly zero only at M = 32. Looking at the history,
+E_u decays smoothly throughout while E_b oscillates by a per cent or two — the
+exchange between the two overshoots when the current sheets are under-resolved.
+It vanishes under refinement, which is what makes it under-resolution rather than
+a defect in the scheme; a rise that did *not* vanish would be a real fault, and
+the driver now prints the number rather than a verdict so the distinction stays
+visible.
+
+**Not claimed:** when J_max peaks. That is a comparison against a pseudospectral
+reference whose values are not available numerically, so the driver prints the
+history and asserts nothing about it.
+
 ## Running on another card
 
 `-DLBM_GPU_ARCH=` takes the compute capability without the dot: 70 Volta,
@@ -113,43 +274,116 @@ subtracts, so equilibrium was not a fixed point of the collision. The flow would
 have decayed *plausibly but wrongly*, which is close to the worst possible
 failure to have to diagnose on a remote GPU through a notebook.
 
+**That property has since been extended to whole simulations.** Every driver in
+`src/` is written against the aliases in `include/lbm/backend.cuh`, which resolve
+to the CUDA solvers under nvcc and to the host reference drivers under a plain
+C++ compiler. The two sets of classes expose the same interface, so one source
+builds and runs both ways with no `#ifdef` of its own — and a wrong initial
+condition, a wrong Rayleigh number, a wrong diagnostic or a wrong coupling order
+can be found on a laptop before anything reaches a device.
+
 Run the host checks first. Always.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLBM_GPU_ARCH=75
 cmake --build build -j
-./build/host_check      # no GPU needed
+./build/host_check         # no GPU needed, seconds
+./build/host_physics       # no GPU needed, under ten seconds
 ./build/tgv3d -d 64 -op cm
 ./build/bench
 ```
+
+On a machine with no CUDA toolkit at all, configure without it. Every check and
+every driver still builds, as plain C++17:
+
+```bash
+cmake -S . -B build-host -DLBM_HOST_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build-host -j
+ctest --test-dir build-host --output-on-failure
+./build-host/host_rayleigh_benard -h 12 -ra 5000
+```
+
+The drivers, and what each is for:
+
+| driver | case | checks |
+|---|---|---|
+| `tgv3d` | Taylor–Green vortex | the fluid core, against the parent's reference |
+| `tgv3d_bench` | the published DNS benchmark | resolution |
+| `bench` | throughput | MLUPS and GB/s |
+| `channel` | force-driven Poiseuille | geometry, forcing, where the wall is |
+| `rayleigh_benard` | convection between plates | thermal + walls + buoyancy, against Ra_c |
+| `alfven` | shear Alfvén wave | the Lorentz coupling, and the coupling order |
+| `orszag_tang` | Orszag–Tang 3D | div B, the energy budget |
+
+Add `-DLBM_HOST_APPS=ON` on a machine that has CUDA to get `host_*` twins of
+every driver alongside the device ones.
 
 ## What is implemented
 
 | | this code | parent (Kokkos) |
 |---|---|---|
-| lattices | D3Q27 | D2Q9, D2Q5, D3Q7, D3Q19, D3Q27 |
+| lattices | D3Q27 fluid, D3Q7 scalar and field | D2Q9, D2Q5, D3Q7, D3Q19, D3Q27 |
 | collision | BGK, central moments | BGK, TRT, raw MRT, central moments |
 | streaming | Esoteric Pull | Esoteric Pull, two-lattice |
 | storage | raw | raw, shifted |
-| boundaries | **periodic only** | bounce-back, regularised, outflow, moment-based |
-| forcing | **none** | Guo, high-order Hermite |
-| thermal / MHD | **none** | both |
-| geometry | **none** | arbitrary voxel input |
-| cases | Taylor–Green, benchmark | ~20 validation cases |
+| boundaries | periodic, bounce-back, scalar adiabatic and Dirichlet | + regularised, outflow, moment-based |
+| forcing | Guo: uniform and Boussinesq | Guo, high-order Hermite |
+| thermal | advection–diffusion + Boussinesq | same |
+| MHD | Dellar induction + Maxwell stress, BGK and central moments | + the published D2Q9 scheme |
+| geometry | arbitrary voxel input | arbitrary voxel input |
+| cases | 6 drivers | ~20 validation cases |
 
-Everything in bold is absent, not merely untested. This code cannot run the
-aorta, cannot run Hartmann flow, cannot run a channel, and has no way to impose
-a wall.
+Still absent, not merely untested:
+
+* **shifted storage.** The fluid stores raw populations, and it costs accuracy in
+  FP32 — see the Poiseuille row below, where FP32 loses the clean second-order
+  convergence FP64 shows at H = 32.
+* **the scalar's open boundary.** Outflow needs a donor map and a second kernel
+  after a fence; reading a donor inside the main kernel is a genuine race under
+  Esoteric Pull, because the two slots a node reads are the two it writes.
+* **magnetic wall conditions.** A non-fluid cell is skipped, which on this
+  storage means bounce-back on the induction distribution — and that is neither
+  the perfectly conducting nor the insulating condition. Dellar's moment-based
+  wall is what those need. Every MHD case here is periodic. Do not read a
+  wall-bounded MHD result off this code.
+* **D3Q19, TRT, raw MRT, regularised walls, the aorta, height-field input.**
 
 ## Verification
 
-`host_check` runs 20 checks with no GPU: the velocity set and its moments, the
-`opp(i) == i+1` pairing that Esoteric Pull depends on, the direction table,
-equilibrium moments, the central-moment transform round trip, equilibrium in
-central-moment space, mass and momentum conservation for both operators,
-equilibrium as a fixed point, `gather(init_scatter(x)) == x`, and — the one the
-scheme lives or dies on — that a single streaming step transports each of the 26
-directions by exactly `c_i` and nowhere else.
+`host_check` runs 47 checks with no GPU, in either precision. The original
+twenty: the velocity set and its moments, the `opp(i) == i+1` pairing that
+Esoteric Pull depends on, the direction table, equilibrium moments, the
+central-moment transform round trip, equilibrium in central-moment space, mass
+and momentum conservation for both operators, equilibrium as a fixed point,
+`gather(init_scatter(x)) == x`, and — the one the scheme lives or dies on — that
+a single streaming step transports each of the 26 directions by exactly `c_i`
+and nowhere else.
+
+And, for the physics added since: the D3Q7 velocity set and its cs² = 1/4, that
+both lattices obey the same pairing contract, the scalar equilibrium's two
+moments, the induction equilibrium's first moment **and that it is exactly
+antisymmetric** — the property that keeps div B from being generated — the
+Maxwell stress carrying no mass and no momentum while delivering exactly M_ab in
+the second, its central moments against the closed forms the parent verified
+symbolically, the Guo source's three moments, that a forced collision adds
+*exactly* F to the momentum under both operators, that the MHD equilibrium is a
+fixed point of both, and the streaming round trip again on D3Q7.
+
+**One of the original twenty was asserting the wrong thing, and only FP64 could
+tell.** It fed the second-order equilibrium `feq` to *both* operators and asked
+that neither move it. That is true of BGK and false of central moments, whose
+fixed point is the Maxwellian one — the two differ by the Galilean defects of the
+truncation, which are O(u³). At u ≈ 0.02 that is 2.5e-06: comfortably inside the
+FP32 tolerance and nowhere near the FP64 one. The operator was never wrong; the
+check was, and the looser precision hid it. Both now assert against their own
+equilibrium, and both pass in FP32 and FP64.
+
+`host_physics` runs whole simulations against closed-form solutions; see the
+table above. It found three faults in its own first draft and none in the solver:
+a decay measured for so long that the mode had fallen into round-off, a peak
+velocity compared against a continuous maximum that falls between nodes, and a
+magnetic conservation test that fed the operator a field which was not the moment
+of the populations being collided.
 
 The Taylor–Green case prints the same columns as the parent's
 `validation/tgv3d.cpp`, whose committed reference is
@@ -177,6 +411,36 @@ asserts the round trip.
 **Keep the layout SoA.** `f[i * n_nodes + node]`, so consecutive threads touch
 consecutive addresses. This is the single most important decision in a GPU LBM
 code, and the reason it is written this way round rather than AoS.
+
+**Refresh the coupled fields BEFORE stepping the fluid.** Two-way coupling must
+be evaluated simultaneously. Stepping the fluid against a temperature or a
+magnetic field from the previous step is a first-order splitting error, and under
+diffusive scaling the ratio ω²Δt/(νk²) is independent of N — so it appears as a
+damping offset that survives every grid refinement. A non-converging error
+sitting beside a converging one is the signature, and `alfven -sweep` is there to
+show it. The order is `compute_field()`, then `fluid.step()`, then the coupled
+solvers' own `step()`. On the device those are launches on the default stream and
+are already ordered; no fence is needed.
+
+It is also the cheaper of the two mirror images. Recovering u for the coupled
+fields instead would need a separate pass over 27 populations, where refreshing T
+costs 7 and B costs 21 — and the fluid writes u as a by-product of a gather it
+was doing anyway.
+
+**Write the driver against `backend::`, not against `Solver`.** The aliases in
+`include/lbm/backend.cuh` resolve to the CUDA classes under nvcc and to the host
+reference drivers otherwise, so the same source runs both ways. Every case here
+was debugged on a laptop before it was ever a kernel launch; the Rayleigh–Bénard
+bracket, the Alfvén convergence sweep and the div B history in this README were
+all measured that way.
+
+**A gap between the total and the fluid-cell sum is not a leak.** Under Esoteric
+Pull a population in flight toward a wall spends a step in a slot the WALL owns,
+so a sum over fluid cells always undercounts — 4% in the insulating box here, 13%
+on an urban geometry in the parent. `host::Scalar::total_population()` and
+`host::Fluid::total_mass()` sum every slot, and those are the conserved
+quantities. The macroscopic field is what is missing the difference, not the
+solver.
 
 **Watch registers before blaming arithmetic.** Build with
 `-DLBM_PTXAS_VERBOSE=ON` and read the spill columns. In the parent

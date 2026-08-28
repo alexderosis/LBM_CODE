@@ -1,205 +1,168 @@
 #pragma once
 //==============================================================================
-//  Esoteric Pull streaming and the fused stream-collide kernel.
+//  The fluid: per-node update, kernels, and the host-side driver.
 //
-//  ESOTERIC PULL, briefly. One lattice, updated in place. The pair of opposite
-//  directions (i, i+1) shares a slot, and which of the two a node owns flips
-//  with the parity of the timestep. Every slot has exactly one reader and one
-//  writer, and they are the same node, so the update is race-free with no
-//  temporary buffer and no second lattice.
+//  The per-node update is a plain LBM_HD function, not kernel code. The CUDA
+//  kernel is three lines of index arithmetic around it, and the host reference
+//  driver in hostsim.hpp calls the very same function in a serial loop. So a
+//  physics check run on a laptop with no GPU exercises the code the device will
+//  execute, rather than a second implementation of it that can drift.
 //
-//  Two consequences worth stating because they are the reason to use it:
-//    * half the memory footprint of a two-lattice scheme;
-//    * bounce-back becomes the identity on the storage, so a solid cell needs
-//      no work at all -- it is simply not visited.
+//  COUPLING ORDER, AND WHY IT IS NOT AN IMPLEMENTATION DETAIL.
 //
-//  The parity tables below are transcribed from the same contract the parent
-//  implementation uses (opp(i) == i + 1 for odd i). If the direction ordering in
-//  core.cuh is ever changed, this breaks silently: populations still move, just
-//  in the wrong directions, and the flow looks plausible. host_check.cpp tests
-//  the round trip for exactly that reason.
+//  Two-way coupling must be evaluated SIMULTANEOUSLY. If the fluid is stepped
+//  against a magnetic field or a temperature from the previous step, that is a
+//  first-order splitting error -- and it does not vanish under refinement. Under
+//  diffusive scaling the ratio omega^2 dt / (nu k^2) is independent of N, so it
+//  appears as a damping offset that survives every grid refinement. The parent
+//  implementation found this the hard way: its shear-Alfven damping error GREW
+//  with resolution, 1.55e-2 -> 2.79e-2 -> 3.16e-2, while the phase speed
+//  converged cleanly at second order. A non-converging error sitting beside a
+//  converging one is the signature.
 //
-//  LAYOUT. f[i * n_nodes + node]. Consecutive threads take consecutive nodes,
-//  so a warp's 32 accesses to a given direction are contiguous.
+//  So the driver order is: refresh T and B, step the fluid against them, then
+//  step T and B against the velocity the fluid just wrote. That costs one extra
+//  light pass over the coupled populations per step.
+//
+//  It is the cheaper of the two mirror images. The alternative -- run the fluid
+//  first and give the coupled fields its velocity -- would need a separate pass
+//  over 27 populations to recover u, where refreshing T costs 7 and B costs 21.
+//  The fluid writes u as a by-product of a gather it was doing anyway.
 //==============================================================================
-#include "core.cuh"
-
-#include <cstdio>
-#include <cstdlib>
-#include <vector>
+#include "streaming.cuh"
 
 namespace lbm {
 
-#if defined(__CUDACC__)
-#define LBM_CUDA_CHECK(call)                                                   \
-  do {                                                                         \
-    cudaError_t _e = (call);                                                   \
-    if (_e != cudaSuccess) {                                                   \
-      std::fprintf(stderr, "CUDA error %s at %s:%d\n",                         \
-                   cudaGetErrorString(_e), __FILE__, __LINE__);                \
-      std::exit(1);                                                            \
-    }                                                                          \
-  } while (0)
-#endif
+//------------------------------------------------------------------------------
+// Everything a fluid step needs. Passed to the kernel by value; the pointers it
+// does not use are null and are never dereferenced, because the template flags
+// that would read them are false.
+//------------------------------------------------------------------------------
+struct FluidParams {
+  Real* f = nullptr;
+  const std::uint8_t* flags = nullptr;
+  const Real* Bx = nullptr;                  // magnetic field, owned elsewhere
+  const Real* By = nullptr;
+  const Real* Bz = nullptr;
+  Real* ux_out = nullptr;                    // velocity handed to coupled fields
+  Real* uy_out = nullptr;
+  Real* uz_out = nullptr;
+  BodyForce force{};
+  int nx = 0, ny = 0, nz = 0;
+  Real omega = Real(1), omega_bulk = Real(1);
+};
 
 //------------------------------------------------------------------------------
-// Periodic node index. Kept as a free function so host_check.cpp can exercise
-// the same arithmetic the kernel uses.
-//------------------------------------------------------------------------------
-LBM_HD LBM_INLINE int wrap(int v, int n) { return (v + n) % n; }
-
-LBM_HD LBM_INLINE long node_id(int x, int y, int z, int nx, int ny) {
-  return long(x) + long(nx) * (long(y) + long(ny) * long(z));
-}
-
-//------------------------------------------------------------------------------
-// Neighbour in direction i, with periodic wrap.
-//------------------------------------------------------------------------------
-LBM_HD LBM_INLINE long neighbour(int x, int y, int z, int i, int nx, int ny, int nz) {
-  return node_id(wrap(x + D3Q27::cx(i), nx),
-                 wrap(y + D3Q27::cy(i), ny),
-                 wrap(z + D3Q27::cz(i), nz), nx, ny);
-}
-
-//------------------------------------------------------------------------------
-// Esoteric Pull load / store, templated on parity so there is no runtime test
-// inside the hot loop.
-//------------------------------------------------------------------------------
-template <int Parity>
-LBM_HD LBM_INLINE void load_pair(const Real* f, long N, long self, long nb,
-                                 int i, Real& a, Real& b) {
-  if (Parity == 0) { a = f[long(i) * N + self];       b = f[long(i + 1) * N + nb]; }
-  else             { a = f[long(i + 1) * N + self];   b = f[long(i) * N + nb];     }
-}
-
-template <int Parity>
-LBM_HD LBM_INLINE void store_pair(Real* f, long N, long self, long nb,
-                                  int i, Real a, Real b) {
-  if (Parity == 0) { f[long(i + 1) * N + nb] = a;  f[long(i) * N + self]     = b; }
-  else             { f[long(i) * N + nb]     = a;  f[long(i + 1) * N + self] = b; }
-}
-
-//------------------------------------------------------------------------------
-// Gather the 27 populations a node should collide with, in direction order.
-//------------------------------------------------------------------------------
-template <int Parity>
-LBM_HD LBM_INLINE void gather(const Real* f, long N, int x, int y, int z,
-                              int nx, int ny, int nz, Real out[27]) {
-  const long self = node_id(x, y, z, nx, ny);
-  out[0] = f[self];
-  for (int i = 1; i < 27; i += 2) {
-    const long nb = neighbour(x, y, z, i, nx, ny, nz);
-    load_pair<Parity>(f, N, self, nb, i, out[i], out[i + 1]);
-  }
-}
-
-//------------------------------------------------------------------------------
-// INVERSE OF gather -- for initialisation only, and it is NOT the same function
-// as `scatter` below.
+// One node, one step: gather, collide, scatter.
 //
-// `scatter` writes POST-COLLISION populations into the slots the NEXT parity
-// will read, i.e. it streams. Applying it to lay down an initial condition
-// therefore shifts every population by one cell before the first step, and the
-// paired slots end up describing a state no node ever held. The flow still
-// evolves and still looks like a flow, which is what makes this worth a named
-// function and a test rather than a comment.
+// A Solid cell returns immediately. That is not an optimisation -- under
+// Esoteric Pull it IS halfway bounce-back. The slot a fluid node emits into
+// toward a wall is a slot the wall owns; the wall never touches it, so the
+// fluid node reads its own emission back one step later, reversed. Skipping the
+// node is the boundary condition, and it is why arbitrary geometry costs
+// nothing here beyond one byte per node.
 //
-// This writes each value into the very slot gather would read it back from, so
-// gather(init_scatter(x)) == x exactly. host_check.cpp asserts that.
+// The consequence worth knowing: a population in flight toward a wall spends a
+// step in a slot the WALL owns, so a sum over fluid cells alone does not see it.
+// Nothing is lost; the macroscopic field is what is missing it.
+//------------------------------------------------------------------------------
+template <int Parity, int OpKind, int FKind, bool Mhd>
+LBM_HD LBM_INLINE void fluid_node_update(const FluidParams& p, long N, long n) {
+  if (p.flags[n] != Fluid) return;
+
+  int x, y, z;
+  coords(n, p.nx, p.ny, x, y, z);
+
+  Real f[27];
+  gather<Parity>(p.f, N, x, y, z, p.nx, p.ny, p.nz, f);
+
+  Macro m = macroscopic(f);
+
+  Coupling cp;
+  force_at<FKind>(p.force, n, cp.F);
+  if (FKind != ForceNone) shift_velocity(m, cp.F);
+  if (Mhd) { cp.B[0] = p.Bx[n]; cp.B[1] = p.By[n]; cp.B[2] = p.Bz[n]; }
+
+  // The velocity the coupled fields advect with is the one Guo's half-shift has
+  // already been applied to, i.e. the physical one.
+  if (p.ux_out) { p.ux_out[n] = m.ux; p.uy_out[n] = m.uy; p.uz_out[n] = m.uz; }
+
+  if (OpKind == 0) collide_bgk_gen<FKind != ForceNone, Mhd>(f, m, p.omega, cp);
+  else             collide_cm_gen <FKind != ForceNone, Mhd>(f, m, p.omega, p.omega_bulk, cp);
+
+  scatter<Parity>(p.f, N, x, y, z, p.nx, p.ny, p.nz, f);
+}
+
+//------------------------------------------------------------------------------
+// Macroscopic readout at one node, for diagnostics. Non-fluid cells report rest
+// at rho0 rather than whatever their storage happens to hold, so a plot of the
+// field does not show wall slots as flow.
 //------------------------------------------------------------------------------
 template <int Parity>
-LBM_HD LBM_INLINE void init_scatter(Real* f, long N, int x, int y, int z,
-                                    int nx, int ny, int nz, const Real in[27]) {
-  const long self = node_id(x, y, z, nx, ny);
-  f[self] = in[0];
-  for (int i = 1; i < 27; i += 2) {
-    const long nb = neighbour(x, y, z, i, nx, ny, nz);
-    if (Parity == 0) { f[long(i) * N + self]     = in[i]; f[long(i + 1) * N + nb] = in[i + 1]; }
-    else             { f[long(i + 1) * N + self] = in[i]; f[long(i) * N + nb]     = in[i + 1]; }
+LBM_HD LBM_INLINE void macro_node(const Real* f, const std::uint8_t* flags, long N, long n,
+                                  int nx, int ny, int nz,
+                                  Real* rho, Real* ux, Real* uy, Real* uz) {
+  if (flags[n] != Fluid) {
+    rho[n] = Real(1); ux[n] = uy[n] = uz[n] = Real(0);
+    return;
   }
-}
-
-template <int Parity>
-LBM_HD LBM_INLINE void scatter(Real* f, long N, int x, int y, int z,
-                               int nx, int ny, int nz, const Real in[27]) {
-  const long self = node_id(x, y, z, nx, ny);
-  f[self] = in[0];
-  for (int i = 1; i < 27; i += 2) {
-    const long nb = neighbour(x, y, z, i, nx, ny, nz);
-    store_pair<Parity>(f, N, self, nb, i, in[i], in[i + 1]);
-  }
-}
-
-//==============================================================================
-//  The fused stream-collide kernel.
-//
-//  Templated on parity and on the operator so that both fold at compile time --
-//  a runtime `if (op == ...)` inside the kernel would serialise divergent warps
-//  and defeat the point.
-//==============================================================================
-#if defined(__CUDACC__)
-
-template <int Parity, int OpKind>
-__global__ void stream_collide(Real* __restrict__ f, int nx, int ny, int nz,
-                               Real omega, Real omega_bulk) {
-  const long N = long(nx) * ny * nz;
-  const long n = blockIdx.x * blockDim.x + threadIdx.x;
-  if (n >= N) return;
-
-  const int x = int(n % nx);
-  const int y = int((n / nx) % ny);
-  const int z = int(n / (long(nx) * ny));
-
-  Real fl[27];
-  gather<Parity>(f, N, x, y, z, nx, ny, nz, fl);
-
-  const Macro m = macroscopic(fl);
-  if (OpKind == 0) collide_bgk(fl, m, omega);
-  else             collide_cm(fl, m, omega, omega_bulk);
-
-  scatter<Parity>(f, N, x, y, z, nx, ny, nz, fl);
-}
-
-//------------------------------------------------------------------------------
-// Macroscopic readout, for diagnostics. Separate kernel: it runs on probe steps
-// only, so folding it into the hot kernel would cost registers every step to
-// save a launch every few thousand.
-//------------------------------------------------------------------------------
-template <int Parity>
-__global__ void compute_macro(const Real* __restrict__ f, int nx, int ny, int nz,
-                              Real* __restrict__ rho, Real* __restrict__ ux,
-                              Real* __restrict__ uy, Real* __restrict__ uz) {
-  const long N = long(nx) * ny * nz;
-  const long n = blockIdx.x * blockDim.x + threadIdx.x;
-  if (n >= N) return;
-  const int x = int(n % nx);
-  const int y = int((n / nx) % ny);
-  const int z = int(n / (long(nx) * ny));
-
+  int x, y, z;
+  coords(n, nx, ny, x, y, z);
   Real fl[27];
   gather<Parity>(f, N, x, y, z, nx, ny, nz, fl);
   const Macro m = macroscopic(fl);
   rho[n] = m.rho; ux[n] = m.ux; uy[n] = m.uy; uz[n] = m.uz;
 }
 
-//------------------------------------------------------------------------------
-// Initialise every slot exactly once.
-//
-// `scatter` writes the value that `gather` would read back, so applying it over
-// all nodes at parity 0 leaves a consistent lattice. Doing this any other way
-// (writing f[i*N+n] directly) desynchronises the paired slots and the first
-// step transports garbage.
-//------------------------------------------------------------------------------
-template <class Init>
-__global__ void initialise(Real* __restrict__ f, int nx, int ny, int nz, Init init) {
+//==============================================================================
+//  CUDA kernels -- thin wrappers around the functions above.
+//==============================================================================
+#if defined(__CUDACC__)
+
+template <int Parity, int OpKind, int FKind, bool Mhd>
+__global__ void fluid_kernel(FluidParams p, long N) {
+  const long n = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n >= N) return;
+  fluid_node_update<Parity, OpKind, FKind, Mhd>(p, N, n);
+}
+
+template <int Parity>
+__global__ void compute_macro(const Real* __restrict__ f,
+                              const std::uint8_t* __restrict__ flags,
+                              int nx, int ny, int nz,
+                              Real* __restrict__ rho, Real* __restrict__ ux,
+                              Real* __restrict__ uy, Real* __restrict__ uz) {
   const long N = long(nx) * ny * nz;
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
-  const int x = int(n % nx);
-  const int y = int((n / nx) % ny);
-  const int z = int(n / (long(nx) * ny));
+  macro_node<Parity>(f, flags, N, n, nx, ny, nz, rho, ux, uy, uz);
+}
 
-  Macro m = init(x, y, z);
+//------------------------------------------------------------------------------
+// Initialise every slot exactly once.
+//
+// `init_scatter` writes the value that `gather` would read back, so applying it
+// over all nodes at parity 0 leaves a consistent lattice. Doing this any other
+// way (writing f[i*N+n] directly) desynchronises the paired slots and the first
+// step transports garbage.
+//
+// SOLID AND EXCLUDED CELLS ARE SEEDED AT REST, NOT LEFT EMPTY. A bounce-back
+// cell is a real storage cell holding in-transit populations; starting it at
+// zero makes the wall layer soak mass out of the fluid and leaves the bulk
+// density low by O(area/volume) = O(1/H) -- a first-order error in a quantity
+// the Poiseuille amplitude depends on, since mu = rho nu.
+//------------------------------------------------------------------------------
+template <class Init>
+__global__ void initialise(Real* __restrict__ f, const std::uint8_t* __restrict__ flags,
+                           int nx, int ny, int nz, Init init) {
+  const long N = long(nx) * ny * nz;
+  const long n = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n >= N) return;
+  int x, y, z;
+  coords(n, nx, ny, x, y, z);
+
+  Macro m = (flags[n] == Fluid) ? init(x, y, z)
+                                : Macro{Real(1), Real(0), Real(0), Real(0)};
   Real fl[27];
   for (int i = 0; i < 27; ++i) fl[i] = feq(i, m.rho, m.ux, m.uy, m.uz);
   init_scatter<0>(f, N, x, y, z, nx, ny, nz, fl);   // NOT scatter -- see above
@@ -215,32 +178,85 @@ class Solver {
         omega_(omega_from_viscosity(nu)), omega_bulk_(omega_bulk) {
     N_ = long(nx) * ny * nz;
     LBM_CUDA_CHECK(cudaMalloc(&f_, sizeof(Real) * 27 * N_));
+    LBM_CUDA_CHECK(cudaMalloc(&flags_, sizeof(std::uint8_t) * N_));
+    LBM_CUDA_CHECK(cudaMemset(flags_, Fluid, sizeof(std::uint8_t) * N_));
   }
-  ~Solver() { cudaFree(f_); }
+  ~Solver() {
+    cudaFree(f_); cudaFree(flags_);
+    cudaFree(ux_); cudaFree(uy_); cudaFree(uz_);
+  }
 
   Solver(const Solver&) = delete;
   Solver& operator=(const Solver&) = delete;
 
+  //--------------------------------------------------------------------------
+  // Geometry. One byte per node, in the same linear order as everything else:
+  // flags[node_id(x,y,z,nx,ny)]. Call before initialise_with, so solid cells
+  // are seeded at rest rather than with the initial condition.
+  //--------------------------------------------------------------------------
+  void set_geometry(const std::vector<std::uint8_t>& flags) {
+    if (long(flags.size()) != N_) {
+      std::fprintf(stderr, "set_geometry: %zu flags for %ld nodes\n", flags.size(), N_);
+      std::exit(1);
+    }
+    LBM_CUDA_CHECK(cudaMemcpy(flags_, flags.data(), sizeof(std::uint8_t) * N_,
+                              cudaMemcpyHostToDevice));
+  }
+
+  void set_force(const BodyForce& b, int kind) { force_ = b; fkind_ = kind; }
+
+  // Device pointers owned by a MagneticSolver. Switches the fluid to the MHD
+  // equilibrium; the Maxwell stress then enters through the second moment
+  // rather than as a body force, which is what keeps it second-order accurate.
+  void couple_magnetic(const Real* Bx, const Real* By, const Real* Bz) {
+    Bx_ = Bx; By_ = By; Bz_ = Bz; mhd_ = true;
+    enable_velocity_output();
+  }
+
+  // Allocate the velocity field the coupled solvers advect with. Not allocated
+  // by default: 12 bytes per node against 108 for the populations is 11% more
+  // traffic, which an uncoupled run should not pay.
+  void enable_velocity_output() {
+    if (ux_) return;
+    LBM_CUDA_CHECK(cudaMalloc(&ux_, sizeof(Real) * N_));
+    LBM_CUDA_CHECK(cudaMalloc(&uy_, sizeof(Real) * N_));
+    LBM_CUDA_CHECK(cudaMalloc(&uz_, sizeof(Real) * N_));
+    LBM_CUDA_CHECK(cudaMemset(ux_, 0, sizeof(Real) * N_));
+    LBM_CUDA_CHECK(cudaMemset(uy_, 0, sizeof(Real) * N_));
+    LBM_CUDA_CHECK(cudaMemset(uz_, 0, sizeof(Real) * N_));
+  }
+  const Real* ux_device() const { return ux_; }
+  const Real* uy_device() const { return uy_; }
+  const Real* uz_device() const { return uz_; }
+
   template <class Init>
   void initialise_with(Init init) {
     const int B = 128;
-    initialise<<<int((N_ + B - 1) / B), B>>>(f_, nx_, ny_, nz_, init);
+    initialise<<<int((N_ + B - 1) / B), B>>>(f_, flags_, nx_, ny_, nz_, init);
     LBM_CUDA_CHECK(cudaGetLastError());
     LBM_CUDA_CHECK(cudaDeviceSynchronize());
     t_ = 0;
+    if (ux_) refresh_velocity();
   }
 
   void step() {
-    const int B = 128;
-    const int G = int((N_ + B - 1) / B);
-    if (t_ % 2 == 0) {
-      if (op_ == Op::BGK) stream_collide<0, 0><<<G, B>>>(f_, nx_, ny_, nz_, omega_, omega_bulk_);
-      else                stream_collide<0, 1><<<G, B>>>(f_, nx_, ny_, nz_, omega_, omega_bulk_);
-    } else {
-      if (op_ == Op::BGK) stream_collide<1, 0><<<G, B>>>(f_, nx_, ny_, nz_, omega_, omega_bulk_);
-      else                stream_collide<1, 1><<<G, B>>>(f_, nx_, ny_, nz_, omega_, omega_bulk_);
-    }
+    if (t_ % 2 == 0) launch_op<0>();
+    else             launch_op<1>();
     ++t_;
+  }
+
+  // Write ux/uy/uz without advancing. Only needed before the first step, so a
+  // coupled field advects with the initial velocity rather than with zero.
+  void refresh_velocity() {
+    if (!ux_) return;
+    Real* dr = nullptr;
+    LBM_CUDA_CHECK(cudaMalloc(&dr, sizeof(Real) * N_));
+    const int B = 128, G = int((N_ + B - 1) / B);
+    if (t_ % 2 == 0) compute_macro<0><<<G, B>>>(f_, flags_, nx_, ny_, nz_, dr, ux_, uy_, uz_);
+    else             compute_macro<1><<<G, B>>>(f_, flags_, nx_, ny_, nz_, dr, ux_, uy_, uz_);
+    LBM_CUDA_CHECK(cudaGetLastError());
+    LBM_CUDA_CHECK(cudaDeviceSynchronize());
+    cudaFree(dr);
   }
 
   // rho/u on the host. Allocates its own device scratch: this is a diagnostic
@@ -254,8 +270,8 @@ class Solver {
     LBM_CUDA_CHECK(cudaMalloc(&dy, sizeof(Real) * N_));
     LBM_CUDA_CHECK(cudaMalloc(&dz, sizeof(Real) * N_));
     const int B = 128, G = int((N_ + B - 1) / B);
-    if (t_ % 2 == 0) compute_macro<0><<<G, B>>>(f_, nx_, ny_, nz_, dr, dx, dy, dz);
-    else             compute_macro<1><<<G, B>>>(f_, nx_, ny_, nz_, dr, dx, dy, dz);
+    if (t_ % 2 == 0) compute_macro<0><<<G, B>>>(f_, flags_, nx_, ny_, nz_, dr, dx, dy, dz);
+    else             compute_macro<1><<<G, B>>>(f_, flags_, nx_, ny_, nz_, dr, dx, dy, dz);
     LBM_CUDA_CHECK(cudaGetLastError());
     rho.resize(N_); ux.resize(N_); uy.resize(N_); uz.resize(N_);
     LBM_CUDA_CHECK(cudaMemcpy(rho.data(), dr, sizeof(Real) * N_, cudaMemcpyDeviceToHost));
@@ -270,11 +286,55 @@ class Solver {
   Real omega() const { return omega_; }
 
  private:
+  FluidParams params() {
+    FluidParams p;
+    p.f = f_; p.flags = flags_;
+    p.Bx = Bx_; p.By = By_; p.Bz = Bz_;
+    p.ux_out = ux_; p.uy_out = uy_; p.uz_out = uz_;
+    p.force = force_;
+    p.nx = nx_; p.ny = ny_; p.nz = nz_;
+    p.omega = omega_; p.omega_bulk = omega_bulk_;
+    return p;
+  }
+
+  //--------------------------------------------------------------------------
+  // Dispatch. Nested so that only the combinations actually used are ever
+  // instantiated -- MHD with buoyancy, for instance, is never launched and
+  // therefore never compiled.
+  //--------------------------------------------------------------------------
+  template <int P> void launch_op() {
+    if (op_ == Op::BGK) launch_force<P, 0>();
+    else                launch_force<P, 1>();
+  }
+  template <int P, int O> void launch_force() {
+    if (mhd_) {
+      if (fkind_ == ForceUniform) run<P, O, ForceUniform, true>();
+      else                        run<P, O, ForceNone,    true>();
+    } else if (fkind_ == ForceUniform) {
+      run<P, O, ForceUniform, false>();
+    } else if (fkind_ == ForceBoussinesq) {
+      run<P, O, ForceBoussinesq, false>();
+    } else {
+      run<P, O, ForceNone, false>();
+    }
+  }
+  template <int P, int O, int F, bool M> void run() {
+    const int B = 128;
+    fluid_kernel<P, O, F, M><<<int((N_ + B - 1) / B), B>>>(params(), N_);
+    LBM_CUDA_CHECK(cudaGetLastError());
+  }
+
   int nx_, ny_, nz_;
   long N_;
   Op op_;
   Real omega_, omega_bulk_;
   Real* f_ = nullptr;
+  std::uint8_t* flags_ = nullptr;
+  Real *ux_ = nullptr, *uy_ = nullptr, *uz_ = nullptr;
+  const Real *Bx_ = nullptr, *By_ = nullptr, *Bz_ = nullptr;
+  BodyForce force_{};
+  int fkind_ = ForceNone;
+  bool mhd_ = false;
   std::size_t t_ = 0;
 };
 
