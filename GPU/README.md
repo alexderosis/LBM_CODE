@@ -291,32 +291,57 @@ of order 0.3, which leaves about three decimal digits above FP32 noise. **Run th
 sweep in FP64 or do not run it**, and this is a fair warning about how easy it is
 to read a precision failure as a physics failure.
 
-### Orszag–Tang is the only case here that tests div B
+### Orszag–Tang: the only case here that tests div B, run properly
 
 In both wave cases div B is structurally zero and reports round-off whatever the
 scheme does. Orszag–Tang's nonlinear dynamics makes every component depend on
-every coordinate, so a scheme that generates monopoles shows it. Max |div B|
-normalised by the field's own gradient scale k|B|, to t = 1, central moments:
+every coordinate, so a scheme that generates monopoles shows it.
 
-| M | 16 | 24 | 32 |
-|---|---|---|---|
-| max &#124;div B&#124; / k&#124;B&#124; | 2.007e-01 | 1.444e-01 | 1.091e-01 |
+Re = 100, Ma = 0.034, Pr_m = 1, central moments, to t = 4 — the same physical
+problem on three grids, on a T4:
 
-It converges, at roughly first order in M — these are very coarse grids for this
-flow, and the parent runs it at M = 64 and above. The antisymmetry of the
-induction equilibrium's first moment is what keeps this bounded, and `host_check`
-asserts that antisymmetry directly.
+| M | nodes | τ | steps | max &#124;div B&#124;/k&#124;B&#124; | energy rise | MLUPS |
+|---|---|---|---|---|---|---|
+| 64 | 262,144 | 0.513325 | 5,870 | 7.177e-02 | 0.000e+00 | 359.2 |
+| 96 | 884,736 | 0.519988 | 8,805 | 3.461e-02 | 0.000e+00 | 378.4 |
+| 128 | 2,097,152 | 0.526650 | 11,741 | 2.002e-02 | 0.000e+00 | 391.6 |
 
-**The energy budget is not clean at coarse M, and it should be said.** Ideal
-incompressible MHD has dE/dt = −ν|∇u|² − η|∇B|², so E_u + E_b must never rise. It
-does: the largest rise between samples to t = 0.5 is 1.10e-02 at M = 12 and
-5.92e-03 at M = 24, reaching exactly zero only at M = 32. Looking at the history,
-E_u decays smoothly throughout while E_b oscillates by a per cent or two — the
-exchange between the two overshoots when the current sheets are under-resolved.
-It vanishes under refinement, which is what makes it under-resolution rather than
-a defect in the scheme; a rise that did *not* vanish would be a real fault, and
-the driver now prints the number rather than a verdict so the distinction stays
-visible.
+**div B converges at second order** — the ratios are 1.80 and 1.90 in the
+exponent, against 1.5× and 1.33× refinements. (The coarse host runs at M = 16–32
+suggested only first order; they were deep in the under-resolved regime and the
+estimate was too pessimistic.) The antisymmetry of the induction equilibrium's
+first moment is what keeps this bounded, and `host_check` asserts that
+antisymmetry directly.
+
+**The energy budget is clean at every resolution here.** Ideal incompressible MHD
+has dE/dt = −ν|∇u|² − η|∇B|², so E_u + E_b must never rise, and it does not:
+0.000e+00 at all three M. The spurious rise the host reported (1.10e-02 at
+M = 12) was under-resolution, and it is gone by M = 32.
+
+M = 128, 11,741 steps in 62.9 s. The history is the physics:
+
+| t | E/E0 | E_u/E0 | E_b/E0 | max&#124;div B&#124;/k&#124;B&#124; | J_max |
+|---|---|---|---|---|---|
+| 0.0 | 1.000000 | 0.510204 | 0.489796 | 2.238e-06 | — |
+| 0.4 | 0.918199 | 0.454361 | 0.463839 | 5.113e-03 | 3.007e-03 |
+| 0.8 | 0.798871 | 0.331558 | 0.467313 | 9.537e-03 | 4.821e-03 |
+| 1.2 | 0.656237 | 0.242583 | 0.413654 | 1.458e-02 | 6.962e-03 |
+| 1.6 | 0.527835 | 0.203742 | 0.324093 | 2.002e-02 | 4.449e-03 |
+| 4.0 | 0.170094 | 0.070211 | 0.099883 | 4.002e-03 | 1.354e-03 |
+
+Two things to read off it. Up to t ≈ 0.8 the **magnetic energy barely moves**
+(0.4898 → 0.4673) while the kinetic energy falls by a third (0.5102 → 0.3316):
+the flow is winding up the field, and the transfer is nearly lossless. After that
+both decay together, which is resistive dissipation in the current sheets taking
+over. And div B is largest exactly where the sheets are sharpest — it peaks at
+t ≈ 1.6 and then falls back by a factor of five.
+
+**J_max peaks between t = 1.0 and t = 1.4** on this Δt = 0.2 sampling, which is
+consistent with the paper's statement that the current "shows a maximum at about
+t = 1" — but the sampling cannot say more than that, and the driver deliberately
+asserts nothing about it. Figure 6 there is a plot against a pseudospectral run
+whose values are not available numerically, so no per-point comparison is
+possible and none is claimed.
 
 **Not claimed:** when J_max peaks. That is a comparison against a pseudospectral
 reference whose values are not available numerically, so the driver prints the
