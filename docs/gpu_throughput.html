@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Throughput in Comparable Units</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+:root {
+  --ground:#F6F7F9; --panel:#FFFFFF; --ink:#151A21; --body:#2B333D;
+  --muted:#5C6673; --rule:#D3D9E1; --grid:#EAEEF3; --wedge:#EEF1F5;
+  --s-bgk:#6E7885; --s-trt:#A8562A; --s-mrt:#2D7A8C; --s-cm:#8B3A62;
+  --band:#ECF0F4; --good:#2C6B4F; --warn:#9E3B26; --pend:#7A6A4E;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:#12161B; --panel:#181D24; --ink:#EDF1F5; --body:#C3CBD4;
+    --muted:#8A95A2; --rule:#2C343D; --grid:#222932; --wedge:#1E242B;
+    --s-bgk:#9BA6B3; --s-trt:#D9853F; --s-mrt:#4FB2C6; --s-cm:#D06590;
+    --band:#1B2128; --good:#6DBE94; --warn:#E0806D; --pend:#C4AC7C;
+  }
+}
+:root[data-theme="dark"] {
+  --ground:#12161B; --panel:#181D24; --ink:#EDF1F5; --body:#C3CBD4;
+  --muted:#8A95A2; --rule:#2C343D; --grid:#222932; --wedge:#1E242B;
+  --s-bgk:#9BA6B3; --s-trt:#D9853F; --s-mrt:#4FB2C6; --s-cm:#D06590;
+  --band:#1B2128; --good:#6DBE94; --warn:#E0806D; --pend:#C4AC7C;
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--ground); color:var(--body);
+  font-family:"Source Serif 4",Georgia,serif; font-size:17px; line-height:1.62;
+  -webkit-font-smoothing:antialiased; }
+.wrap { max-width:1000px; margin:0 auto; padding:64px 28px 96px;
+  display:flex; flex-direction:column; gap:38px; }
+.col { max-width:66ch; }
+h1 { font-family:"IBM Plex Sans Condensed",system-ui,sans-serif; font-weight:700;
+  font-size:clamp(2rem,4.4vw,3rem); line-height:1.06; letter-spacing:-.015em;
+  color:var(--ink); margin:0; text-wrap:balance; }
+h2 { font-family:"IBM Plex Sans Condensed",system-ui,sans-serif; font-weight:600;
+  font-size:1.42rem; letter-spacing:-.005em; color:var(--ink); margin:0 0 2px;
+  text-wrap:balance; }
+.eyebrow { font-family:"IBM Plex Sans Condensed",system-ui,sans-serif; font-weight:600;
+  font-size:.76rem; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); margin:0 0 12px; }
+.eyebrow .tag { color:var(--ink); }
+.eyebrow .tag-m { color:var(--s-trt); }
+.eyebrow .tag-i { color:var(--s-mrt); }
+.eyebrow .tag-p { color:var(--pend); }
+p { margin:0 0 14px; }
+.lede { font-size:1.12rem; color:var(--body); }
+code, .mono { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:.9em;
+  font-variant-numeric:tabular-nums; }
+b, strong { color:var(--ink); font-weight:600; }
+figure { margin:0; display:flex; flex-direction:column; gap:12px; }
+.plot { background:var(--panel); border:1px solid var(--rule); border-radius:2px;
+  padding:10px 6px 4px; overflow-x:auto; }
+.plot svg { display:block; width:100%; height:auto; min-width:640px; }
+figcaption { font-family:"IBM Plex Sans Condensed",system-ui,sans-serif;
+  font-size:.9rem; color:var(--muted); max-width:74ch; line-height:1.5; }
+figcaption b { color:var(--ink); font-weight:600; }
+svg text { font-family:"IBM Plex Sans Condensed",system-ui,sans-serif; }
+.tick { font-size:11.5px; fill:var(--muted); font-variant-numeric:tabular-nums; }
+.tickm { font-size:12px; fill:var(--ink); font-weight:500;
+  font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums; }
+.axis { font-size:12.5px; fill:var(--ink); font-weight:600; letter-spacing:.01em; }
+.legh { font-size:10.5px; fill:var(--muted); font-weight:700; letter-spacing:.13em; }
+.tw { overflow-x:auto; border:1px solid var(--rule); border-radius:2px; background:var(--panel); }
+table { border-collapse:collapse; width:100%; min-width:560px;
+  font-family:"IBM Plex Mono",monospace; font-size:.83rem; font-variant-numeric:tabular-nums; }
+th { font-family:"IBM Plex Sans Condensed",sans-serif; font-size:.72rem; font-weight:600;
+  letter-spacing:.1em; text-transform:uppercase; color:var(--muted); text-align:right;
+  padding:11px 14px; border-bottom:1px solid var(--rule); white-space:nowrap; }
+th:first-child { text-align:left; }
+td { padding:8px 14px; border-bottom:1px solid var(--grid); color:var(--body); }
+td:first-child { color:var(--ink); }
+td.num { text-align:right; }
+td.dim { color:var(--muted); }
+td.hit { color:var(--good); }
+td.miss { color:var(--warn); font-weight:500; }
+td.pend { color:var(--pend); }
+tr.lead td { color:var(--s-trt); }
+tr.lead td:first-child { color:var(--s-trt); font-weight:500; }
+.stats { display:flex; flex-wrap:wrap; gap:0; border:1px solid var(--rule);
+  border-radius:2px; background:var(--panel); }
+.stat { flex:1 1 150px; padding:16px 20px; border-right:1px solid var(--rule); }
+.stat:last-child { border-right:0; }
+.stat .k { font-family:"IBM Plex Sans Condensed",sans-serif; font-size:.7rem;
+  letter-spacing:.13em; text-transform:uppercase; color:var(--muted); font-weight:600; }
+.stat .v { font-family:"IBM Plex Mono",monospace; font-size:1.42rem; color:var(--ink);
+  font-variant-numeric:tabular-nums; margin-top:3px; }
+.stat .v em { font-style:normal; font-size:.82rem; color:var(--muted); }
+.note { border-left:2px solid var(--rule); padding:2px 0 2px 18px; color:var(--muted);
+  font-size:.96rem; }
+.note.flag { border-left-color:var(--s-trt); }
+pre { margin:0; background:var(--panel); border:1px solid var(--rule); border-radius:2px;
+  padding:14px 16px; overflow-x:auto; font-family:"IBM Plex Mono",monospace;
+  font-size:.82rem; line-height:1.72; color:var(--body); }
+pre .c { color:var(--muted); }
+hr { border:0; border-top:1px solid var(--rule); margin:8px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="col">
+    <p class="eyebrow">M3LB · GPU throughput</p>
+    <h1>MLUPS is not a unit of speed</h1>
+    <p class="lede" style="margin-top:16px">A lattice Boltzmann step is bound by memory
+    bandwidth almost everywhere, so lattice updates per second is very nearly
+    <em>bandwidth ÷ bytes per node</em>. Two codes can differ by a factor of three in
+    MLUPS while using the machine equally well. This page states what M3LB moves per
+    node, what fraction of the card it actually gets, and which number survives a
+    comparison with another implementation.</p>
+  </header>
+
+  <div class="stats">
+    <div class="stat"><div class="k">storage</div><div class="v">108 <em>B/node</em></div></div>
+    <div class="stat"><div class="k">traffic per step</div><div class="v">216 <em>B/node</em></div></div>
+    <div class="stat"><div class="k">of pin bandwidth</div><div class="v">61.3<em>%</em></div></div>
+    <div class="stat"><div class="k">CM against BGK</div><div class="v">+0.4<em>%</em></div></div>
+  </div>
+
+  <figure>
+    <div class="plot"><svg viewBox="0 0 760 320" role="img" aria-label="Four velocity sets at identical achieved bandwidth report MLUPS differing by 2.8 times">
+      <text x="186" y="30" class="legh">MLUPS · WHAT GETS QUOTED</text>
+      <text x="536" y="30" class="legh">GB/s · WHAT THE CARD DOES</text>
+
+      <line x1="186" y1="46" x2="186" y2="252" stroke="var(--rule)" stroke-width="1"/>
+      <line x1="289.6" y1="46" x2="289.6" y2="252" stroke="var(--grid)" stroke-width="1"/>
+      <line x1="393.1" y1="46" x2="393.1" y2="252" stroke="var(--grid)" stroke-width="1"/>
+      <text x="186" y="270" text-anchor="middle" class="tick">0</text>
+      <text x="289.6" y="270" text-anchor="middle" class="tick">1000</text>
+      <text x="393.1" y="270" text-anchor="middle" class="tick">2000</text>
+
+      <rect x="536" y="46" width="170" height="206" fill="var(--wedge)"/>
+      <line x1="536" y1="46" x2="536" y2="252" stroke="var(--rule)" stroke-width="1"/>
+      <line x1="706" y1="46" x2="706" y2="252" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3 3"/>
+      <text x="706" y="270" text-anchor="middle" class="tick">320</text>
+      <text x="536" y="270" text-anchor="middle" class="tick">0</text>
+
+      <text x="176" y="79" text-anchor="end" class="tickm">D3Q27 FP32</text>
+      <text x="176" y="93" text-anchor="end" class="tick">216 B/node · M3LB</text>
+      <rect x="186" y="68" width="94.1" height="26" fill="var(--s-trt)"/>
+      <text x="288" y="86" class="tickm" fill="var(--s-trt)">908.6</text>
+      <rect x="536" y="68" width="104.3" height="26" fill="var(--s-trt)"/>
+      <text x="648" y="86" class="tick" fill="var(--s-trt)">196</text>
+
+      <text x="176" y="125" text-anchor="end" class="tickm">D3Q19 FP32</text>
+      <text x="176" y="139" text-anchor="end" class="tick">152 B/node</text>
+      <rect x="186" y="114" width="133.7" height="26" fill="var(--band)" stroke="var(--muted)" stroke-width="1"/>
+      <text x="327" y="132" class="tickm" fill="var(--muted)">1291</text>
+      <rect x="536" y="114" width="104.3" height="26" fill="var(--band)" stroke="var(--muted)" stroke-width="1"/>
+      <text x="648" y="132" class="tick">196</text>
+
+      <text x="176" y="171" text-anchor="end" class="tickm">D3Q27 FP16</text>
+      <text x="176" y="185" text-anchor="end" class="tick">108 B/node</text>
+      <rect x="186" y="160" width="188.2" height="26" fill="var(--band)" stroke="var(--muted)" stroke-width="1"/>
+      <text x="382" y="178" class="tickm" fill="var(--muted)">1817</text>
+      <rect x="536" y="160" width="104.3" height="26" fill="var(--band)" stroke="var(--muted)" stroke-width="1"/>
+      <text x="648" y="178" class="tick">196</text>
+
+      <text x="176" y="217" text-anchor="end" class="tickm">D3Q19 FP16</text>
+      <text x="176" y="231" text-anchor="end" class="tick">76 B/node</text>
+      <rect x="186" y="206" width="267.4" height="26" fill="var(--band)" stroke="var(--muted)" stroke-width="1"/>
+      <text x="461" y="224" class="tickm" fill="var(--muted)">2582</text>
+      <rect x="536" y="206" width="104.3" height="26" fill="var(--band)" stroke="var(--muted)" stroke-width="1"/>
+      <text x="648" y="224" class="tick">196</text>
+
+      <line x1="186" y1="252" x2="476" y2="252" stroke="var(--rule)" stroke-width="1"/>
+      <line x1="536" y1="252" x2="706" y2="252" stroke="var(--rule)" stroke-width="1"/>
+      <text x="331" y="296" text-anchor="middle" class="axis">million lattice updates per second</text>
+      <text x="621" y="296" text-anchor="middle" class="axis">achieved, against 320 peak</text>
+    </svg></div>
+    <figcaption><b>One measurement, four reports.</b> The copper row is measured — M3LB
+    BGK on one Tesla T4, 256³, FP32, walls, at rest: 908.6 MLUPS, which is 196 GB/s of
+    the card's 320. The three outlined rows are that same 196 GB/s divided by a different
+    bytes-per-node; they are arithmetic, not four benchmarked codes. That is the point.
+    <b>Identical use of the machine spans 2.8× in MLUPS</b>, purely through the velocity
+    set and the storage precision. The right-hand panel is what does not move.</figcaption>
+  </figure>
+
+  <section class="col">
+    <p class="eyebrow"><span class="tag tag-m">Measured</span> · one T4, 256³, FP32, 200 steps</p>
+    <h2>What the card actually does</h2>
+    <p>The cubic box is the simplest configuration the code will run: a cube, a one-cell
+    solid shell on all six faces, no forcing, no coupled fields. Three readings, each
+    reported by <code>box</code> itself alongside its GB/s and its percentage of peak.</p>
+  </section>
+
+  <div class="tw"><table>
+    <thead><tr><th>Configuration</th><th>BGK</th><th>Central moments</th><th>% of 320 GB/s</th></tr></thead>
+    <tbody>
+      <tr class="lead"><td>at rest, walls</td><td class="num">908.6</td><td class="num">912.3</td><td class="num">61.3 / 61.6</td></tr>
+      <tr><td>decaying vortex, walls</td><td class="num">917.3</td><td class="num">919.9</td><td class="num dim">61.9 / 62.1</td></tr>
+      <tr><td>at rest, <span class="mono">-periodic</span></td><td class="num">932.4</td><td class="num">933.8</td><td class="num dim">62.9 / 63.0</td></tr>
+    </tbody>
+  </table></div>
+
+  <section class="col">
+    <p><b>The initial state does not change the rate.</b> At rest and stirred differ by
+    about 1% — run-to-run noise. Every node reads 27 populations, does the same arithmetic
+    and writes 27 back whatever the values are; there is no branch on a population and no
+    data-dependent path in the kernel. A quiescent box and a stirred one time the same,
+    so quoting the at-rest figure costs nothing in honesty.</p>
+    <p><b>Walls cost 2.6%</b>, 932 → 909. A solid cell is skipped, and under Esoteric Pull
+    that <em>is</em> halfway bounce-back: the slot a fluid node emits toward a wall belongs
+    to the wall, which never touches it, so the node reads its own emission back reversed
+    one step later. No-slip, second order on a grid-aligned flat wall, one byte per node,
+    no extra kernel. The 2.6% is the templated geometry path — loading the flags
+    unconditionally cost twice as much.</p>
+    <p class="note">The at-rest run conserves mass trivially, so it proves throughput and
+    nothing else. <code>-u0 0.05</code> starts a divergence-free vortex that vanishes on
+    all six wall planes, and then the mass-drift column is a real check on the same kernel
+    at the same speed. In FP32 that drift settles at ~7e−7 and stays there — 7.252e−07,
+    7.240e−07, 7.240e−07 at 40, 400 and 4000 steps, and exactly zero in FP64. It is
+    one-time quantisation of the weights onto the nearby FP32 fixed point. A leak would
+    grow with step count.</p>
+  </section>
+
+  <hr>
+
+  <section class="col">
+    <p class="eyebrow"><span class="tag tag-m">Measured</span> · the result worth the comparison</p>
+    <h2>A 27-moment collision for free</h2>
+    <p>Central moments run at <b>912.3</b> MLUPS against BGK's <b>908.6</b> — the more
+    elaborate operator is, within noise, not slower. It should not be: the step is
+    bandwidth-bound and both operators move the same 216 B per node. The full central-moment
+    transform is a separable 3×3×3 product, so it costs arithmetic on registers the kernel
+    is already waiting on memory to fill.</p>
+    <p>This is the claim the code exists to make. Galilean-invariant collision, modular
+    physics, and the throughput of the simplest operator in the literature — not one traded
+    against the other. It is also the number to watch when someone reports that their
+    advanced operator costs 30%: on a bandwidth-bound step, that is a statement about their
+    implementation, not about the scheme.</p>
+    <p class="note flag">The Kokkos code in the parent directory collapses on GPU under
+    central moments where this one does not. That is an artefact of that implementation and
+    is still open; it is named here so the discrepancy is not discovered as a surprise.</p>
+  </section>
+
+  <hr>
+
+  <section class="col">
+    <p class="eyebrow"><span class="tag tag-i">Implied</span> · capacity, not speed</p>
+    <h2>1390³ does not fit on an H200</h2>
+    <p>D3Q27 in FP32 is 27 × 4 = 108 B per node, plus one geometry byte. There is exactly
+    one lattice — Esoteric Pull updates in place — and nothing streams from host memory or
+    splits across devices, so capacity alone fixes the ceiling.</p>
+  </section>
+
+  <div class="tw"><table>
+    <thead><tr><th>Grid</th><th>Nodes</th><th>Memory</th><th>On a 141 GB H200</th></tr></thead>
+    <tbody>
+      <tr><td>520³</td><td class="num dim">1.41e8</td><td class="num">15.3 GB</td><td class="num hit">fits easily</td></tr>
+      <tr><td>720³</td><td class="num dim">3.73e8</td><td class="num">40.7 GB</td><td class="num hit">fits</td></tr>
+      <tr><td>1076³</td><td class="num dim">1.25e9</td><td class="num">136 GB</td><td class="num hit">largest cube that fits</td></tr>
+      <tr><td>1390³</td><td class="num dim">2.69e9</td><td class="num">293 GB</td><td class="num miss">needs 2.1 H200s</td></tr>
+    </tbody>
+  </table></div>
+
+  <section class="col">
+    <p><code>box</code> computes this for whatever card it finds, prints the largest cube
+    that fits, and skips the rest rather than dying inside <code>cudaMalloc</code>.</p>
+    <p>If <span class="mono">1390³</span> came from another code's table, note what it
+    implies: 2.69 × 10⁹ nodes in 141 GB is a budget of <b>52 B/node</b>. D3Q19 in FP16 is
+    38 B and D3Q27 in FP16 is 54 B — so that run is half-precision storage, and it is not
+    an FP32 comparison. Worth establishing before the MLUPS figures are set beside each
+    other, because the same fact sets both the memory ceiling and the throughput.</p>
+  </section>
+
+  <hr>
+
+  <section class="col">
+    <p class="eyebrow"><span class="tag tag-p">Pending</span> · awaiting the H200 run</p>
+    <h2>What should carry across</h2>
+    <p>The percentage, not the MLUPS. A T4 reaches ~61% of its theoretical pin bandwidth
+    here; if that fraction holds on an H200's 4.8 TB/s the rate follows directly. HBM parts
+    commonly reach a higher fraction than GDDR6 on a pure streaming kernel, so the lower
+    entry is closer to a floor than to an estimate — which is exactly what the run is for.</p>
+  </section>
+
+  <div class="tw"><table>
+    <thead><tr><th>Card</th><th>Peak</th><th>% achieved</th><th>MLUPS</th></tr></thead>
+    <tbody>
+      <tr class="lead"><td>T4 · measured</td><td class="num">320 GB/s</td><td class="num">61.3</td><td class="num">908.6</td></tr>
+      <tr><td>H200 · at the T4's fraction</td><td class="num dim">4.8 TB/s</td><td class="num dim">61.3</td><td class="num dim">13 600</td></tr>
+      <tr><td>H200 · at 75%</td><td class="num dim">4.8 TB/s</td><td class="num dim">75.0</td><td class="num dim">16 700</td></tr>
+      <tr><td>H200 · 520³, BGK</td><td class="num pend">—</td><td class="num pend">—</td><td class="num pend">—</td></tr>
+      <tr><td>H200 · 520³, CM</td><td class="num pend">—</td><td class="num pend">—</td><td class="num pend">—</td></tr>
+      <tr><td>H200 · 720³, BGK</td><td class="num pend">—</td><td class="num pend">—</td><td class="num pend">—</td></tr>
+      <tr><td>H200 · 720³, CM</td><td class="num pend">—</td><td class="num pend">—</td><td class="num pend">—</td></tr>
+    </tbody>
+  </table></div>
+
+  <section class="col">
+    <p class="note">Expect the two grids to give nearly the same MLUPS. Past the L2 cache
+    the rate is set by bytes per node and by the memory system, not by how many nodes there
+    are. A sweep that climbs steeply with size is usually measuring launch overhead at the
+    small end.</p>
+  </section>
+
+  <hr>
+
+  <section class="col">
+    <p class="eyebrow">Method</p>
+    <h2>Reproducing this</h2>
+    <p>Verified on a Tesla T4 under CUDA 12.8. <code>-DLBM_GPU_ARCH=90</code> is the
+    Hopper build and compiles clean; FP32 is the default and is what belongs in a
+    throughput comparison.</p>
+  </section>
+
+  <pre><span class="c">## build</span>
+cmake -S GPU -B GPU/build -DCMAKE_BUILD_TYPE=Release -DLBM_GPU_ARCH=90
+cmake --build GPU/build -j
+
+<span class="c">## the sweep: BGK and CM at 520^3 / 720^3 / 1390^3</span>
+./GPU/build/box
+
+<span class="c">## one size, one operator</span>
+./GPU/build/box -n 720 -op bgk
+
+<span class="c">## walls off, for codes that time an empty periodic box</span>
+./GPU/build/box -n 720 -periodic
+
+<span class="c">## the stability check: a decaying vortex, same kernel, same rate</span>
+./GPU/build/box -n 256 -u0 0.05</pre>
+
+  <section class="col">
+    <p>Traffic is counted as 27 reads plus 27 writes per node per step. Esoteric Pull's
+    advantage is <em>footprint</em> — one lattice in memory instead of two — not traffic,
+    and counting it as half the bytes would flatter the result. The percentages on this
+    page are computed against the device's theoretical pin bandwidth, read from
+    <code>cudaDeviceGetAttribute</code> rather than the fields CUDA 12 deprecated.</p>
+    <p class="note">Source: <code>GPU/src/box.cu</code>. The long comment at the top of
+    that file carries the same caveats, so they travel with the code rather than only with
+    this page.</p>
+  </section>
+
+</div>
+</body>
+</html>
