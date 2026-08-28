@@ -3,9 +3,33 @@
 //
 //  The simplest configuration this code can be asked to run, and the one meant
 //  for comparing MLUPS against other GPU lattice Boltzmann codes: a cube, a
-//  one-cell solid shell on all six faces, no forcing, no coupled fields, and a
-//  decaying initial vortex so that the number being timed comes from a run that
-//  is actually stable and actually conserves mass.
+//  one-cell solid shell on all six faces, no forcing, no coupled fields.
+//
+//  THE FLUID STARTS AT REST (-u0 0, the default), which is what to use for a
+//  throughput number. The rate is not affected by it: every node reads 27
+//  populations, does the same arithmetic on them and writes 27 back, whatever
+//  the values are. There is no branch on a population and no data-dependent
+//  path anywhere in the kernel, and at equilibrium the values are O(1e-2), so
+//  no denormals either. A quiescent box and a stirred one time the same.
+//
+//  What a quiescent box does NOT do is prove the solver works: mass is
+//  conserved trivially because nothing moves. `-u0 0.05` starts a decaying
+//  vortex instead, and then the mass-drift column is a real check on the same
+//  kernel at the same speed. Worth one run before quoting the rest of them.
+//
+//  At rest in FP32 the drift is not zero -- it is about 7e-7 and it is CONSTANT:
+//  measured 7.252e-07, 7.240e-07, 7.240e-07 at 40, 400 and 4000 steps on 48^3,
+//  and exactly 0.000e+00 in an FP64 build. The initial populations are w_i, and
+//  their FP32 sum is 1 + O(eps) rather than 1, so the first collision moves the
+//  field onto the nearby FP32 fixed point and it then stays there. A leak would
+//  grow with step count; this does not, which is how the two are told apart.
+//
+//  WALLS. A solid cell is skipped, and under Esoteric Pull that IS halfway
+//  bounce-back -- see the long note in solver.cuh. The wall plane sits midway
+//  between the last fluid node and the first solid one; the parent code's
+//  Poiseuille check confirms the placement, err x H^2 holding at 0.333 across
+//  H = 16/32/64. No-slip, second-order for a grid-aligned flat wall, one byte
+//  per node and no extra kernel.
 //
 //  READ THIS BEFORE COMPARING THE NUMBER TO ANOTHER CODE.
 //
@@ -31,6 +55,7 @@
 //  traffic, and counting it as half the bytes flatters it.
 //
 //    usage: box [-n N] [-steps S] [-op bgk|cm|both] [-tau T] [-u0 U] [-periodic]
+//           -u0 defaults to 0 (at rest). -u0 0.05 starts the vortex.
 //
 //  With no -n the sweep is 520, 720, 1390. A size whose lattice does not fit
 //  the device is reported and skipped rather than dying inside cudaMalloc.
@@ -138,7 +163,7 @@ static Result run(int n, int steps, Op op, Real tau, Real u0, bool walls) {
 
 int main(int argc, char** argv) {
   int n = 0, steps = 100;
-  Real tau = Real(0.8), u0 = Real(0.05);
+  Real tau = Real(0.8), u0 = Real(0);      // at rest: throughput measurement
   std::string op = "both";
   bool walls = true;
 
@@ -165,9 +190,16 @@ int main(int argc, char** argv) {
                 dev.total_gb, dev.free_gb, dev.peak_gbs);
   std::printf("  per node    %.0f B  (27 populations%s)\n",
               per_node, walls ? " + 1 geometry byte" : "");
-  std::printf("  tau = %.3f   nu = %.6f   |u| <= %.4f   Ma <= %.4f   %d steps\n\n",
-              double(tau), (double(tau) - 0.5) / 3.0, double(u0),
-              double(u0) * std::sqrt(3.0), steps);
+  if (double(u0) == 0.0)
+    std::printf("  tau = %.3f   nu = %.6f   AT REST   %d steps\n"
+                "              (throughput only -- mass is conserved trivially. Use\n"
+                "               -u0 0.05 for a decaying vortex that actually checks it.)\n\n",
+                double(tau), (double(tau) - 0.5) / 3.0, steps);
+  else
+    std::printf("  tau = %.3f   nu = %.6f   decaying vortex, |u| <= %.4f, "
+                "Ma <= %.4f   %d steps\n\n",
+                double(tau), (double(tau) - 0.5) / 3.0, double(u0),
+                double(u0) * std::sqrt(3.0), steps);
 
   // The device sweep is 520/720/1390. A host build has no cudaMalloc to fail
   // gracefully and no way to ask how much RAM it may have, and the smallest of
