@@ -69,16 +69,25 @@ namespace lbm {
 //  THAT TEMPLATE PARAMETER LOOKS LIKE OVER-ENGINEERING AND IS NOT. The first
 //  version of this code loaded the flags unconditionally, on the reasoning that
 //  one byte per node against 216 of population traffic is half a per cent -- "a
-//  rounding error in bandwidth", as the comment then said. Measured on a T4 at
-//  128^3 against the commit immediately before geometry existed:
+//  rounding error in bandwidth", as the comment then said. Three points on one
+//  T4 at 128^3, FP32:
 //
-//      BGK              978.67 -> 924.14 MLUPS   (-5.6%)
-//      central moments  977.99 -> 921.85 MLUPS   (-5.7%)
+//      before geometry existed   978.15 BGK   977.35 CM
+//      flags always loaded       923.99       919.81      (-5.5%, -5.9%)
+//      geometry templated        950.16       950.37      (-2.9%, -2.8%)
 //
-//  Ten times the predicted cost. What a bandwidth-bound kernel pays for is not
-//  the byte but the extra memory STREAM: more transactions, more cache pressure,
-//  another address to keep in flight. Predicting this kind of cost from a byte
-//  count is how it gets got wrong, and the fix is a compile-time bool.
+//  So the byte-count estimate was out by a factor of ten, and the template
+//  recovers ABOUT HALF of what it cost. What a bandwidth-bound kernel pays for
+//  is not the byte but the extra memory STREAM: more transactions, more cache
+//  pressure, another address to keep in flight.
+//
+//  THE REMAINING 2.9% IS NOT EXPLAINED, and it is not the obvious candidates.
+//  -Xptxas -v on the same two builds: the old stream_collide used 96 registers
+//  across its 4 instantiations, the new fluid_kernel uses 63-80 across its 40,
+//  and BOTH spill zero bytes. So it is neither register pressure nor spilling.
+//  What else differs is that the kernel now takes a much larger parameter struct
+//  and carries a runtime `if (p.ux_out)` for the coupled-velocity write. `ncu
+//  --set full` on one kernel would settle it; measure before theorising.
 //==============================================================================
 enum CellType : std::uint8_t {
   Fluid    = 0,

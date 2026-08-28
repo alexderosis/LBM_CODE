@@ -26,9 +26,9 @@ higher resolution. Read the scope table before assuming anything works.
 | BGK | 128^3 | 980.3 | 211.8 | 0.000e+00 |
 | central moments | 128^3 | 973.3 | 210.2 | 0.000e+00 |
 
-These predate geometry. Adding the always-loaded cell-flags array costs 5.6% and
-the current figures are 924.14 (BGK) and 921.85 (central moments) at 128^3 —
-measured A/B on one card, and explained under "Geometry costs 5.6%" below.
+These predate geometry. The current figures at 128^3 are 950.16 (BGK) and 950.37
+(central moments) — a 2.9% cost that survives after the geometry check was moved
+behind a template. Measured A/B on one card; see "Geometry cost 5.6%" below.
 
 ## Measured, on an NVIDIA H200 (sm_90, CUDA 12.8, FP32, 512^3)
 
@@ -139,28 +139,39 @@ Identical values from a serial host loop and from 128-thread CUDA blocks. In
 FP64 the two execution paths agree to the printed precision, which is about as
 strong a statement as this arrangement can make.
 
-### Geometry costs 5.6%, not the half a per cent it was written down as
+### Geometry cost 5.6%, not the half a per cent it was written down as
 
-The flags array is always allocated and always loaded, even for a periodic box
-with no geometry at all, which removes a template dimension from every kernel.
-One byte per node against 216 of population traffic is half a per cent, and that
-is what an earlier version of this file and of `streaming.cuh` called the cost:
-"a rounding error in bandwidth". A/B against the commit immediately before
-geometry existed, on the same card, 128³:
+The flags array was, at first, always loaded — even for a periodic box with no
+geometry at all — because one byte per node against 216 of population traffic is
+half a per cent, and that is what `streaming.cuh` called it: "a rounding error in
+bandwidth". Three points on one T4 at 128³:
 
-| operator | before (cf19ebe) | after (7f84999) | |
+| | BGK | central moments | |
 |---|---|---|---|
-| BGK | 978.67 MLUPS | 924.14 MLUPS | −5.6% |
-| central moments | 977.99 MLUPS | 921.85 MLUPS | −5.7% |
+| A · `cf19ebe`, before geometry existed | 978.15 | 977.35 | |
+| B · `7f84999`, flags always loaded | 923.99 | 919.81 | −5.5%, −5.9% |
+| C · `68e84e2`, geometry templated | 950.16 | 950.37 | −2.9%, −2.8% |
 
-Ten times the predicted cost. What a bandwidth-bound kernel pays for is not the
-byte but the extra memory **stream** — more transactions, more cache pressure,
-another address in flight. Mass drift stays exactly 0.000e+00 throughout, and
-central moments stays at 99.7% of BGK, so nothing about the operator changed;
-this is the price of the always-on load.
+The byte-count estimate was out by a factor of ten. What a bandwidth-bound kernel
+pays for is not the byte but the extra memory **stream** — more transactions,
+more cache pressure, another address in flight.
 
-Recovering it means templating the kernels on whether any geometry exists. That
-is not done here, and the number above is what it would buy.
+**The template recovers about half of it.** `HasGeometry` is now a compile-time
+parameter of the fluid, scalar and magnetic node updates, and the short-circuit
+`if (HasGeometry && p.flags[n] != Fluid)` means a periodic run never emits the
+load at all. Worth 2.8–3.3%.
+
+**The remaining 2.9% is not explained, and it is not the obvious candidates.**
+`-Xptxas -v` on the same two builds: the old `stream_collide` used 96 registers
+across its 4 instantiations, the new `fluid_kernel` uses 63–80 across its 40, and
+**both spill zero bytes**. So it is neither register pressure nor spilling —
+registers went *down*. What else differs is a much larger kernel parameter struct
+and a runtime `if (p.ux_out)` for the coupled-velocity write. `ncu --set full` on
+one kernel would settle it. Measure before theorising; that is what this file
+says elsewhere and it applies here too.
+
+Mass drift stays exactly 0.000e+00 at every point above, and central moments
+stays level with BGK, so nothing about the operator changed.
 
 ## The host verification that predicted all of the above
 
