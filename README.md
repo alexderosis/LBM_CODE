@@ -41,11 +41,27 @@ cmake -S . -B build-fp32 -DLBM_PRECISION=float ...
 
 ### GPU
 
-**Nothing here has been run on a GPU.** The code is written for one — Esoteric
-Pull exists to halve GPU memory traffic, every kernel is a Kokkos lambda
-capturing by value, and the diagnostics mirror device to host rather than
-touching device views from host code — but every number in `doc/` and in this
-README is the Threads backend. Treat a first GPU build as a port.
+**This code has been run on a GPU, and the result is mixed — read this before
+planning around it.** On a Tesla T4 (sm_75, CUDA 12.8, FP32), seven validation
+executables build and run after six separate fixes for nvcc restrictions the CPU
+backends cannot see (all committed, all commented). BGK and TRT reach ~420–447
+MLUPS at 64³ with **mass drift exactly 0.000e+00**.
+
+**But the two central-moment configurations did not finish in seventeen minutes**
+at the same size, against ~0.03 s for BGK — four orders of magnitude, and
+`-Xptxas -v` rules out register spilling (zero spill bytes, 116 registers). That
+matters because the aorta and the whole validation campaign run central moments,
+so the 447 MLUPS is a **BGK-only** figure and must not be quoted as this code's
+GPU throughput. The next step is measurement (`ncu --set full`), not another
+hypothesis.
+
+Every number in `doc/` and elsewhere in this README is the Threads backend.
+
+**`GPU/` is a second, independent implementation** written directly in CUDA to
+find out whether that collapse was the algorithm or the port. It is not: the same
+27-moment scheme runs at **99.6% of BGK speed** there, 17.2 GLUPS on an H200.
+See [`GPU/README.md`](GPU/README.md), and [`GETTING_STARTED.md`](GETTING_STARTED.md)
+if you are new here.
 
 ```bash
 cmake -S . -B build-gpu -DCMAKE_BUILD_TYPE=Release \
