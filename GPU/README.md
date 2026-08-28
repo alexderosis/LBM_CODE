@@ -10,13 +10,12 @@ same, so the two can be compared.
 *The D3Q27 fluid core* is built and validated on a Tesla T4 and an H200. Numbers
 below are measured on those devices.
 
-*Thermal transport, MHD and geometry* were added afterwards and are verified
-**on the host only**. Every physics number in the section on them was produced by
-the reference driver in `include/lbm/hostsim.hpp`, which runs the same per-node
-update functions the kernels call, in a serial loop. **None of that has been
-compiled with nvcc or run on a GPU.** It compiles cleanly as C++17 and passes
-every check in both precisions; that is a real result and it is not the same
-result as running. Read the scope table before assuming anything works.
+*Thermal transport, MHD and geometry* were added afterwards. They were written
+and verified on a machine with no GPU, using the reference driver in
+`include/lbm/hostsim.hpp`, and then **built with nvcc and run on a T4** — see the
+next section. The build was clean first try and every physics result reproduced
+what the host had predicted, including one it predicted would appear only at
+higher resolution. Read the scope table before assuming anything works.
 
 ## Measured, on a Tesla T4 (sm_75, CUDA 12.8, FP32)
 
@@ -26,6 +25,10 @@ result as running. Read the scope table before assuming anything works.
 | central moments | 64^3 | 933.0 | 201.5 | 0.000e+00 |
 | BGK | 128^3 | 980.3 | 211.8 | 0.000e+00 |
 | central moments | 128^3 | 973.3 | 210.2 | 0.000e+00 |
+
+These predate geometry. Adding the always-loaded cell-flags array costs 5.6% and
+the current figures are 924.14 (BGK) and 921.85 (central moments) at 128^3 —
+measured A/B on one card, and explained under "Geometry costs 5.6%" below.
 
 ## Measured, on an NVIDIA H200 (sm_90, CUDA 12.8, FP32, 512^3)
 
@@ -89,14 +92,82 @@ gap between them measures resolution. Its Kokkos twin is
 `../validation/tgv3d_bench.cpp`; the two share the initial condition, the
 viscosity and the non-dimensionalisation line for line.
 
-## Thermal, MHD and geometry — measured on the host
+## Thermal, MHD and geometry — confirmed on a T4
+
+Written and debugged with no GPU, then run on one. Tesla T4, sm_75, CUDA 12.8,
+FP32 unless stated.
+
+**The build was clean on the first attempt** — eight targets, `cmake` plus
+`nvcc`, 1m03s, zero errors and zero warnings. That is the whole return on
+writing the core as `LBM_HD` and using structs rather than lambdas: the six nvcc
+restrictions the Kokkos port had to discover one at a time never came up, because
+the code was written already knowing them.
+
+| test | on the device | what the host predicted |
+|---|---|---|
+| `host_check`, 47 unit checks | ALL PASSED | ALL PASSED |
+| Poiseuille, error × H² at H = 16 | 0.339 | 0.336 (FP32), 0.333 (FP64) |
+| Rayleigh–Bénard, Ra = 5000, H = 24 | Nu = 2.100998 | 2.0437 at H = 12 |
+| Rayleigh–Bénard, Ra = 800, H = 24 | Nu = 0.998847, max&#124;u&#124; 5.6e-06 | 0.9954 at H = 12 |
+| Alfvén wave, L = 64, speed | +1.288e-04 | −5.280e-05 |
+| Alfvén wave, L = 64, damping | +1.623e-03 | +1.679e-03 |
+| Orszag–Tang, M = 64, max&#124;div B&#124;/k&#124;B&#124; | 7.336e-02 | 1.091e-01 at M = 32 |
+| Orszag–Tang, M = 64, energy rise | 0.000e+00 | 0 from M = 32 |
+
+Two of those are worth pausing on.
+
+**The Rayleigh–Bénard offset below onset refined exactly as predicted.** The host
+measured Nu = 0.9954 at H = 12 and 0.99873 at H = 24, and called the deviation a
+second-order artefact. The device, independently, at H = 24: 0.998847. The
+prediction was made before any of this ran on a GPU.
+
+**Orszag–Tang's energy budget cleaned up exactly where it was predicted to.** The
+host found a spurious energy rise of 1.10e-02 at M = 12 falling to zero by
+M = 32, and argued it was under-resolution rather than a defect. At M = 64 on the
+device the rise is 0.000e+00, and div B has fallen to 7.34e-02 from 1.09e-01 at
+M = 32 — still converging.
+
+**The FP64 Alfvén sweep on the device reproduced the host to every digit printed:**
+
+| L | speed error | damping error |
+|---|---|---|
+| 32 | +2.222e-04 | +2.080e-03 |
+| 64 | +5.570e-05 | +4.972e-04 |
+| 128 | +1.397e-05 | +1.249e-04 |
+
+Identical values from a serial host loop and from 128-thread CUDA blocks. In
+FP64 the two execution paths agree to the printed precision, which is about as
+strong a statement as this arrangement can make.
+
+### Geometry costs 5.6%, not the half a per cent it was written down as
+
+The flags array is always allocated and always loaded, even for a periodic box
+with no geometry at all, which removes a template dimension from every kernel.
+One byte per node against 216 of population traffic is half a per cent, and that
+is what an earlier version of this file and of `streaming.cuh` called the cost:
+"a rounding error in bandwidth". A/B against the commit immediately before
+geometry existed, on the same card, 128³:
+
+| operator | before (cf19ebe) | after (7f84999) | |
+|---|---|---|---|
+| BGK | 978.67 MLUPS | 924.14 MLUPS | −5.6% |
+| central moments | 977.99 MLUPS | 921.85 MLUPS | −5.7% |
+
+Ten times the predicted cost. What a bandwidth-bound kernel pays for is not the
+byte but the extra memory **stream** — more transactions, more cache pressure,
+another address in flight. Mass drift stays exactly 0.000e+00 throughout, and
+central moments stays at 99.7% of BGK, so nothing about the operator changed;
+this is the price of the always-on load.
+
+Recovering it means templating the kernels on whether any geometry exists. That
+is not done here, and the number above is what it would buy.
+
+## The host verification that predicted all of the above
 
 Everything in this section was produced by `include/lbm/hostsim.hpp`, on a laptop
-with no GPU. **None of it has been compiled with nvcc.** It is a check of the
-physics, not of the port.
+with no GPU, before any of the device runs above.
 
-That check is worth more than it sounds, because it is not a second
-implementation. The per-node update is a plain `LBM_HD` function —
+It is worth more than it sounds, because it is not a second implementation. The per-node update is a plain `LBM_HD` function —
 `fluid_node_update`, `scalar_node_update`, `magnetic_node_update` — and the CUDA
 kernel is three lines of index arithmetic around it. The host driver calls the
 same function in a serial loop, which is legitimate because under Esoteric Pull

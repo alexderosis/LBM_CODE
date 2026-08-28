@@ -64,9 +64,24 @@ namespace lbm {
 //           anything meaningful.
 //
 //  The flags array is ALWAYS allocated, even for a periodic box where every cell
-//  is Fluid. One byte per node against 108 for the populations in FP32 is half a
-//  percent of the traffic, and it buys the removal of an entire template
-//  dimension from every kernel. Correctness over a rounding error in bandwidth.
+//  is Fluid, which removes an entire template dimension from every kernel.
+//
+//  THAT IS NOT FREE, AND AN EARLIER VERSION OF THIS COMMENT SAID IT WAS. One byte
+//  per node against 216 of population traffic is half a per cent, so the cost was
+//  written down as "a rounding error in bandwidth". Measured on a T4 at 128^3,
+//  against the commit immediately before geometry existed:
+//
+//      BGK              978.67 -> 924.14 MLUPS   (-5.6%)
+//      central moments  977.99 -> 921.85 MLUPS   (-5.7%)
+//
+//  Ten times the predicted cost, because what a bandwidth-bound kernel pays for
+//  is not the byte but the extra memory STREAM: more transactions, more cache
+//  pressure, another address to keep in flight. Predicting this kind of cost from
+//  a byte count is how it gets got wrong.
+//
+//  Recovering it means templating the kernels on whether any geometry exists, so
+//  a periodic run never issues the load. That is a real option and it is not
+//  taken here; the number above is what it would buy.
 //==============================================================================
 enum CellType : std::uint8_t {
   Fluid    = 0,
