@@ -235,26 +235,54 @@ would be an offset that does not converge; this converges at k².
 
 `rayleigh_benard` needs no reference table. Linear stability puts the onset of
 convection between two rigid plates at **Ra_c = 1707.762**, independent of Pr and
-of everything else. At H = 12, BGK:
+of everything else. Central moments, 15 thermal diffusion times, on a T4:
 
-| Ra | Nu | max &#124;u&#124; | verdict |
-|---|---|---|---|
-| 5000 | 2.043700 | 2.88e-02 | convection sustained |
-| 800 | 0.995366 | 4.27e-05 | convection died |
+| H | nodes | Ra = 800 (below) | Ra = 5000 (above) | steps | MLUPS |
+|---|---|---|---|---|---|
+| 24 | 4,992 | Nu = 0.998848, max&#124;u&#124; 5.60e-06 | Nu = 2.100998, max&#124;u&#124; 1.51e-02 | 432,000 | 510 |
+| 48 | 19,200 | Nu = 0.999703, max&#124;u&#124; 1.00e-06 | Nu = 2.109297, max&#124;u&#124; 7.60e-03 | 1,728,000 | 1099 |
+| 96 | 75,264 | Nu = 0.999912, max&#124;u&#124; 8.42e-07 | Nu = 2.122282, max&#124;u&#124; 3.85e-03 | 6,912,000 | 612 |
 
-A factor of 670 in the velocity across the threshold. This is the case that
-exercises everything added here at once — solid walls for the momentum, Dirichlet
-walls for the scalar, and the Boussinesq force that couples them.
+Four orders of magnitude in the velocity across the threshold at H = 96. This is
+the case that exercises everything added here at once — solid walls for the
+momentum, Dirichlet walls for the scalar, and the Boussinesq force that couples
+them.
 
-**One honest caveat.** Below onset the exact answer is Nu = 1 and the fluid at
-rest; the run gives Nu = 0.9954 and a residual max|u| of 4.3e-05. That residual
-is *independent of the seeded perturbation* — 4.263e-05 with no seed at all
-against 4.271e-05 with a seed a hundred times larger — so it is not a slowly
-decaying mode but a steady spurious flow the body force drives near the walls. It
-is linear in Ra (2.15, 4.26, 8.50 × 10⁻⁵ at Ra = 400, 800, 1600) and the Nu
-offset converges at second order in H, −0.46% at H = 12 against −0.13% at H = 24.
-A discretisation artefact at the scheme's design order, then — but quote Nu from
-two resolutions, not one.
+**Below onset the prediction held exactly.** The exact answer is Nu = 1, and the
+deviation was argued from host runs to be a second-order artefact of a spurious
+wall-driven flow. Measured: Nu − 1 = −1.152e-03, −2.97e-04, −8.8e-05 at
+H = 24, 48, 96, which are convergence exponents of 1.95 and 1.76. The residual
+velocity is *independent of the seeded perturbation* (4.263e-05 with no seed at
+all against 4.271e-05 with a seed a hundred times larger, at H = 12) and linear
+in Ra, so it is a steady spurious flow the body force drives near the walls, and
+it refines away at the scheme's design order.
+
+**Above onset, do NOT read those three numbers as grid convergence.** They rise
+by increasing amounts — +0.0083 then +0.0130 — which is the opposite of a
+converging sequence, and the reason is that the H = 96 run has not reached steady
+state. Its last five probes:
+
+| t / t_diff | 12.00 | 12.75 | 13.50 | 14.25 | 15.00 |
+|---|---|---|---|---|---|
+| Nu | 2.120058 | 2.120604 | 2.121189 | 2.121720 | 2.122282 |
+
+still climbing at about 7e-04 per diffusion time. **Nu = 2.1223 is a lower bound,
+not a converged value,** and a proper number needs a run several times longer —
+which at H = 96 costs 14 minutes per 15 diffusion times on a T4. What the three
+rows do establish is the two-sided bracket of Ra_c, which is what the case was
+brought in for.
+
+**max|u| halves when H doubles**, 1.51e-02 → 7.60e-03 → 3.85e-03, which is
+exactly right: with Ra and D fixed in lattice units the velocity scale is D/H, so
+diffusive scaling demands u ∝ 1/H. A quantity that did not do that would mean the
+non-dimensionalisation was wrong.
+
+**The throughput curve is not monotonic, and the reason is the L2 cache.** At
+H = 24 the grid is 4,992 nodes — 39 blocks against 40 SMs, so barely one block
+each and the kernel is occupancy-bound at 510 MLUPS. At H = 48 the whole lattice
+is 19,200 × 27 × 4 = 2.1 MB, which fits inside the T4's 4 MB L2: 1099 MLUPS,
+*faster than the 950 the bandwidth-bound 128³ benchmark reaches*. At H = 96 the
+lattice is 8.1 MB, L2 no longer holds it, and it drops back to 612.
 
 ### The Alfvén wave is the case that earns its keep
 
