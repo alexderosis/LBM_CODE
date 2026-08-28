@@ -2157,6 +2157,7 @@ become time-dependent, in which case a single final-state $Nu$ should be replace
 by a time average.
 
 \subsection{Magnetohydrodynamics: exact solutions}
+\label{sec:mhdexact}
 
 \begin{center}\small
 \begin{tabular}{lccc}
@@ -2566,9 +2567,11 @@ D3Q27 & $1.106\e{-1}$ & $2.566\e{-2}$ & $6.259\e{-3}$ & $1.444\e{-3}$ & $2.427\e
 reports an optimal rate of $2$ at its lowest $u_0$.
 
 \paragraph{A correction to the published initial condition.} Reference
-\cite{derosis2020} prints $\uu_0 = u_0[\cos\gamma x\,\sin\gamma y,\;
-\sin\gamma x\,\cos\gamma y,\;0]$, whose divergence is
-$-2u_0\gamma\sin\gamma x\sin\gamma y \neq 0$. Almost certainly a lost minus
+\cite{derosis2020} prints
+\begin{equation*}
+  \uu_0 = u_0[\cos\gamma x\,\sin\gamma y,\;\sin\gamma x\,\cos\gamma y,\;0],
+\end{equation*}
+whose divergence is $-2u_0\gamma\sin\gamma x\sin\gamma y \neq 0$. Almost certainly a lost minus
 sign in typesetting; the standard solenoidal field, with $-\cos\gamma x
 \sin\gamma y$ in the first component, is used here. The printed density
 likewise carries a leading factor $3$ that would give $\rho\approx 3$, and the
@@ -4164,11 +4167,405 @@ does not reach the top --- it is not a general bound.
 
 
 %==============================================================================
+\section{A second implementation, in CUDA}
+\label{sec:cuda}
+
+Everything measured so far in this document is the Threads backend. This section
+records what happened when the code was taken to a GPU, why that made a second
+implementation necessary, and what the second implementation then measured.
+
+\subsection{The result that forced the question}
+\label{sec:cmcollapse}
+
+On a Tesla T4 (sm\_75, CUDA 12.8, FP32), seven validation executables build and
+run after six separate fixes for \code{nvcc} restrictions that neither the Serial
+nor the Threads backend can see. All six are committed with explanatory comments,
+and they are worth listing because any future port will meet them:
+
+\begin{enumerate}[leftmargin=1.4em,itemsep=2pt]
+\item A kernel-launching member function may not be private: an extended
+  \code{\_\_host\_\_ \_\_device\_\_} lambda's enclosing function must not have
+  private or protected access.
+\item A variable may not be first-captured inside an \code{if constexpr}. In
+  \code{run\_step} this was repaired with a plain \code{if}, which still folds
+  because the tested value is a compile-time constant.
+\item The same restriction in the wall closure, where a plain \code{if} does
+  \emph{not} work: the captured member does not exist in the unforced
+  instantiation, so the object has to be named before the branch.
+\item Lattice constants declared \code{static constexpr int cx[Q]} are
+  unreachable from device code when indexed at runtime. They are now
+  \code{KOKKOS\_INLINE\_FUNCTION} accessors wrapping function-local arrays.
+  \textbf{Invariant to preserve: \code{src/} contains no static constexpr array
+  members.}
+\item The same, in \code{MonomialBasis}.
+\item Extended lambdas may not appear inside a \emph{generic} lambda, and
+  function-local types may not be template arguments of one.
+\end{enumerate}
+
+\noindent BGK and TRT then reach $420$--$447$ MLUPS at $64^3$, with mass drift
+\textbf{exactly $0.000\e{0}$} on every row --- about $8.4\times$ the M1 Threads
+figure of \S\ref{sec:perf}.
+
+\paragraph{But the central-moment operators do not run.} The two
+\code{MomentCollision} configurations did not finish in \textbf{seventeen
+minutes} at $64^3$ over 50 steps, against $\sim0.03$\,s for BGK. That is roughly
+four orders of magnitude and it is not explained. The obvious hypothesis was
+register spilling, and \code{-Xptxas -v} rules it out: \textbf{zero spill bytes},
+largest stack frame 96 bytes, 116 registers per thread. Occupancy at 116
+registers is about $25\%$ on a T4 --- a real effect, and far too small a one.
+
+This matters more than a performance note. The aorta demonstrator and the whole
+validation campaign of \S\ref{sec:campaign} run central moments, so the $447$
+MLUPS is a \textbf{BGK-only} figure and must not be quoted as this code's GPU
+throughput.
+
+\paragraph{Which leaves one question.} Is the collapse a property of the
+\emph{algorithm} --- 27 moments, two transforms and a relaxation schedule per
+node --- or of \emph{this code's route to the device}? Nothing in the Kokkos
+implementation can answer that, because every hypothesis is tested against the
+same code. The only decisive experiment is a second implementation.
+
+\subsection{The answer}
+
+\code{GPU/} is that experiment: a lattice Boltzmann solver written directly in
+CUDA, sharing no headers with \code{src/}, not built by the parent
+\code{CMakeLists}, and not a port. Only the physics and the output format are
+deliberately the same, which is what makes the comparison mean anything.
+
+\begin{center}\small
+\begin{tabular}{llrrr}
+\toprule
+device & operator & grid & MLUPS & GB/s \\
+\midrule
+Tesla T4  & BGK             & $128^3$ & 950.2  & 205.2 \\
+Tesla T4  & central moments & $128^3$ & 950.4  & 205.3 \\
+NVIDIA H200 & BGK             & $512^3$ & 17233.4 & 3722.4 \\
+NVIDIA H200 & central moments & $512^3$ & 17171.4 & 3709.0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Mass drift is exactly $0.000\e{0}$ on every row. Central moments runs
+at $99.6\%$ of BGK on two card generations, and $3722$\,GB/s is $77.3\%$ of the
+H200's $4814$\,GB/s peak --- i.e.\ the kernel is memory-bound, which is what a
+correctly written lattice Boltzmann kernel should be. Taylor--Green at $512^3$
+(134M nodes, 256\,000 steps) completes in 2046\,s.
+
+\textbf{So the collapse of \S\ref{sec:cmcollapse} is not the algorithm.} The same
+27-moment separable transform, the same relaxation schedule and the same Esoteric
+Pull run at BGK speed when written directly. Whatever is wrong is in how the
+Kokkos code reaches the device, and the next step there is measurement
+(\code{ncu --set full} on one kernel), not another hypothesis.
+
+\subsection{Written so it can be checked without a device}
+\label{sec:hostsim}
+
+Every function in the numerical core is marked \code{LBM\_HD}, which expands to
+\code{\_\_host\_\_ \_\_device\_\_} under \code{nvcc} and to \emph{nothing} under
+a plain C\texttt{++} compiler. That is not portability for its own sake. The
+per-node update is an ordinary function; the CUDA kernel is three lines of index
+arithmetic around it; and a host driver calls \emph{the same function} in a
+serial loop.
+
+\paragraph{Why a serial loop is a valid substitute for a grid of threads.} Under
+Esoteric Pull each storage slot has exactly one writer per step, and that writer
+is also its only reader (\S\ref{sec:esopull}). The nodes of one step therefore
+commute: any order gives the same answer, so a \code{for} loop is not an
+approximation to the launch, it is the same computation. This is also why the
+scheme needs no temporary buffer on the device.
+
+What a host build cannot catch is a launch configuration error, a register
+pressure problem, or a host--device transfer bug. What it catches is wrong
+physics, which is the failure mode that is expensive to diagnose remotely. It
+earned its place immediately: \code{eq\_factors} added a $\cs^2$ that
+\code{fwd1d} already subtracts, so equilibrium was not a fixed point of the
+collision. The flow would have decayed \emph{plausibly but wrongly}.
+
+The property was later extended to whole applications. Each driver is written
+against aliases that resolve to the CUDA classes under \code{nvcc} and to the
+host drivers otherwise, so one source builds and runs both ways with no
+\code{\#ifdef} of its own, and \code{cmake -DLBM\_HOST\_ONLY=ON} configures with
+no CUDA toolkit present at all.
+
+\subsection{Thermal transport, magnetohydrodynamics and geometry}
+
+The three capabilities the parent had and this code did not were added on the
+same principle: written and verified on a machine with no GPU, then built with
+\code{nvcc} and run.
+
+\begin{itemize}[leftmargin=1.4em,itemsep=3pt]
+\item \textbf{Scalar transport} on D3Q7 ($\cs^2=1/4$), first-order equilibrium,
+  with adiabatic and Dirichlet walls, and Guo forcing in a uniform and a
+  Boussinesq form.
+\item \textbf{Magnetohydrodynamics} by Dellar's vector-valued induction
+  distribution, again on D3Q7, with the Maxwell stress entering the
+  \emph{fluid} equilibrium's second moment rather than as a body force. Both the
+  BGK and the central-moment fluid operators carry it; for the latter the
+  equilibrium central moments of the Maxwell term are obtained by transforming
+  the term itself, which is exact at every order.
+\item \textbf{Geometry} as one byte per node. A solid cell is skipped, which
+  under Esoteric Pull \emph{is} halfway bounce-back: the slot a fluid node emits
+  into toward a wall is a slot the wall owns, the wall never touches it, and the
+  fluid node reads its own emission back one step later, reversed.
+\end{itemize}
+
+\paragraph{The coupling must be simultaneous.} This is not an implementation
+detail, and \S\ref{sec:couplingorder} explains why: stepping the fluid against a
+temperature or a magnetic field from the previous step is a first-order splitting
+error that does \emph{not} vanish under refinement. The drivers therefore refresh
+$T$ and $\bb$, then step the fluid against them, then step $T$ and $\bb$ against
+the velocity the fluid just wrote. That costs one extra light pass, and it is the
+cheaper of the two mirror images: recovering $\uu$ for the coupled fields instead
+would need a separate pass over 27 populations, where refreshing $T$ costs 7 and
+$\bb$ costs 21.
+
+\subsection{What the host verification established}
+
+\code{test/host\_physics.cpp} runs whole simulations against closed-form answers.
+Figures are worst relative error; where the two precisions agree, the number is
+discretisation error and not round-off.
+
+\begin{center}\small
+\begin{tabular}{lcc}
+\toprule
+case & FP32 & FP64 \\
+\midrule
+Poiseuille between bounce-back walls      & $1.4\e{-3}$ & $1.3\e{-3}$ \\
+closed box, mass over every slot          & $1.6\e{-6}$ & $1.4\e{-14}$ \\
+insulating box, scalar conserved          & $9.7\e{-9}$ & $1.0\e{-13}$ \\
+conduction between Dirichlet walls        & $1.4\e{-6}$ & $2.5\e{-15}$ \\
+decaying sinusoid (the D3Q7 diffusivity)  & $8.1\e{-4}$ & $8.1\e{-4}$ \\
+advected sinusoid (the advective flux)    & $4.4\e{-4}$ & $4.4\e{-4}$ \\
+uniform buoyancy (the Boussinesq path)    & $6.7\e{-5}$ & $2.9\e{-13}$ \\
+resistive decay (induction alone)         & $4.1\e{-3}$ & $4.1\e{-3}$ \\
+shear Alfv\'en wave, BGK                  & $8.1\e{-4}$ & $3.3\e{-4}$ \\
+shear Alfv\'en wave, central moments      & $8.4\e{-5}$ & $3.8\e{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{The wall is exactly where it should be.} For Poiseuille the
+interesting quantity is not the error but how it scales: a wall in the wrong
+place gives an error going like $1/H$, a correctly placed one leaves the $1/H^2$
+truncation error. In FP64 the amplitude error times $H^2$ is $0.333$ at $H=16$,
+$32$ and $64$ --- constant to three digits over two doublings. In FP32 the same
+run reads $0.336$ at $H=16$ and $0.498$ at $H=32$: the raw-population storage
+runs out of mantissa before the discretisation error does, which is the cost of
+not having the shifted storage of \S\ref{sec:storage}.
+
+\paragraph{Conduction confirms where the thermal plane sits.} With Dirichlet
+layers at $y=0$ and $y=H+1$ the measured gradient is $0.062500 = 1/16$ exactly,
+the distance between the two \emph{planes}; measuring between the \emph{nodes}
+would give $1/15 = 0.066667$. Both walls --- no-slip and isothermal --- land on
+the same two planes, which they must, or $H$ would mean two different things in
+the Rayleigh number.
+
+\paragraph{The D3Q7 sound speed is $\cs^2 = 1/4$, and the sinusoid proves it.}
+The decay-rate error is $-0.327\%$ at $L=16$ and $-0.081\%$ at $L=32$, a ratio of
+$4.05$. A wrong $\cs^2$ would be an offset that does not converge.
+
+\subsection{What the device then confirmed}
+
+The CUDA build was clean on the first attempt: eight targets, 1\,m\,03\,s, zero
+errors and zero warnings. None of the six restrictions of \S\ref{sec:cmcollapse}
+arose, because this code was written already knowing them --- structs rather than
+lambdas, accessor functions rather than static constexpr arrays, no
+function-local types as template arguments.
+
+Two host predictions could only be tested at resolutions the laptop could not
+reach, and both held.
+
+\paragraph{Rayleigh--B\'enard needs no reference table.} Linear stability puts
+the onset of convection between rigid plates at $\mathrm{Ra}_c = 1707.762$,
+independent of $\mathrm{Pr}$ and of the fluid. Central moments, 15 thermal
+diffusion times, on a T4:
+
+\begin{center}\small
+\begin{tabular}{rrllr}
+\toprule
+$H$ & nodes & $\mathrm{Ra}=800$ (below) & $\mathrm{Ra}=5000$ (above) & MLUPS \\
+\midrule
+24 & 4\,992  & $\mathrm{Nu}=0.998848$, $|\uu|_{\max}\,5.60\e{-6}$ & $\mathrm{Nu}=2.100998$, $1.51\e{-2}$ & 510 \\
+48 & 19\,200 & $\mathrm{Nu}=0.999703$, $1.00\e{-6}$ & $\mathrm{Nu}=2.109297$, $7.60\e{-3}$ & 1099 \\
+96 & 75\,264 & $\mathrm{Nu}=0.999912$, $8.42\e{-7}$ & $\mathrm{Nu}=2.122282$, $3.85\e{-3}$ & 612 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Below onset the exact answer is $\mathrm{Nu}=1$, and the host runs had argued the
+deviation was a second-order artefact of a spurious wall-driven flow --- a
+residual that is \emph{independent of the seeded perturbation} ($4.263\e{-5}$
+with no seed at all against $4.271\e{-5}$ with a seed a hundred times larger) and
+linear in $\mathrm{Ra}$. Measured on the device: $\mathrm{Nu}-1 = -1.152\e{-3}$,
+$-2.97\e{-4}$, $-8.8\e{-5}$, convergence exponents $1.95$ and $1.76$.
+
+\textbf{Above onset those three numbers are not grid convergence, and say so
+themselves.} They rise by \emph{increasing} amounts, $+0.0083$ then $+0.0130$,
+which no converging sequence does. The $H=96$ run has not reached steady state:
+its last five probes read $2.120058$, $2.120604$, $2.121189$, $2.121720$,
+$2.122282$, still climbing at $\sim7\e{-4}$ per diffusion time.
+\textbf{$\mathrm{Nu}=2.1223$ is a lower bound, not a converged value.} A
+converged one needs a much longer run --- fourteen minutes per 15 diffusion times
+at $H=96$ on this card. What the three rows do establish is the two-sided bracket
+of $\mathrm{Ra}_c$, which is what the case is for.
+
+$|\uu|_{\max}$ halves when $H$ doubles, which is required: with $\mathrm{Ra}$ and
+$D$ fixed in lattice units the velocity scale is $D/H$, so diffusive scaling
+demands $u \sim 1/H$. A quantity that did not do that would mean the
+non-dimensionalisation was wrong.
+
+\paragraph{The throughput is not monotonic in $H$, and the L2 cache explains it.}
+At $H=24$ the grid is 39 blocks against 40 streaming multiprocessors --- barely
+one each, so the kernel is occupancy-bound at 510 MLUPS. At $H=48$ the whole
+lattice is $19\,200\times27\times4 = 2.1$\,MB and fits inside the T4's 4\,MB L2:
+1099 MLUPS, \emph{faster than the bandwidth-bound $128^3$ benchmark reaches}. At
+$H=96$ it is 8.1\,MB, L2 no longer holds it, and it falls back to 612.
+
+\subsection{The shear Alfv\'en wave, and the coupling-order signature}
+
+The wave of \S\ref{sec:mhdexact} is an exact solution of the full \emph{nonlinear}
+incompressible MHD equations. Its two measurements fail differently, and that is
+its diagnostic value: an error in the \textbf{Lorentz coupling} shows as the wrong
+wave \emph{speed}, immediately and at any resolution, while an error in the
+\textbf{coupling order} shows only in the \emph{damping}, and only under
+refinement.
+
+Diffusive scaling ($v_A \sim 1/L$ at fixed $\nu$ and $\eta$, so the Reynolds and
+Lundquist numbers are the same on every grid), FP64, central moments:
+
+\begin{center}\small
+\begin{tabular}{rrrrr}
+\toprule
+$L$ & speed error & ratio & damping error & ratio \\
+\midrule
+32  & $+2.222\e{-4}$ &      & $+2.080\e{-3}$ &      \\
+64  & $+5.570\e{-5}$ & 3.99 & $+4.972\e{-4}$ & 4.18 \\
+128 & $+1.397\e{-5}$ & 3.99 & $+1.249\e{-4}$ & 3.98 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Both converge at second order: the coupling is simultaneous, not
+lagged. These values are identical to those the host driver produced, to every
+digit printed --- a serial loop and 128-thread CUDA blocks agreeing to the
+printed precision.
+
+\paragraph{A warning about running this sweep in FP32.} The same sweep in single
+precision reads $+2.9\e{-4} \to -4.9\e{-4} \to -1.1\e{-3}$ on the speed and
+$+2.7\e{-3} \to +3.8\e{-3} \to +5.1\e{-2}$ on the damping --- errors that
+\emph{grow} with resolution, which is exactly the signature of the bug the sweep
+exists to find. They are not. Diffusive scaling puts $v_A \sim 1/L$, so at $L=128$
+the perturbation is $5\e{-4}$ on populations of order $0.3$, leaving about three
+decimal digits above the FP32 noise floor. \textbf{Run this sweep in FP64 or not
+at all}, and treat it as a caution about how easily a precision failure reads as
+a physics failure.
+
+\subsection{Orszag--Tang in three dimensions}
+
+In both wave cases $\nabla\!\cdot\!\bb$ is structurally zero and reports round-off
+whatever the scheme does. Orszag--Tang's nonlinear dynamics makes every component
+depend on every coordinate, so a scheme that generates monopoles shows it. The
+initial condition is that of \S\ref{sec:ot3d}; $\mathrm{Re}=100$,
+$\mathrm{Ma}=0.034$, $\mathrm{Pr}_m=1$, central moments, to $t=4$:
+
+\begin{center}\small
+\begin{tabular}{rrrrrr}
+\toprule
+$M$ & nodes & steps & $\max|\nabla\!\cdot\!\bb| / k|\bb|$ & energy rise & MLUPS \\
+\midrule
+64  & 262\,144    & 5\,870  & $7.177\e{-2}$ & $0.000\e{0}$ & 359.2 \\
+96  & 884\,736    & 8\,805  & $3.461\e{-2}$ & $0.000\e{0}$ & 378.4 \\
+128 & 2\,097\,152 & 11\,741 & $2.002\e{-2}$ & $0.000\e{0}$ & 391.6 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent $\nabla\!\cdot\!\bb$ converges at \textbf{second order} --- exponents
+$1.80$ and $1.90$ against $1.5\times$ and $1.33\times$ refinements. (Coarse host
+runs at $M=16$--$32$ had suggested only first order; those grids were deep in the
+under-resolved regime and the estimate was too pessimistic.) The antisymmetry of
+the induction equilibrium's first moment is what keeps this bounded, and the unit
+checks assert that antisymmetry directly.
+
+Ideal incompressible MHD has $\mathrm{d}E/\mathrm{d}t = -\nu|\nabla\uu|^2 -
+\eta|\nabla\bb|^2$, so $E_u + E_b$ must never rise, and it does not at any
+resolution here. A spurious rise the host had found at $M=12$ ($1.10\e{-2}$,
+falling to zero by $M=32$) was under-resolution, as argued, and it is gone.
+
+The $M=128$ history is the physics. Up to $t\approx0.8$ the magnetic energy barely
+moves ($0.4898 \to 0.4673$ of $E_0$) while the kinetic energy falls by a third
+($0.5102 \to 0.3316$): the flow is winding up the field, and the transfer is
+nearly lossless. After that both decay together --- resistive dissipation in the
+current sheets. And $\nabla\!\cdot\!\bb$ is largest exactly where the sheets are
+sharpest, peaking near $t\approx1.6$ and then falling back fivefold.
+$J_{\max}$ peaks between $t=1.0$ and $t=1.4$ on a $\Delta t = 0.2$ sampling, which
+is consistent with the paper's ``maximum at about $t=1$'' and is all the sampling
+can support; no stronger claim is made.
+
+\subsection{A cost estimated wrong by a factor of ten}
+
+The cell-flag array is one byte per node against 216 of population traffic in
+FP32, so its cost was written down from that byte count as half a per cent --- ``a
+rounding error in bandwidth''. Measured against the commit immediately before
+geometry existed, on one card, at $128^3$:
+
+\begin{center}\small
+\begin{tabular}{lrrr}
+\toprule
+ & BGK & central moments & \\
+\midrule
+before geometry existed   & 978.15 & 977.35 & \\
+flags loaded on every node& 923.99 & 919.81 & $-5.5\%$, $-5.9\%$ \\
+geometry behind a template& 950.16 & 950.37 & $-2.9\%$, $-2.8\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Ten times the predicted cost. What a bandwidth-bound kernel pays for is
+not the byte but the extra memory \emph{stream}: more transactions, more cache
+pressure, another address in flight. Making the presence of geometry a
+compile-time template parameter, so a periodic run never emits the load, recovers
+about half of it.
+
+\textbf{The remaining $2.9\%$ is not explained, and it is not the obvious
+candidates.} \code{-Xptxas -v} on the two builds: the old kernel used 96
+registers across its 4 instantiations, the new one uses 63--80 across its 40, and
+both spill zero bytes. Registers went \emph{down}. What else differs is a much
+larger kernel parameter struct and a runtime test for the coupled-velocity write.
+This is recorded as open, and \code{ncu --set full} is the next step rather than
+another guess --- the same conclusion, and for the same reason, as
+\S\ref{sec:cmcollapse}.
+
+\subsection{What this implementation does not do}
+
+Absent, not merely untested:
+
+\begin{itemize}[leftmargin=1.4em,itemsep=3pt]
+\item \textbf{No shifted storage.} Raw populations only, and the Poiseuille
+  convergence above shows what it costs in FP32.
+\item \textbf{No open boundary for the scalar.} Outflow needs a donor map and a
+  second kernel after a fence; reading a donor inside the main kernel is a genuine
+  race under Esoteric Pull, because the two slots a node reads are the two it
+  writes (\S\ref{sec:scalaroutflow}).
+\item \textbf{No physical magnetic wall condition.} A non-fluid cell is skipped,
+  which on this storage is bounce-back on the induction distribution --- neither
+  the perfectly conducting nor the insulating condition. Every MHD case here is
+  periodic, and no wall-bounded MHD result should be read off this code.
+\item \textbf{D3Q27 only}, no D3Q19, no TRT or raw MRT, no regularised walls, no
+  height-field input, and therefore no aorta and no city.
+\end{itemize}
+
+%==============================================================================
 \section{Performance}
 \label{sec:perf}
 
 Measurements on an Apple M1, Threads backend, four threads, $96^3$. Run-to-run
 spread is under $2\%$.
+
+\textbf{These are CPU figures and are not this code's ceiling.} GPU
+measurements --- on a Tesla T4 and an NVIDIA H200, for both the Kokkos code and
+the independent CUDA implementation --- are in \S\ref{sec:cuda}, together with
+the reason the two had to be measured separately.
 
 \emph{These tables were re-measured on D3Q27.} The streaming and storage
 comparison was originally taken on another lattice, one this document no longer
@@ -4276,6 +4673,24 @@ they take minutes and are excluded from \code{ctest}.
 Stated plainly, because each has been measured.
 
 \begin{enumerate}[leftmargin=1.4em,itemsep=4pt]
+\item \textbf{The central-moment operators are unusable on a GPU in this code.}
+  Two \code{MomentCollision} configurations did not finish in seventeen minutes at
+  $64^3$ over 50 steps, where BGK took $\sim0.03$\,s --- roughly four orders of
+  magnitude, with register spilling ruled out by \code{-Xptxas -v}
+  (\S\ref{sec:cmcollapse}). Since the campaign of \S\ref{sec:campaign} and the
+  aorta both run central moments, the $447$ MLUPS BGK figure is \emph{not} this
+  code's GPU throughput and must not be quoted as such. The cause is not the
+  algorithm: the same scheme runs at $99.6\%$ of BGK in the independent CUDA
+  implementation. It is therefore something in this code's route to the device,
+  and it is open.
+
+\item \textbf{The CUDA implementation of \S\ref{sec:cuda} covers a fraction of
+  this one.} D3Q27 only; no shifted storage; no open boundary for the scalar; no
+  physical magnetic wall, so every MHD case there is periodic; no D3Q19, TRT, raw
+  MRT, regularised walls or height-field input. It cannot run the aorta or a city.
+  It exists to answer one question and to carry the multiphysics forward on a
+  device, not to replace this code.
+
 \item \textbf{No MPI.} The code is single-rank. \code{Domain} carries an
   \code{mpi\_halo} hook and the halo machinery exists, but domain decomposition
   is not implemented. Note that Esoteric Pull will require a two-way,
