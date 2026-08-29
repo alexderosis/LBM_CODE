@@ -53,14 +53,47 @@
 //  the answer unchanged, and instead it leaves a few per cent that refinement
 //  does not remove.
 //
-//  It is therefore something on the grad-rho path. F_nu = nu (grad u + grad u^T)
-//  . grad rho is the obvious suspect and was checked: the LBE with this
-//  equilibrium recovers div(nu S) rather than (1/rho) div(mu S), and the
-//  difference is exactly nu S . grad rho, so the implemented form is right.
-//  Replacing it with (grad mu) . S -- which is what the difference would be if
-//  the LBE recovered the other one -- makes the error LARGER (1.8e-01 at H = 32)
-//  while making it converge, which says the current term is cancelling part of
-//  whatever the real defect is. Not resolved.
+//  IT IS THE PRESSURE FORCE, AND IT IS NOT A BUG. Diagnosed by dumping the
+//  profile (LP_PROFILE=1). At a density ratio of 10 with uniform mu:
+//
+//      p~                heavy 2.07e-03      light 2.18e-02     ratio 10.5
+//      p = rho cs2 p~    heavy 6.72e-03      light 7.27e-03     nearly uniform
+//
+//  which is exactly right: p must be continuous, so p~ = p/(rho cs2) jumps by the
+//  DENSITY RATIO across the interface, and F_p = -p~ cs2 grad rho is the term
+//  that allows it to. F_p is not spurious. It is merely enormous -- 220 times the
+//  driving force at H = 32, 408 at H = 64 -- and it is cancelled to that accuracy
+//  by rho cs2 grad p~. The residual is their DISCRETE MISMATCH.
+//
+//  That explains the non-convergence directly. G scales as 1/h^2 to hold the
+//  peak velocity fixed, so F_p/G GROWS as h^2 under refinement while the mismatch
+//  stays a fixed fraction of F_p. Refining makes the cancellation harder, not
+//  easier.
+//
+//  CONFIRMED BY A GAUGE EXPERIMENT (LP_P0 seeds a uniform p~ offset). Only grad p
+//  is physical, so a constant added to p~ cannot change the answer:
+//
+//      p~ offset      single phase    viscosity only    density only
+//      0              2.675e-04       3.619e-02         2.51e-02
+//      0.2            2.675e-04       3.630e-02         4.34e-01
+//
+//  The two configurations with no density ratio are EXACTLY gauge invariant, as
+//  they must be. The one with a density ratio degrades 17-fold under a shift that
+//  changes no physics, and F_p/G goes from 220 to 4650. The conditioning, not the
+//  physics, is what sets the error.
+//
+//  THE FIX IS A REFORMULATION, not a term. Normalising the pressure by a CONSTANT
+//  reference density instead of the local one, p = rho_0 cs2 p~, makes p~ uniform
+//  wherever p is, removes the ratio amplification entirely, and replaces F_p with
+//  cs2 (rho - rho_0) grad p~ -- which needs a gradient of the pressure field and
+//  so a new pass. It is also a departure from the reference this module follows.
+//  Not done here.
+//
+//  Ruled out along the way: F_nu. The LBE with this equilibrium recovers
+//  div(nu S), not (1/rho) div(mu S), and the difference is exactly
+//  nu S . grad rho, so the implemented form is right. Substituting (grad mu) . S
+//  makes the error LARGER (1.8e-01 at H = 32); that reading was tried and
+//  reverted.
 //
 //  The driving force is applied through the operator's EXTERNAL force slot, as a
 //  uniform G, rather than through the body-force acceleration b -- F_b is rho b,
@@ -138,6 +171,10 @@ struct Result {
   // ended up, how much cross-channel velocity there is (there should be none in
   // a parallel flow), and how steady the profile really was when we stopped.
   double y_iface = 0, vmax = 0, residual = 0, u_iface_ref = 0;
+  // Where the error lives, and whether the pressure force is implicated.
+  double l2_near = 0, l2_far = 0;      // inside / outside 2W of the interface
+  double pt_max = 0;                   // max |p~|
+  double fp_over_g = 0;                // max |F_p| relative to the driving force
   std::size_t steps = 0;
   bool ok = false;
 };
@@ -205,10 +242,15 @@ static Result run(Index H, double mu1, double mu2, double rho1, double rho2,
   {
     const Exact e2 = ex;
     const Real hh2 = Real(h);
+    // Deliberate pressure offset, for the gauge experiment: only grad p is
+    // physical, so this must not change the answer -- and the amount by which it
+    // does is a direct measure of how badly conditioned the formulation is.
+    const char* p0s = std::getenv("LP_P0");
+    const Real p0r = p0s ? Real(std::atof(p0s)) : Real(0);
     fl.initialize_field(KOKKOS_LAMBDA(Index n) {
       Index px, py, pz; d.coords(n, px, py, pz);
       const Real Y = Real(py - hyp) - Real(0.5) - hh2;
-      return FlowState{Real(0), Real(e2.u(double(Y))), Real(0), Real(0)};
+      return FlowState{p0r, Real(e2.u(double(Y))), Real(0), Real(0)};
     });
   }
 
@@ -259,15 +301,45 @@ static Result run(Index H, double mu1, double mu2, double rho1, double rho2,
   Exact at_measured = ex;
   at_measured.s = r.y_iface;
 
-  double num = 0, den = 0;
+  auto hpt = Kokkos::create_mirror_view_and_copy(HostSpace{}, fl.rho());   // p~
+  auto hgy = Kokkos::create_mirror_view_and_copy(HostSpace{}, pf.grad_y());
+  const double drho = rho1 - rho2, cs2v = 1.0 / 3.0;
+
+  double num = 0, den = 0, nnear = 0, nfar = 0, dnear = 0, dfar = 0;
   for (Index y = 1; y < ny - 1; ++y) {
     const double Y = double(y) - 0.5 - h;
     const double u = double(hu(d.id(nx / 2, y))), e = at_measured.u(Y);
-    num += (u - e) * (u - e);
-    den += e * e;
+    const double d2 = (u - e) * (u - e), e2 = e * e;
+    num += d2;  den += e2;
+    // Split the error by distance from the interface: a term that lives at the
+    // interface and one that biases the whole profile look identical in a single
+    // L2 number and need completely different explanations.
+    if (std::abs(Y - r.y_iface) < 2.0 * iw) { nnear += d2; dnear += e2; }
+    else                                    { nfar  += d2; dfar  += e2; }
     r.umax = std::max(r.umax, std::abs(u));
+
+    const double pt = double(hpt(d.id(nx / 2, y)));
+    r.pt_max = std::max(r.pt_max, std::abs(pt));
+    // |F_p| = |p~ cs2 (drho/dphi) dphi/dy|, against the uniform driving G.
+    const double fp = std::abs(pt * cs2v * drho * double(hgy(d.id(nx / 2, y))));
+    r.fp_over_g = std::max(r.fp_over_g, fp / G);
   }
   r.l2 = std::sqrt(num / den);
+  if (std::getenv("LP_PROFILE")) {
+    std::printf("\n# y  Y  phi  p~  p=rho*cs2*p~  u  u_exact\n");
+    for (Index y = 1; y < ny - 1; ++y) {
+      const double Y = double(y) - 0.5 - h;
+      const double q = double(hp0(d.id(nx / 2, y)));
+      const double pt = double(hpt(d.id(nx / 2, y)));
+      const double rr = rho2 + std::min(1.0, std::max(0.0, q)) * (rho1 - rho2);
+      std::printf("%3d %8.3f %9.6f %12.5e %12.5e %12.6e %12.6e\n",
+                  int(y), Y, q, pt, rr * cs2v * pt,
+                  double(hu(d.id(nx / 2, y))), at_measured.u(Y));
+    }
+    std::printf("\n");
+  }
+  r.l2_near = (dnear > 0) ? std::sqrt(nnear / den) : 0.0;
+  r.l2_far  = (dfar  > 0) ? std::sqrt(nfar  / den) : 0.0;
   r.u_iface_ref = at_measured.interface_u();
 
   // Interface velocity: the interface sits at a half-integer y, so the two
@@ -358,6 +430,8 @@ int main(int argc, char** argv) {
           std::printf("%-8.2f ", o);
         } else std::printf("%-8s ", "-");
         std::printf("%-11.2e %-10.4f %-9zu\n", r.u_iface_err, r.y_iface, r.steps);
+        std::printf("%-16s %-6s L2 near/far %.3e / %.3e   max|p~| %.2e   max|F_p|/G %.2e\n",
+                    "", "", r.l2_near, r.l2_far, r.pt_max, r.fp_over_g);
       }
       if (ci == 3) both = rs;
       std::printf("\n");
