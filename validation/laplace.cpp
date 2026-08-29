@@ -57,7 +57,7 @@
 //
 //      N=96  R=20 W=4   sigma 9.316e-03   err 6.84e-02
 //      N=144 R=30 W=6   sigma 9.689e-03   err 3.11e-02      order 1.94
-//      N=192 R=40 W=8   sigma 9.837e-03   err 1.63e-02      order 2.25
+//      N=192 R=40 W=8   sigma 9.837e-03   err 1.63e-02      order 2.24
 //
 //  i.e. second order, which is what the scheme is. The absolute value at any one
 //  resolution is therefore not the assertion; the 1/R LAW is, and it holds to

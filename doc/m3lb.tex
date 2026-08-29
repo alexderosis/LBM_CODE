@@ -61,10 +61,12 @@ and CPU clusters from a single source. It supports five lattices, two streaming
 schemes (including the in-place Esoteric Pull), two population storage
 conventions, four collision operators for the fluid (BGK, TRT, raw multiple
 relaxation time and central moments), a passive-scalar module for heat transfer
-and a magnetohydrodynamic module built on a vector-valued distribution. Every
-scheme documented here is accompanied by the quantitative test that establishes
-it, and every stated limitation is one that has been measured rather than
-assumed.
+a magnetohydrodynamic module built on a vector-valued distribution, and a
+multiphase module in which a conservative Allen--Cahn phase field drives a
+pressure-based fluid formulation at a density ratio, with rigid bodies that fall,
+float and roll under the flow's own reaction. Every scheme documented here is
+accompanied by the quantitative test that establishes it, and every stated
+limitation is one that has been measured rather than assumed.
 \end{abstract}
 
 \tableofcontents
@@ -77,8 +79,9 @@ assumed.
 \subsection{What the code is}
 
 \code{M3LB} solves the weakly compressible Navier--Stokes equations by the
-lattice Boltzmann method, optionally coupled to a passive scalar (temperature)
-and to a magnetic field. It is written once and compiled for any Kokkos backend:
+lattice Boltzmann method, optionally coupled to a passive scalar (temperature),
+to a magnetic field, or to a phase field carrying an immiscible interface between
+fluids of different density. It is written once and compiled for any Kokkos backend:
 Serial, Threads, OpenMP, CUDA, HIP or SYCL. Scalar precision is selected at
 configure time.
 
@@ -104,7 +107,20 @@ equation
   \label{eq:induction}
 \end{equation}
 and acts on the flow through the Lorentz force $\bm{j}\times\bb$ with
-$\bm{j}=\nabla\times\bb$.
+$\bm{j}=\nabla\times\bb$. When the multiphase module is active an order
+parameter $\phi$ marks the two fluids and obeys the conservative Allen--Cahn
+equation
+\begin{equation}
+  \partial_t \phi + \nabla\!\cdot(\uu\phi)
+    = \nabla\!\cdot\!\Big[ M\Big(\nabla\phi
+      - \frac{4}{W}\,\phi(1-\phi)\,\nn\Big)\Big],
+  \qquad \nn = \frac{\nabla\phi}{|\nabla\phi|},
+  \label{eq:ace}
+\end{equation}
+with $M$ a mobility and $W$ the interface width; density and viscosity are
+interpolated in $\phi$, and the flow gains a capillary force. The fluid equation
+of state changes with it, and \S\ref{sec:multiphase} is where that change is
+paid for.
 
 \subsection{Architectural rules}
 \label{sec:rules}
@@ -1700,6 +1716,944 @@ signature of a coupling-order problem, and any future two-way coupling should be
 checked the same way.}
 
 %==============================================================================
+\section{Multiphase flow}
+\label{sec:multiphase}
+
+Every module before this one leaves the fluid solver alone. The scalar and the
+magnetic field ride on their own distributions, the Lorentz force enters through
+a second moment, and a single-phase run is bit-for-bit what it was. The
+multiphase module is different: it changes the equation of state, and that change
+propagates through the macroscopic definitions, the forcing, the boundary
+treatment and the initial condition.
+
+The reason is that a two-fluid flow at a density ratio cannot recover $p$ from
+$\rho$. Elsewhere in \code{M3LB} the zeroth moment of $f_i$ is the density and
+$p=\rho\cs^2$ follows; here $\rho$ is a material property of whichever fluid
+occupies the node, not a thermodynamic response to the pressure, and a scheme
+that ties the two together makes the sound speed and the acoustic time step
+functions of the phase. The populations therefore carry a normalised pressure
+instead. That single substitution is what puts a density ratio of $800$ within
+reach --- and it is also the origin of the conditioning problem in
+\S\ref{sec:gauge}, which is this module's principal open issue and is stated
+there rather than buried.
+
+The composition rule of \S\ref{sec:rules} still holds. The multiphase operators
+are separate compile-time collision policies and the phase field is a separate
+solver on its own lattice; nothing single-phase was modified to admit them, and
+a single-component case takes none of this code. \code{FluidSolver},
+\code{EsotericPull} and the lattices are unchanged.
+
+The scheme follows De Rosis and Enan (2021), Sec.~II.B, for the phase-field
+populations and Sec.~II.C for the central-moment fluid operator; the rigid-body
+coupling of \S\ref{sec:penalisation} does not, and \S\ref{sec:penalisation}
+says why.
+
+\subsection{Interface capture: conservative Allen--Cahn}
+\label{sec:ace}
+
+The interface is carried by a \emph{third} distribution set $h_i$, on its own
+lattice, with the velocity as an \emph{input} exactly as the thermal scalar has
+it:
+\begin{equation}
+  \phi = \sum_i h_i, \qquad
+  h_i^\ast = h_i + \omega\big(h_i^{\rm eq} - h_i\big) + S_i ,
+  \label{eq:acelbe}
+\end{equation}
+with $\phi=1$ in the heavy phase and $0$ in the light one, obeying \eqref{eq:ace}.
+The reference throughout this section is De Rosis \& Enan, \emph{Physics of
+Fluids} \textbf{33}, 043315 (2021), Sec.~II.B; the relaxation, the equilibrium,
+the relation $\tau_\phi = M/\cs^2$, the source and the gradient stencil are its
+Eqs.~(9), (11), (13), (15)--(16) and (20). Structurally \eqref{eq:acelbe} is the
+passive-scalar operator of \eqref{eq:adeq} plus one source term, and the only
+moment carried is the zeroth.
+
+The conservative form earns its name from an exact one-dimensional equilibrium,
+\begin{equation}
+  \phi(x) = \tfrac12\Big[1+\tanh\frac{2x}{W}\Big],
+  \qquad
+  |\nabla\phi| = \frac{4}{W}\,\phi(1-\phi) \equiv \theta ,
+  \label{eq:tanh}
+\end{equation}
+the identity that makes the diffusive flux $M\nabla\phi$ and the anti-diffusive
+flux $M\theta\,\nn$ of \eqref{eq:ace} cancel term for term. The interface neither
+spreads nor sharpens, and $W$ is a prescribed number of lattice units rather
+than something that emerges from a balance and has to be measured afterwards.
+The pointwise vanishing of the total flux at a static flat interface is the
+cheapest check on the whole construction, and the one the implementation is
+tested against first.
+
+\paragraph{The equilibrium is a policy, because the right truncation is the
+lattice's.} On a Navier--Stokes lattice the second-order form \eqref{eq:so} is
+used unchanged, with $\phi$ in place of $\rho$ --- that is Eq.~(11) of the
+reference exactly, and the fluid's own equilibrium serves without being
+retyped. On D2Q5 and D3Q7 it drops to first order,
+\begin{equation}
+  h_i^{\rm eq} = w_i\,\phi\Big(1+\frac{\ci\!\cdot\!\uu}{\cs^2}\Big),
+\end{equation}
+for the reason given for the scalar in \S\ref{sec:eqscalar}: those lattices have
+no isotropic fourth-order moment, and on D3Q7 every velocity has a single
+nonzero component, so $(\ci\!\cdot\!\uu)^2$ collapses to $c_\alpha^2u_\alpha^2$
+and the cross terms of $\uu\uu$ cannot be represented at all. A second-order
+term there adds anisotropy, not accuracy. The trade is cost against advection
+accuracy: the reduced lattice moves 5 or 7 populations against 9 or 19 and pays
+an $O(u^2)$ defect in the advection term. A static interface cannot see that
+difference; a sheared one can.
+
+\paragraph{The source, and why its prefactor is not Guo's.} Chapman--Enskog on
+the advection--diffusion LBE with a source obeying $\sum_i S_i = 0$ and
+$\sum_i \ci S_i = \bm{A}_S$ gives
+\begin{equation}
+  \partial_t\phi + \nabla\!\cdot(\phi\uu)
+    = M\nabla^2\phi - \frac{1}{\omega}\nabla\!\cdot\bm{A}_S ,
+\end{equation}
+so matching the anti-diffusion term of \eqref{eq:ace} requires
+$\bm{A}_S = \omega M\,\theta\,\nn = \cs^2(1-\omega/2)\,\theta\,\nn$, using
+$\omega M = \cs^2(1-\omega/2)$. With $S_i = w_i(\ci\!\cdot\!\bm{A}_S)/\cs^2$ the
+$\cs^2$ cancels and the source is simply
+\begin{equation}
+  \boxed{\;
+  S_i = \Big(1-\frac{\omega}{2}\Big)\,w_i\,\theta\,(\ci\!\cdot\!\nn),
+  \qquad \theta = \frac{4}{W}\,\phi(1-\phi) \;}
+  \label{eq:acesource}
+\end{equation}
+carrying no mobility and no speed of sound at all. Since $\sum_i S_i = 0$, $\phi$
+is conserved exactly by the collision, and streaming conserves it too --- that
+is the ``conservative'' in conservative Allen--Cahn, and it is verified rather
+than assumed: $\phi$ drifts by $8.4\e{-13}$ over $10\,000$ steps.
+
+The coefficient in the recovered equation is $1/\omega$, \emph{not} the
+$1/(1-\omega/2)$ that Guo's force term \eqref{eq:guo} compensates, and the
+difference is structural rather than a convention. A body force enters the
+\emph{first}-moment equation directly, where the half-step correction is
+absorbed by redefining the velocity. This source enters the \emph{zeroth}-moment
+equation through the divergence of the first moment, so it contributes twice ---
+once through $h_i^{(1)}$ and once through the second-order Taylor term --- and
+$(1/\omega - \tfrac12) + \tfrac12 = 1/\omega$ is where that lands.
+
+It was written with Guo's prefactor and a $1/\cs^2$ first. The source then comes
+out a factor $M/\cs^2 = 1/\omega - \tfrac12$ too small, the anti-diffusion cannot
+balance the diffusion, and the interface spreads as though the term were absent:
+a prescribed $W=4$ measured $14.1$ after 600 steps, against the $\sqrt{4Mt}=11$
+of pure diffusion. With \eqref{eq:acesource} the same measurement returns
+$4.0011$, a relative error of $2.8\e{-4}$. Nothing else misbehaves in the wrong
+case, which is what makes the failure worth recording: it is loud in its effect
+and silent in its cause.
+
+\paragraph{Mobility.} $M = \cs^2(1/\omega - \tfrac12)$, exactly as the
+diffusivity in \eqref{eq:adeq}, with $\cs^2 = 1/3$ on D2Q5 and $1/4$ on D3Q7. It
+is a numerical parameter and not a physical one: too small and the interface
+cannot heal after being advected through the grid, too large and it diffuses
+faster than the flow deforms it. $M\in[0.01,0.1]$ is the working range.
+
+\paragraph{Gradients are taken from the field, not from neighbouring
+populations.} $\nabla\phi$ is formed from the $\phi$ \emph{field} by a
+lattice-weighted stencil in a pass of its own. Reading a neighbour's populations
+inside the fused kernel would be a genuine read/write race under Esoteric Pull
+(\S\ref{sec:esopull}) --- the two slots a node reads are exactly the two it
+writes --- which is the same defect the scalar outflow condition avoids in the
+same way (\S\ref{sec:outflowrace}). \code{compute\_field()} ends in a fence and
+the derivative kernel reads only what that kernel wrote, so every slot still has
+exactly one writer. The stencils are Eqs.~(20) and (21) of the reference,
+\begin{equation}
+  \nabla\phi(\xx) = \frac{1}{\cs^2}\sum_i w_i\,\ci\,\phi(\xx+\ci),
+  \qquad
+  \nabla^2\phi(\xx) = \frac{2}{\cs^2}\sum_i w_i\big[\phi(\xx+\ci)-\phi(\xx)\big],
+  \label{eq:acegrad}
+\end{equation}
+evaluated on a \emph{gradient lattice} that defaults to the richest velocity set
+of the same dimension --- D2Q9 in two dimensions, D3Q27 in three --- rather than
+the phase field's own D2Q5 or D3Q7. Spurious currents around a static droplet
+are dominated by the isotropy of this stencil and the axis-only set is markedly
+worse, so the cost of a 27-neighbour gather is accepted in a kernel that does
+nothing else. Both derivatives come out of that one gather: the Laplacian needs
+exactly the neighbours the gradient has already loaded, so it is one accumulator
+and one store more, not a second pass. Only the potential-form fluid operator
+reads it.
+
+The anti-diffusion vector $\bm{A} = \theta\,\nn$ is assembled once per node
+rather than once per direction --- it costs a square root and a divide and
+contains no $i$ --- and is guarded by $|\nabla\phi| > 1\e{-12}$. Away from the
+interface $\phi(1-\phi)$ vanishes anyway, so the guard is a second line of
+defence rather than the only one: it stops $0/0$ in the bulk, where $\nabla\phi$
+is round-off noise about zero and $\nn$ is meaningless.
+
+\paragraph{Cost.} Five extra \code{Real} fields per node --- $\phi$, three
+gradient components and the Laplacian --- on top of the $Q$ populations. In FP32
+on D3Q7 that is 28 bytes of populations against 20 of fields, so the fields are
+not a rounding error in the bandwidth budget. They are the price of not
+differentiating populations, and it is a price worth naming.
+
+\paragraph{Coupling order.} $\phi$ and $\nabla\phi$ must be refreshed
+\emph{before} the fluid steps, so that the fluid collides against the interface
+at time $t$ rather than $t-1$:
+\code{pf.refresh()}, then \code{fluid.step()}, then \code{pf.step()}. This is the
+same first-order splitting error the magnetic module documents in
+\S\ref{sec:couplingorder}, and it does not refine away for the same reason. Here
+it is worse in kind rather than in size: the interface \emph{moves}, so the
+error is a systematically misplaced interface rather than a damping offset. One
+refresh serves both consumers, and that is not an economy but a consistency
+requirement --- the fluid's capillary stress and the phase field's interface
+normal are the same gradient, and evaluating them from one array at one time is
+what stops them disagreeing about where the interface is.
+
+\paragraph{What is not implemented.} \code{PhaseWall} is zero-flux on the
+populations, which is the right condition for the transport but sets no contact
+angle; that needs a wetting condition on $\nabla\phi$ at the wall. A zero-flux
+wall never collides, so its slots hold whatever a neighbour emitted toward it one
+step ago, and that sum is not an order parameter --- the field kernel therefore
+leaves $\phi$ at its initialised value there rather than writing a meaningless
+one, and the gradient stencil reads that value. An interface should not be put
+against a wall. Open boundaries for $\phi$ are also absent; the donor machinery
+of \S\ref{sec:scalaroutflow} would port, with the same second pass and the same
+fence.
+
+
+\subsection{The fluid side: a pressure-based formulation}
+\label{sec:pressureform}
+
+Two fluid operators exist. \code{MultiphaseBGK} is the matched-density one: $\rho$
+is a single field near 1, and $\phi$ enters the flow only through the capillary
+stress of \S\ref{sec:surftens} and, optionally, through a per-node relaxation
+rate (\code{omega\_n}) for a viscosity contrast. \code{MultiphasePotentialBGK}
+carries a density ratio, and to do so it changes what the zeroth moment means.
+
+The reason is conditioning. At a ratio $\rho$ is no longer a small perturbation
+about 1, and a density-carrying distribution stops being well posed for the
+shifted storage of \S\ref{sec:storage}, which assumes $\rho_{\rm ref}$ is exactly
+1: at a ratio of 10 the stored $g_i$ are not small and the shift buys nothing.
+The incompressible model removes the density from the distribution entirely.
+$\rho$ becomes a function of $\phi$, and the populations carry a normalised
+pressure:
+\begin{equation}
+  \tilde p = \sum_i f_i,
+  \qquad
+  \uu = \sum_i \ci f_i + \frac{\bm{F}}{2\rho},
+  \qquad
+  f_i^{\rm eq} = w_i\big[\tilde p + \Phi_i(\uu)\big],
+  \label{eq:pmoments}
+\end{equation}
+Eqs.~(24) and (10) of the reference, with $\Phi_i$ the second-order Hermite
+polynomial that \eqref{eq:so} multiplies by $\rho$ --- written $\Phi_i$ here
+rather than $\phi_i$ only because $\phi$ is taken. Its zeroth moment vanishes and
+its first is $\uu$, so $\sum_i f_i^{\rm eq} = \tilde p$ exactly and
+$\sum_i \ci f_i^{\rm eq} = \uu$, \emph{not} $\rho\uu$. There is consequently no
+division by $\rho$ in the momentum sum; only the half-force correction carries
+one. Getting that wrong is a viscosity error that presents as a bad boundary
+condition. A unit test asserts all three moment statements, and the momentum gain
+$\bm{F}/\rho$ under the full force, directly against the equilibrium and to
+round-off.
+
+The physical pressure follows from $\tilde p$ by a factor that is itself a
+choice, and one that turns out to matter more than its algebra suggests;
+\S\ref{sec:gauge} is where that is settled. The shift, meanwhile, is easier here
+than anywhere else in the code: $f_i^{\rm eq}$ is \emph{affine} in $\tilde p$, so
+storing $f_i - w_i$ merely replaces $\tilde p$ by $\tilde p - 1$ in the same
+expression, and one line serves both storage conventions.
+
+\paragraph{Density, viscosity, and the clamp on the interpolant.} With
+$s$ the normalised order parameter,
+\begin{equation}
+  s = \frac{\phi-\phi_L}{\phi_H-\phi_L}\bigg|_{0}^{1},
+  \qquad
+  \rho = \rho_L + s\,(\rho_H-\rho_L),
+  \qquad
+  \mu = \mu_L + s\,(\mu_H-\mu_L),
+  \qquad
+  \tau = \frac{\mu}{\rho\,\cs^2},
+  \label{eq:interp}
+\end{equation}
+Eqs.~(25) and (12) of the reference. Both interpolations are linear in $\phi$ and
+the prescribed viscosities are \emph{dynamic}, so the relaxation rate
+$\omega = 1/(\tau+\tfrac12)$ varies from node to node through both $\mu$ and
+$\rho$; $\nu = \mu/\rho$ is recovered from the same single read of $\phi$, for
+\S\ref{sec:fnu}.
+
+The clamp is on $s$, the interpolant, and not on $\phi$ itself. The conservative
+Allen--Cahn form keeps $\phi$ close to $[0,1]$ but does not guarantee it --- shear
+against a solid, or any under-resolved feature, overshoots locally --- and
+interpolating off an unclamped $\phi$ puts the density outside the two phases it
+is meant to lie between. A large enough undershoot makes $\rho$ \emph{negative},
+at which point the $1/\rho$ in \eqref{eq:pmoments} and in the force is unbounded.
+Clamping the interpolant leaves the transported field alone and bounds only the
+equation of state, which is the narrower repair of the two.
+
+\paragraph{Four forces, one of which is not obvious.} The collision is sourced by
+$\bm{F} = \bm{F}_s + \bm{F}_p + \bm{F}_\nu + \rho\,\bm{b}$: surface tension
+(\S\ref{sec:surftens}), the pressure mismatch (\S\ref{sec:gauge}), the viscous
+interface force (\S\ref{sec:fnu}), and a body acceleration. The middle two are
+not optional extras --- they are the difference between what the LBE recovers and
+what the variable-density, variable-viscosity momentum equation asks for --- and
+both vanish identically at a matched density, because $\nabla\rho$ does. Under the
+default normalisation $\bm{F}_s$ and $\bm{F}_p$ are both multiples of
+$\nabla\phi$, one through the chemical potential and the other through
+$\nabla\rho = (\rho_H-\rho_L)/(\phi_H-\phi_L)\,\nabla\phi$ (Eq.~23), so they are
+assembled as a single coefficient on one vector rather than as two vectors added,
+and no second gradient field is needed for the density. An arbitrary external
+per-node force field occupies a separate slot from $\bm{F}_\nu$, so that a
+penalised solid and the viscous pass never have to agree about who clears the
+array.
+
+The source itself is Guo's \eqref{eq:guo} in its first-order form,
+$F_i = (1-\omega/2)\,w_i\,(\ci\!\cdot\!\bm{F})/(\rho\cs^2)$, which is Eq.~(14) of
+the reference. The central-moment version of this operator, and what it changes,
+is \S\ref{sec:mpcm}.
+
+\paragraph{One cost of the fixed \code{Macro} shape.} \code{Macro} carries four
+\code{Real}s and all four are spoken for, so the force --- needed once to correct
+the velocity in \code{macroscopic()} and once to source the collision --- is
+assembled twice per node instead of being carried between them, about eight extra
+view reads. Widening \code{Macro} by three defaulted fields would remove it, at
+the cost of three \code{Real}s in every other operator's hot loop. That trade is
+stated rather than taken, because it should be measured first.
+
+
+\subsection{Surface tension: two routes}
+\label{sec:surftens}
+
+\paragraph{Route one: a capillary stress in the equilibrium.} The matched-density
+operator does not apply surface tension as a body force. It gives the equilibrium
+the right second moment directly, exactly as the MHD operator does for the
+Maxwell stress in \eqref{eq:eqmaxwell}. With $\bm{G}=\nabla\phi$,
+\begin{equation}
+  \sum_i c_{i\alpha}c_{i\beta} f_i^{\rm eq}
+    = \rho u_\alpha u_\beta
+      + \Big(p - \tfrac12\kappa|\bm{G}|^2\Big)\delta_{\alpha\beta}
+      + \kappa\,G_\alpha G_\beta ,
+\end{equation}
+achieved by adding to the hydrodynamic equilibrium
+\begin{equation}
+  \delta f_i = \frac{w_i}{2\cs^4}\,M_{\alpha\beta}
+    \big(c_{i\alpha}c_{i\beta}-\cs^2\delta_{\alpha\beta}\big),
+  \qquad
+  M_{\alpha\beta} = \kappa\Big(G_\alpha G_\beta
+    - \tfrac12|\bm{G}|^2\delta_{\alpha\beta}\Big).
+  \label{eq:capstress}
+\end{equation}
+This is \eqref{eq:eqmaxwell} with the magnetic field replaced by
+$\sqrt{\kappa}\,\nabla\phi$ and the sign reversed. The tensor structure is the
+same and so are the invariants --- $\sum_i\delta f_i = 0$ and
+$\sum_i\ci\,\delta f_i = \bm{0}$, so it perturbs only the stress and leaves mass,
+momentum and the shifted-storage bookkeeping untouched --- but the reversal is
+physics, not convention. The Maxwell stress is a tension \emph{along} $\bb$ and
+pulls field lines together; surface tension is a tension along the
+\emph{interface}, which is perpendicular to $\nabla\phi$. Relative to the vector
+that defines the tensor, the two therefore differ by a sign.
+
+Taking the MHD expression over unchanged is the mistake that was made, and it is
+not a subtle one in its consequences: with the Maxwell sign the mechanical
+surface-tension integral across the profile comes out negative and the droplet
+develops a pressure \emph{deficit}, measured $-2.5\e{-4}$ where $+8.3\e{-4}$ was
+expected. \code{capillary()} is thus $-\kappa$ times \code{maxwell()}. The twelve
+duplicated lines were kept rather than factored into a shared helper, on the
+grounds that duplicating them is cheaper than disturbing a validated MHD path; a
+third stress of this shape would change that judgement.
+
+\paragraph{Route two: the chemical potential.} The pressure-based operator uses
+the potential form instead, Eqs.~(18) and (19) of the reference,
+\begin{equation}
+  \bm{F}_s = \mu_\phi\,\nabla\phi,
+  \qquad
+  \mu_\phi = 4\beta\,(\phi-\phi_L)(\phi-\phi_H)(\phi-\phi_0)
+    - \kappa\,\nabla^2\phi,
+  \qquad \phi_0 = \tfrac12(\phi_L+\phi_H).
+  \label{eq:chempot}
+\end{equation}
+
+\paragraph{The coefficients.} Integrating $\kappa(\partial_x\phi)^2$ across the
+tanh profile \eqref{eq:tanh} of width $W$, for $\phi\in[0,1]$, gives
+\begin{equation}
+  \sigma = \frac{2\kappa}{3W}
+  \quad\Longleftrightarrow\quad
+  \kappa = \frac{3\sigma W}{2},
+  \qquad\text{and consistently}\qquad
+  \beta = \frac{12\sigma}{W}.
+  \label{eq:kappabeta}
+\end{equation}
+\code{kappa\_from\_sigma} returns the first and \code{beta\_from\_sigma} the
+second. In the stress form the double-well strength $\beta$ never appears at all:
+the conservative Allen--Cahn equation maintains the profile geometrically, from
+$W$ and the normal, so the free energy is implicit and only $\kappa$ is needed.
+In the potential form both appear, and \eqref{eq:kappabeta} is the pair
+consistent with the same $\sigma$ and the same $W$.
+
+\paragraph{Which is used where.} The two are algebraically equivalent, and the
+stress form is the cheaper and safer of the two: it needs only $\nabla\phi$,
+which \code{PhaseFieldSolver} computes anyway for the interface normal, so it is
+one field cheaper and one derivative order safer --- the same argument Dellar's
+form of the Lorentz force makes in \S\ref{sec:eqmhd}. The pressure-based operator
+nonetheless uses the potential form, following the reference, and pays a
+Laplacian for it. What the exchange buys is a density ratio the stress form
+cannot reach, and the Laplacian is drawn from the neighbour gather that
+\eqref{eq:acegrad} already performs, so the cost is one accumulator rather than
+one pass. At matched density the two routes agree, as they must: on a droplet of
+radius 20 the surface tension inferred from the Laplace jump differs between them
+by $3.58\e{-3}$, against a prescribed $\sigma = 1\e{-2}$.
+
+
+\subsection{The viscous interface force}
+\label{sec:fnu}
+
+The LBE recovers $\mu\nabla^2\uu$, while the momentum equation at variable
+viscosity wants $\nabla\!\cdot\!\big[\mu(\nabla\uu+\nabla\uu^{\mathsf T})\big]$.
+The difference is Eq.~(22) of the reference,
+\begin{equation}
+  \bm{F}_\nu = \nu\big(\nabla\uu + \nabla\uu^{\mathsf T}\big)\!\cdot\!\nabla\rho .
+  \label{eq:fnu}
+\end{equation}
+It is identically zero wherever $\nabla\rho$ is --- that is, everywhere except
+the interface --- so at a matched density the whole object may be left unbound
+and the collision reads zero for it. At a density ratio it is not a correction
+one may drop.
+
+It is the only one of the four forces that cannot be assembled from node-local
+data: it needs the velocity \emph{gradient}, and therefore a pass of its own.
+That pass uses the same isotropic stencil as \eqref{eq:acegrad}, on the same
+gradient lattice.
+
+\paragraph{Only the contraction is stored.} The velocity gradient is nine numbers
+per node; contracted against $\nabla\rho$ it is three. Since $\nabla\rho$ is
+available in the same kernel --- it is $\nabla\phi$ times the constant
+$(\rho_H-\rho_L)/(\phi_H-\phi_L)$ --- the contraction is performed where the
+tensor is still in registers and only the resulting vector is written. Nine
+fields per node become three. The normalisation factors out of the bracket for
+the same reason: the accumulator holds the raw sum $\sum_i w_i c_{i\alpha}u_\beta$,
+and since it and its transpose need the same $1/\cs^2$, one factor multiplies the
+whole contraction rather than each term of it.
+
+\paragraph{Coupling order, and why the pass is opt-in.} The kernel reads the
+velocity \emph{field}, which \code{FluidSolver} fills from the populations, so
+the order
+\begin{center}\small
+\code{pf.refresh()} $\rightarrow$ \code{fl.compute\_macroscopic()} $\rightarrow$
+\code{vf.refresh(coll)} $\rightarrow$ \code{fl.step()}
+\end{center}
+builds the force from $\uu(t)$ and $\phi(t)$ and consumes it in the collision at
+time $t$, with no lag anywhere --- unlike the phase field itself, whose splitting
+error \S\ref{sec:ace} names. The price is one extra pass over the populations per
+step, because the fused step writes $\uu$ only as it goes, too late for a
+neighbour gather within the same step. That is a real cost, and it is why this
+pass is requested by the driver rather than performed automatically.
+
+\paragraph{Not valid against a wall.} The stencil reads $\uu$ at every neighbour,
+including non-fluid ones, where the velocity field holds whatever
+\code{FluidSolver} left there, which is zero. At an interface touching a wall
+that is a one-sided derivative taken as though it were central. Every case that
+currently runs this operator is periodic. The gap has the same shape as the
+missing wetting condition, and the same remedy would be needed.
+
+\paragraph{It earns its place.} For as long as the only case running the pressure
+form was a static droplet --- where \eqref{eq:fnu} is identically zero ---
+$\bm{F}_\nu$ was implemented and unexercised, and was documented as such rather
+than glossed. Layered Poiseuille flow at both a viscosity and a density ratio is
+the case that excites it, and switching it off there gives:
+
+\begin{center}\small
+\begin{tabular}{lccc}
+\toprule
+$H$ & $L_2(u)$ with $\bm{F}_\nu$ & without & ratio \\
+\midrule
+32 & $4.2967\e{-2}$ & $4.2837\e{-1}$ & 9.97 \\
+64 & $4.2896\e{-2}$ & $5.9350\e{-1}$ & 13.84 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent A term that is exactly zero in every case previously run is precisely
+the kind that can stay wrong indefinitely without anything failing. This is the
+measurement that says it is not.
+
+\subsection{Central moments for the pressure form}\label{sec:mpcm}
+
+BGK relaxes every mode at the same rate, so at high Reynolds number, where
+$\omega$ approaches $2$, the non-hydrodynamic modes are over-relaxed and ring
+instead of decaying. That is not a margin one tunes around: at $Re=30000$ on a
+$128$-wide box, $\omega=1.99795$. The symptom that prompted a moment operator here
+was measured rather than anticipated --- a Rayleigh--Taylor run at a density ratio
+of $999$ completed under BGK, but its velocity field was dominated by a one-cell
+alternating mode, $70\times$ stronger than the same case at a ratio of $3$. The
+point of collision in moment space is that the modes carrying no physics can be
+sent straight to equilibrium at rate $1$ while the shear modes alone carry the
+viscosity.
+
+\paragraph{The equilibrium moments factorise.} That is the one derivation worth
+writing down, because it is what keeps the operator as cheap as the single-phase
+one. The pressure-form equilibrium splits exactly:
+\[
+  f_i^{\rm eq} = w_i\big[\tilde p + \Phi_i(\uu)\big]
+    = \underbrace{w_i\big(1+\Phi_i(\uu)\big)}_{\text{Maxwellian at }\rho=1}
+      \;+\;(\tilde p-1)\,w_i .
+\]
+The first bracket has central moments $\{1,0,0,\ldots\}$ \emph{exactly} --- that is
+the product-form property verified symbolically in \S\ref{sec:moment}, $0$ of $9$
+moments deviating on D2Q9 and $0$ of $27$ on D3Q27. The second is $(\tilde p-1)$
+times the central moments of the \emph{weights} about $\uu$, and on a product
+lattice those factorise into the same one-dimensional triple that the shifted
+storage of \S\ref{sec:moment} already carries. Hence the closed form
+\begin{equation}
+  k^{\rm eq}_{pqr} = \big[\,pqr = 000\,\big]
+    + (\tilde p - 1)\,A_p(u_x)\,A_q(u_y)\,A_r(u_z),
+  \qquad A = \{1,\ -u,\ u^2\},
+  \label{eq:mpkeq}
+\end{equation}
+with the third factor absent in two dimensions. No dense $Q\times Q$ matrix, no
+stored equilibrium vector, and the same factorised transform the single-phase
+operator uses. Equation \eqref{eq:mpkeq} was checked against Eq.~(34) of
+De~Rosis and Enan on four independent moments: $k_5=(u_x^2-u_y^2)(\tilde p-1)$ and
+$k_7=u_xu_y(\tilde p-1)$ agree directly, and after converting this
+Hermite-like basis to the paper's monomial one through
+$k^{\rm mono}_{21}=k_{21}+\cs^2k_{01}$, their $k_{10}$ and $k_{16}$ come out
+identical too. The paper's odd-order moments are printed without the leading minus
+the derivation gives; the even ones agree outright, which is what identifies it as
+typography rather than a difference of scheme. The test suite does not check
+against the paper at all: it contracts the central moments of the equilibrium
+directly by summation, and all nine agree with \eqref{eq:mpkeq} to
+$5.0\e{-17}$.
+
+\paragraph{One deliberate departure.} The reference builds its equilibrium central
+moments from the second-order truncated equilibrium of its Eq.~(10). This operator
+uses the product form instead, whose central moments are exactly Maxwellian on
+D2Q9 and D3Q27, so the $O(u^3)$ Galilean defects of the truncation are absent
+rather than reproduced --- the same choice, for the same reason, that
+\S\ref{sec:moment} makes for single-phase flow. The gap between the two is
+measurable and is exactly of that size: run against BGK at $\omega=1$, where the
+two operators must otherwise coincide, both recover the same $\tilde p$ and the
+same $u_x$ to round-off, and their post-collision states differ by
+$1.977\e{-4}$ at $|\uu|^3=7.712\e{-4}$.
+
+\paragraph{Relaxation.} Following Eq.~(35) of the reference,
+$K=\mathrm{diag}[1,1,1,1,1,\omega,\omega,\omega,\omega,\omega,1,\ldots,1]$:
+\begin{equation}
+\begin{aligned}
+  \text{order }0:&\quad \text{conserved --- } \tilde p \text{ is untouched} \\
+  \text{order }1:&\quad \text{exact assignment, the force included} \\
+  \text{order }2:&\quad \text{trace at }\omega_{\rm bulk}\text{ (the paper's }1\text{),
+                          deviatoric and shear at }\omega \\
+  \text{order}\geq3:&\quad k^{\star} = k^{\rm eq}.
+\end{aligned}
+\end{equation}
+$\omega_{\rm bulk}$ is exposed as a parameter because it is the bulk viscosity and
+nothing else in the scheme pins it.
+
+\paragraph{The force is exact in the first moment, not relaxed into it.} With
+$\uu=\sum_i\ci f_i + \bm{F}/(2\rho)$, the pre-collision first moment is
+\begin{equation}
+  k_1 = \sum_i f_i\,(c_{ix}-u_x) = k^{\rm eq}_{100} - \frac{F_x}{2\rho},
+  \label{eq:mpk1}
+\end{equation}
+and the post-collision one has to be $k^{\rm eq}_{100}+F_x/(2\rho)$ for the next
+step to recover the right velocity. The update is therefore an assignment rather
+than a relaxation, and the rate-$1$ entry in $K$ is that assignment. The source of
+Eq.~(14), $F_i = w_i(\ci\!\cdot\!\bm{F})/(\rho\cs^2)$, is odd in $\ci$ and so has
+no second moment at all: unlike Guo's there is no second-order force term to add,
+in any basis, and the co-moving-frame cancellation that \S\ref{sec:moment} relies
+on is not even needed here. The test suite checks the consequence rather than the
+algebra --- collision conserves $\tilde p$ to $2.2\e{-16}$ and the momentum gains
+exactly $F_x/\rho$ and $F_y/\rho$, to $1.4\e{-17}$, with the full multiphase force
+assembled.
+
+\paragraph{Two constraints on where this operator may be used.} It requires a
+product lattice: D2Q9 or D3Q27, enforced by a static assertion, since D3Q19 would
+need the monomial basis and its own equilibrium moments. And it takes raw storage
+only. The shifted convention centres the stored variable on $\tilde p = 1$, which
+is precisely the pressure gauge that must be avoided at a density ratio --- the
+subject of \S\ref{sec:gauge}.
+
+\subsection{The pressure gauge, and two normalisations}\label{sec:gauge}
+
+This is the most consequential finding in the module, and it is a conditioning
+result rather than a bug. The populations carry $\tilde p = p/(\rho\cs^2)$. The
+physical pressure $p$ is continuous across an interface; $\rho$ is not. So
+$\tilde p$ jumps by the whole density ratio wherever $p$ is not near zero, and the
+term that permits it to, $F_p=-\tilde p\,\cs^2\nabla\rho$, is proportional to the
+pressure \emph{level}. It is cancelled, to whatever accuracy the two discrete
+operators allow, by the LBE's own $\rho\cs^2\nabla\tilde p$. The physical answer is
+their difference; their individual sizes --- and hence the size of the residual
+mismatch --- are set by a gauge that changes no physics.
+
+\paragraph{The layered channel makes it visible.} Two immiscible layers driven by
+a uniform force $G$ have an exact profile that does not contain $\rho$ at all, so
+a density ratio alone must leave the answer unchanged. It does not. Turning the
+two contrasts on one at a time (D2Q9, central moments, FP64, interface width $4$):
+
+\begin{center}\small
+\begin{tabular}{lccc}
+\toprule
+configuration & $L_2(u)$, $H{=}32$ & $H{=}64$ & order \\
+\midrule
+single phase              & $2.6751\e{-4}$ & $6.6877\e{-5}$ & $2.00$ \\
+viscosity ratio $5$ only  & $3.6187\e{-2}$ & $2.3587\e{-2}$ & $0.62$ \\
+density ratio $10$ only   & $2.5078\e{-2}$ & $2.8995\e{-2}$ & $-0.21$ \\
+both                      & $4.2967\e{-2}$ & $4.2896\e{-2}$ & $0.00$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The first row says the base scheme is exact and second order. The second
+is the diffuse interface smoothing a kink in $\mathrm{d}u/\mathrm{d}y$ over $W$
+cells, first order in $W/h$ and converging as it should. The third should not
+happen at all, and extending it to $H=128$ gives $2.4\e{-2}$ --- a few per cent
+that refinement does not remove.
+
+\paragraph{It is the pressure force, and it is not spurious.} Dumping the profile
+at a density ratio of $10$ with uniform viscosity gives
+\[
+\begin{array}{lll}
+  \tilde p              & \text{heavy } 2.07\e{-3} & \text{light } 2.18\e{-2}
+                        \quad (\text{ratio } 10.5) \\
+  p = \rho\cs^2\tilde p & \text{heavy } 6.72\e{-3} & \text{light } 7.27\e{-3}
+                        \quad (\text{nearly uniform}),
+\end{array}
+\]
+which is exactly what the formulation demands. $F_p$ reaches $220$ times the
+driving force at $H=32$ and $408$ at $H=64$, and the reported error is the
+discrete mismatch between it and $\rho\cs^2\nabla\tilde p$. That also explains the
+sign of the order directly: $G$ scales as $1/h^2$ to hold the peak velocity fixed,
+so $F_p/G$ \emph{grows} as $h^2$ under refinement while the mismatch stays a fixed
+fraction of $F_p$. Refining makes the cancellation harder, not easier.
+
+\paragraph{A gauge experiment confirms it.} Seeding a uniform offset in $\tilde p$
+changes no physics, since only $\nabla p$ is physical. Measured $L_2(u)$ at
+$H=32$:
+
+\begin{center}\small
+\begin{tabular}{lccc}
+\toprule
+$\tilde p$ offset & single phase & viscosity only & density only \\
+\midrule
+$0$   & $2.675\e{-4}$ & $3.619\e{-2}$ & $2.51\e{-2}$ \\
+$0.2$ & $2.675\e{-4}$ & $3.630\e{-2}$ & $4.34\e{-1}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The two configurations without a density ratio are exactly gauge
+invariant, as they must be. The one with a density ratio degrades seventeenfold,
+and $F_p/G$ goes from $220$ to $4650$. The conditioning, not the physics, sets the
+error.
+
+\paragraph{Two normalisations.} The reference normalises by the local density; the
+alternative normalises by a constant:
+\begin{equation}
+  p = \rho(\phi)\,\cs^2\,\tilde p,
+  \qquad F_p = -\tilde p\,\cs^2\,\nabla\rho
+  \qquad\text{(default)},
+  \label{eq:gaugelocal}
+\end{equation}
+\begin{equation}
+  p = \rho_0\,\cs^2\,\tilde p,
+  \qquad F_p = \cs^2\,(\rho-\rho_0)\,\nabla\tilde p .
+  \label{eq:gaugeconst}
+\end{equation}
+Under \eqref{eq:gaugeconst} $\tilde p$ is uniform wherever $p$ is, so $F_p$ tracks
+the pressure \emph{gradient} instead of the level. It needs $\nabla\tilde p$, which
+is a field the phase solver does not carry, so a separate pass differentiates the
+fluid's own zeroth moment on the isotropic stencil
+\begin{equation}
+  \nabla f(\xx) = \frac{1}{\cs^2}\sum_i w_i\,\ci\,f(\xx+\ci),
+  \label{eq:sgrad}
+\end{equation}
+run after the macroscopic update. Isotropic rather than axis-only for the reason
+the phase gradient is: this gradient is differenced against the LBE's own pressure
+term, and an anisotropic stencil would leave a direction-dependent residual
+exactly where the two are meant to cancel.
+
+On the density-only configuration the two forms measure as
+
+\begin{center}\small
+\begin{tabular}{lcccc}
+\toprule
+normalisation & $L_2(u)$, $H{=}32$ & $H{=}64$ & order & $\max|F_p|/G$ \\
+\midrule
+local $\rho$ (default) & $2.5078\e{-2}$ & $2.8995\e{-2}$ & $-0.21$ & $220 \to 408$ \\
+constant $\rho_0$      & $1.8572\e{-2}$ & $9.6381\e{-3}$ & $0.95$  & $379 \to 747$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent At an offset of $0.2$ the same orders are $-0.37$ and $0.86$, and the
+gauge sensitivity --- the factor by which the error moves under a shift that
+changes no physics --- is $17.3\times$ and $19.4\times$ for the local form against
+$1.93\times$ and $2.04\times$ for the constant one. Note what does \emph{not}
+improve: $F_p/G$ is larger, $379$ against $220$ at $H=32$. The gain is not that the
+term shrinks but that it stops tracking the pressure level. The residual factor of
+about two is the discrete equilibrium's own $\tilde p$ dependence:
+$f_i^{\rm eq}=w_i[\tilde p+\Phi_i]$ carries $(\tilde p-1)$ into its higher moments
+through \eqref{eq:mpkeq}, so a $\tilde p$ offset is not a pure gauge on the lattice
+even when it is one in the continuum.
+
+\paragraph{Neither dominates.} The recovered pressure term under
+\eqref{eq:gaugeconst} is $-(\rho_0/\rho)\cs^2\nabla\tilde p$, so one phase always
+pays an acoustic price. With $\rho_0=\rho_L$ the heavy phase runs at an effective
+sound speed $\cs\sqrt{\rho_L/\rho_H}$: stable, but the pressure term there is a
+cancellation of ratio size, which is tolerable where $\nabla p$ is diffuse and is
+not where it is concentrated. At a Laplace jump that form diverges at a ratio of
+$10$ and above, on a case the local-$\rho$ form handles at a ratio of $100$. The
+opposite choice is worse and was tried first: with $\rho_0=\rho_H$ the light phase
+gets $\cs\sqrt{\rho_H/\rho_L}$, which at a ratio of $10$ is $1.83$ lattice units
+per step --- past the lattice speed --- and the run diverged inside $500$ steps.
+That is why $\rho_0$, when used at all, must be the light phase. The default
+remains the local-$\rho$ form of \eqref{eq:gaugelocal}, because every validated
+result in this tree was obtained with it; \eqref{eq:gaugeconst} is available where
+the pressure field is real but its gradients are diffuse, as in a driven channel,
+and the layered case exercises both.
+
+\paragraph{Where the zero goes.} Within \eqref{eq:gaugelocal} the absolute level is
+still free in the continuum and still not free numerically, and this is the single
+setting that decides whether the scheme works at all. Adding a constant $P_0$ to
+$p$ adds $P_0/(\rho\cs^2)$ to $\tilde p$, which is not a constant when $\rho$
+varies, and both large terms scale with it. Seeding $p=\rho_L\cs^2$ --- a uniform
+physical pressure, the natural-looking choice --- was measured on the static
+droplet to return a \emph{negative} surface tension, in error by thousands of per
+cent at a density ratio; the acceptance test for that case is normalised by the
+prescribed $\sigma$ rather than by the smallest measured one precisely because a
+sign flip would otherwise turn a gross failure into an apparent pass, which it
+did. The same gauge made a Rayleigh--Taylor run at $At=0.5$ diverge inside $424$
+steps, with $|\uu|$ at twice the free-fall velocity at step zero, before anything
+had moved.
+
+Seeding $p=0$ where the two fluids meet keeps both terms small and leaves only the
+physical jump in $\tilde p$. With that gauge and nothing else changed, the same
+droplet recovers Laplace's law across the whole ratio range, and the spurious
+currents \emph{fall} as the ratio rises:
+
+\begin{center}\small
+\begin{tabular}{lccc}
+\toprule
+$\rho_H/\rho_L$ & $\sigma$ recovered & rel.\ err. & $\max|\uu|$ \\
+\midrule
+$1$   & $9.27607\e{-3}$ & $7.24\e{-2}$ & $1.67\e{-5}$ \\
+$10$  & $9.71478\e{-3}$ & $2.85\e{-2}$ & $3.21\e{-6}$ \\
+$100$ & $9.83470\e{-3}$ & $1.65\e{-2}$ & $4.90\e{-7}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent$\sigma$ varies by $5.59\e{-2}$ of the prescribed value over a hundredfold
+ratio, and most of that spread is the matched-density row's ordinary resolution
+deficit rather than any dependence on the ratio. The rule the module follows is
+therefore to put the pressure zero at the interface --- for a hydrostatic
+configuration, at the free surface --- and it is a rule about conditioning, not
+about physics. Its immediate corollary is the storage restriction stated at the
+end of \S\ref{sec:mpcm}: the shifted convention centres the stored variable on
+$\tilde p = 1$, which is the one gauge that must not be chosen at a density ratio.
+
+\subsection{Rigid bodies by volume penalisation}
+\label{sec:penalisation}
+
+A rigid body is coupled to the flow by volume penalisation: a smooth solid
+indicator, and a direct forcing that drives the fluid inside it toward the body's
+rigid velocity field. The two standard alternatives were considered and rejected
+for specific reasons. A Peskin-style immersed boundary --- Lagrangian markers on
+the surface, interpolation and spreading kernels, a body force fed back into
+$\bm{F}$ --- is the usual tool and it is more accurate \emph{at the surface} than
+this, but it is also a great deal more machinery, and for a body whose
+\emph{interior} must move rigidly, a solid square rather than a thin shell, a
+volumetric penalisation enforces the same condition with a fraction of it. De
+Rosis and Enan drive their wedge that way. Moving bounce-back geometry is the
+other route and is worse here on three counts: the solid mask must be rebuilt on
+the host every time the body advances, which is a full pass over the domain plus
+\code{rebuild\_lists()}; the nodes the body uncovers need a refill scheme, their
+populations being meaningless; and the body's position is quantised to whole
+cells, so a smoothly falling square arrives in lattice-sized jumps and each one
+radiates a pressure pulse. Penalisation has none of these. Nothing about the
+geometry is ever rebuilt, the body's position \emph{and angle} are continuous,
+and there are no fresh nodes. Rotation in particular is nearly free here and
+would be a rewrite in either of the other two.
+
+\paragraph{The indicator and the force.} \code{Rect::chi} is the product of two
+$\tanh$ profiles across the faces, evaluated after the point has been taken into
+the body frame, so the shape turns with the body and so does the slight rounding
+of the corners that the product form introduces. It is smoothed over about a cell
+and a half (\code{Rect::smooth}, default $1.5$ cells) rather than being a sharp
+mask: a sharp mask is the staircase again, with the surface sitting on lattice
+planes and the effective shape changing as the body falls, or as it turns. The
+smoothing is what lets the body occupy a continuously varying pose. The forcing is
+\begin{equation}
+  \bm{F}(\xx) = \chi(\xx)\,2\rho(\xx)
+    \Big[\bm{U} + \Omega\,\hat{\bm{z}}\times\bm{r} - \uu^{*}(\xx)\Big],
+  \qquad \bm{r} = \xx - \xx_c,
+  \label{eq:penalforce}
+\end{equation}
+which is direct forcing: applied through the same half-force convention as
+\eqref{eq:guo}, one step of it takes $\uu$ to the rigid field exactly where
+$\chi=1$. It must run after \code{compute\_macroscopic()} and before the fluid
+steps. The density is read node by node rather than taken as a constant, so the
+same body meets a thousandfold heavier medium when it reaches the water; a
+penalisation that ignored that would decelerate the body as though it were still
+in air.
+
+\paragraph{$\uu^{*}$ is not the stored velocity.} This is the one thing that has
+to be right. The solver defines
+$\uu = \big(\sum_i \ci f_i + \tfrac12\bm{F}\big)/\rho$ with $\bm{F}$ the
+\emph{total} force, so the stored velocity field already contains this body's
+force from the previous step. Feeding it straight back into
+\eqref{eq:penalforce} applies the correction twice: the body over-shoots, the
+fluid over-shoots back, and the pair diverges within a few hundred steps ---
+measured, the square left the domain at six million times its impact speed. The
+previous contribution is therefore removed first,
+\[
+  \uu^{*} = \uu_{\rm stored} - \frac{\bm{F}_{\rm prev}}{2\rho},
+\]
+which leaves the velocity the fluid would have had from every \emph{other} force,
+and that is what direct forcing is defined against. The force arrays hold
+$\bm{F}_{\rm prev}$ already, so this costs one subtraction and no extra state.
+
+Because the force is known at every node, the force and torque the fluid exerts
+on the body are minus its sum and minus the sum of $\bm{r}\times\bm{F}$. That
+closes Newton's equations, and it is the reason for doing it this way: the body
+falls, floats and rolls under gravity and buoyancy rather than being pushed at a
+prescribed speed.
+
+\paragraph{The fictitious fluid, and why the obvious arrangement cannot float.}
+The penalised region is not empty. It is full of fluid that the forcing drags
+along, and that fluid's inertia and weight are both already inside the reaction,
+so using the body's own mass alone would count them twice. Writing $m_f$ for that
+fictitious fluid mass, the exact bookkeeping is
+\[
+  m_b\,\frac{d\bm{U}}{dt}
+    = \bm{R} + \frac{d\bm{P}_{\rm in}}{dt} + (m_b-m_f)\,\bm{g},
+\]
+where $\bm{g}$ is the body force per unit mass --- the same vector the collision
+operator is given, or the buoyancy term describes a different problem from the
+fluid it is meant to displace. Uhlmann's classical step approximates
+$d\bm{P}_{\rm in}/dt$ as $m_f\,d\bm{U}/dt$, moves it across and divides:
+\[
+  \delta\bm{U} = \frac{\bm{R} + (m_b-m_f)\,\bm{g}}{m_b - m_f}.
+\]
+That denominator is the whole problem. It vanishes for a neutrally buoyant body
+and changes sign for a light one, so a floating body --- the only interesting
+kind, since floating is what a density ratio is \emph{for} --- is precisely the
+case the arrangement cannot express. This never announced itself as a failure.
+The old code did not crash and produced no NaN: the guard on that denominator
+silently zeroed the acceleration, so a body that could not be floated simply did
+not accelerate.
+
+\paragraph{Targeting the velocity the body is about to have.} The fix is not a
+different model. It is the observation that the reaction is \emph{linear} in the
+body velocity that produces it,
+\[
+  \bm{R} = -\sum \chi\,2\rho\,
+    \big(\bm{U} + \Omega\,\hat{\bm{z}}\times\bm{r} - \uu^{*}\big),
+\]
+so if the force written into the arrays targets the velocity the body is
+\emph{about} to have rather than the one it already has, $\bm{R}$ moves to the
+left-hand side and the same equation comes out with a different denominator,
+\begin{equation}
+  (m_b + m_f)\,\delta\bm{U} = 2\,\delta\bm{P} + (m_b - m_f)\,\bm{g},
+  \label{eq:bodynewton}
+\end{equation}
+with $\delta\bm{P} = \sum \chi\rho\,(\uu^{*}-\uu_{\rm rigid})$ the inner fluid's
+momentum deficit relative to rigid motion --- the hydrodynamic signal, and the
+only place the fluid enters. Algebraically \eqref{eq:bodynewton} is Uhlmann's
+equation multiplied through: the same discrete equation, rearranged, with nothing
+added to it. The difference is entirely that the body and the fluid are now
+solved at the \emph{same} instant instead of the fluid lagging the body by a step
+--- the lesson of \S\ref{sec:couplingorder} in another guise. The denominator
+$m_b+m_f$ is positive for every mass, the homogeneous amplification factor is
+$(m_b-m_f)/(m_b+m_f)$, whose modulus is below one for every mass, and the
+neutrally buoyant case, previously a division by zero, is now the
+best-conditioned point on the line. Nothing is tuned and no limit is imposed.
+
+\paragraph{Rotation, and why it does not decouple.} The same substitution with
+rotation gives a $3\times3$ system rather than a scalar. It does not split into a
+translation part and a roll part, because the first moments
+$\bm{S}=\sum\chi\rho\,\bm{r}$ of the fictitious mass about the body centre are
+non-zero the moment the body straddles an interface --- half of it is standing in
+water and half in air --- and those moments couple sway to roll. With
+$A=m_b+m_f$ and $B=I_b+I_f$,
+\begin{equation}
+  \begin{bmatrix}
+    A    & 0    & -S_y \\
+    0    & A    &  S_x \\
+    -S_y & S_x  &  B
+  \end{bmatrix}
+  \begin{bmatrix} \delta U_x \\ \delta U_y \\ \delta\Omega \end{bmatrix}
+  =
+  \begin{bmatrix}
+    2\,\delta P_x + (m_b-m_f)\,g_x \\
+    2\,\delta P_y + (m_b-m_f)\,g_y \\
+    2\,\delta L_z - (S_x g_y - S_y g_x)
+  \end{bmatrix}.
+  \label{eq:body3x3}
+\end{equation}
+The matrix is symmetric, and it is positive definite for every body with mass and
+inertia of its own: Cauchy--Schwarz on the measure $\chi\rho$ gives
+$|\bm{S}|^2 \le m_f I_f \le AB$, so the Schur complement $B-|\bm{S}|^2/A$ is
+positive. There is therefore no pivoting and no case in which the solve has to
+give up; it is done in closed form, on the host, once a step. All seven integrals
+--- $m_f$, $\bm{S}$, $I_f$, $\delta\bm{P}$ and $\delta L_z$ --- come from a single
+sweep, and the force is then written in a plain \code{parallel\_for}: one
+reduction, not two. Locking a degree of freedom removes the coupling rather than
+the row, so a body held against translation solves $B\,\delta\Omega$ against the
+third right-hand side alone, which is not the same answer as solving
+\eqref{eq:body3x3} and discarding two rows. Finally, $m_b$ and $I_b$ are taken
+from the integrals of the indicator itself rather than from $4h_xh_y$ and the
+textbook $(w^2+h^2)/12$, so that they describe the body the force actually acts
+on: the smoothing makes the penalised body slightly larger than the nominal
+rectangle, and its second moment exceeds the sharp rectangle's by $2.55\%$ at the
+default smoothing width.
+
+\paragraph{The last term of the third row is the righting moment.} The body's own
+weight acts at its centre and exerts no torque about it; the displaced fluid's
+weight does not, because the displaced fluid is heavier on the submerged side,
+and $-(\bm{S}\times\bm{g})$ is exactly the hydrostatic couple that metacentric
+theory writes as $\rho g V\,\overline{GM}\sin\theta$. It was not put there for
+that purpose. It falls out of the same subtraction that produced $(m_b-m_f)\bm{g}$
+in the rows above, and it is the reason a raft comes back upright. It is reported
+separately in \code{Reaction::righting} because it is the only part of the roll
+balance with a closed form to check against, and nothing in the way it is
+computed knows that form exists; \S\ref{sec:floating} makes the comparison.
+
+\paragraph{The reaction is a derived diagnostic, not a measurement.} Once the
+solve has produced $\delta\bm{U}$ and $\delta\Omega$, the force and torque on the
+body follow from the same integrals in closed form,
+\begin{equation}
+  \bm{R} = 2\,\delta\bm{P}
+    - 2\big[\,m_f\,\delta\bm{U} + \delta\Omega\,(\hat{\bm{z}}\times\bm{S})\,\big],
+  \qquad
+  T = 2\,\delta L_z
+    - 2\big[\,I_f\,\delta\Omega + \bm{S}\times\delta\bm{U}\,\big],
+  \label{eq:bodyreaction}
+\end{equation}
+so nothing has to be summed a second time to report them. What is reported is
+consequently exact to round-off against $-\sum\bm{F}$ and $-\sum\bm{r}\times\bm{F}$,
+and is an identity rather than an independent measurement of them: the physics
+enters through $\delta\bm{P}$ and $\delta L_z$, and \eqref{eq:bodyreaction} is
+algebra on top. That identity is checked against the summed force array in
+\S\ref{sec:floating}.
+
+\paragraph{What this does not model.} There is no contact line. The phase field is
+advected by the fluid velocity and knows nothing about the body, so nothing sets
+the angle at which the free surface meets the solid; inside the body $\uu$ is
+driven to the rigid field, so the interface is carried \emph{with} the body rather
+than through it, and the conservative Allen--Cahn form keeps the profile from
+simply diffusing in --- but the wetting physics is absent, and water entry is a
+contact-line problem. Read the splash, not the meniscus. The same gap means a
+floating body gets no surface-tension contribution to its draft, so a body small
+enough for that to matter, at Bond number of order one, is out of scope. There is
+no sub-cell surface: penalisation resolves the body to the smoothing width, so a
+pressure read at the face of the square is a smoothed pressure over a cell or two,
+and the integrated force is far more trustworthy than the local pressure, which is
+the usual situation with this family of methods; the draft is likewise resolved
+only to the interface width. There is no collision model: two bodies, or a body
+meeting a wall, will simply interpenetrate, because nothing here computes a
+contact force, and the floor stop in \code{demonstrator/water\_entry} is a clamp in
+the driver rather than physics. The scheme is two-dimensional, and says so in the
+compiler's voice --- a \code{static\_assert} on $D=2$, because on a 3D lattice it
+would silently model an infinite prism in $z$ with a rigid-body solve carrying one
+angle where it needs three. Three dimensions is a $6\times6$ with a rotating
+inertia tensor and a quaternion, a different piece of work; the fluid side would
+not change at all. And the body is of uniform density: its centre of mass is taken
+to be the centre of the rectangle, which is exactly what lets its own weight drop
+out of the roll equation. Ballast low in the hull is the standard way to make a
+tall body float upright, and it is precisely what this cannot express --- it would
+need a second centre, a $\overline{BG}$ that no longer follows from the draft, and
+a weight torque restored to the third row. The rectangle is also the only
+indicator provided, though anything carrying a signed distance function drops
+straight in.
+
+
+%==============================================================================
 \section{Validation}
 \label{sec:validation}
 
@@ -2523,6 +3477,555 @@ $N$ & $T=0$ at & $T=1$ at & $T=0$ at & $T=1$ at \\
 \end{center}
 \noindent Anti-bounce-back places its wall half a spacing outside the node, the
 moment condition exactly on it, at every resolution and to machine precision.
+
+\subsection{Laplace's law}
+\label{sec:laplace}
+
+A static droplet is the first two-phase validation and deliberately so: it has an
+exact answer, it needs no reference table, and the two quantities it measures
+fail independently. The run below is \code{validation/laplace}, registered under
+\code{ctest}, on a triply periodic $96^2$ box with $\sigma=0.01$, $W=4$,
+$\tau=0.8$, mobility $M=0.05$ and $10\,000$ steps, D2Q9 fluid against a D2Q9
+phase field.
+
+\paragraph{The flat interface, which must do nothing.} A slab has zero curvature,
+so it is the control: the width must be maintained and no flow may be driven. The
+conservative Allen--Cahn equation \eqref{eq:ace} has the $\tanh$ profile of
+prescribed width as its exact one-dimensional equilibrium, and $W$ is recovered
+from an integral rather than from a fit,
+\[
+  \int \phi\,(1-\phi)\,{\rm d}y = \frac{W}{4} \quad\text{per interface},
+\]
+because for $\phi=\tfrac12[1+\tanh(2y/W)]$ the integrand is
+$\tfrac14\,{\rm sech}^2(2y/W)$, whose integral is $W/4$ exactly. An integral
+measure uses every node in the profile instead of the two or three near the
+steepest point, so it does not degrade as $W$ shrinks towards the grid. Measured
+against a prescribed $W=4.0000$: width $4.0011$, relative error $2.79\e{-4}$;
+$\max|\uu| = 2.224\e{-9}$; drift in $\sum\phi$ of $8.440\e{-13}$. The width is
+second-order accurate rather than exact --- the \emph{continuum} equilibrium is
+the $\tanh$ profile and the lattice converges to it --- so round-off is not what
+is expected here, and is not what the tolerance asks for.
+
+\paragraph{The pressure jump.} Across a curved interface
+$\Delta p = \sigma(D-1)/R$, so in two dimensions $\Delta p = \sigma/R$ and
+measuring $\Delta p$ at several radii recovers $\sigma$ with no free parameter.
+What makes this a test of the capillary stress rather than of the initial
+condition is that $\sigma$ is never handled as such anywhere in the code: it
+enters only through $\kappa = 3\sigma W/2$, a coefficient in a tensor added to
+the equilibrium's second moment, so the number coming back out is a statement
+about the whole chain. Far from the interface $\nabla\phi$ vanishes and the
+capillary stress with it, leaving the total normal stress at $\rho\cs^2$; the
+jump is therefore read straight off the zeroth moment, averaged over $r<R-2W$
+against $r>R+2W$, with the interface region excluded from both.
+
+\begin{center}\small
+\begin{tabular}{lccccc}
+\toprule
+$R$ & $\Delta p$ (half) & $\Delta p$ (final) & $\sigma=\Delta p\,R$ & rel.\ err & $\max|\uu|$ \\
+\midrule
+12.0 & $7.81376\e{-4}$ & $7.82300\e{-4}$ & $9.38760\e{-3}$ & $6.12\e{-2}$ & $5.05\e{-5}$ \\
+16.0 & $5.81377\e{-4}$ & $5.83552\e{-4}$ & $9.33683\e{-3}$ & $6.63\e{-2}$ & $5.33\e{-5}$ \\
+20.0 & $4.61264\e{-4}$ & $4.65468\e{-4}$ & $9.30935\e{-3}$ & $6.91\e{-2}$ & $5.34\e{-5}$ \\
+24.0 & $3.79953\e{-4}$ & $3.87025\e{-4}$ & $9.28860\e{-3}$ & $7.11\e{-2}$ & $5.65\e{-5}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Convergence is shown rather than assumed: $\Delta p$ is reported at
+half the run and at the end, and if those two disagreed the droplet would still
+be equilibrating and the fitted $\sigma$ would mean nothing whatever it happened
+to equal. The droplet also has to still be the droplet that was asked for. The
+area-equivalent radius $\sqrt{\sum\phi/\pi}$ comes back at $12.136$, $16.102$,
+$20.082$ and $24.068$ against nominal $12$, $16$, $20$ and $24$, and the plateaus
+hold at $\phi_{\rm in}$ between $0.999816$ and $0.999931$ against
+$\phi_{\rm out}\sim5\e{-6}$, so a jump measured against the nominal radius is
+being asked the right question. Fitting the slope of $\Delta p$ against $1/R$
+through the origin over all four radii at once gives
+$\sigma = 9.350098\e{-3}$ against a prescribed $1.000000\e{-2}$, a relative error
+of $6.50\e{-2}$, while the spread of $\Delta p\,R$ across the sweep is
+$1.06\e{-2}$.
+
+\paragraph{The law is asserted tightly, the constant is not.} The recovered
+$\sigma$ sits $6$--$7\%$ low at every radius, and that is a discretisation error
+rather than a wrong coefficient. The two failures are distinguishable: a broken
+stress destroys the $1/R$ law, whereas a coarse lattice only shifts the constant
+in front of it, which is exactly what a $1\%$ spread accompanying a $7\%$ deficit
+says. Holding the droplet's shape fixed --- $R/W=5$ and $R/N$ both constant, so
+that only the lattice spacing changes --- and refining settles it:
+
+\begin{center}\small
+\begin{tabular}{ccccc}
+\toprule
+$N$ & $R$ & $W$ & $\sigma$ & rel.\ err \\
+\midrule
+ 96 & 20 & 4 & $9.316\e{-3}$ & $6.84\e{-2}$ \\
+144 & 30 & 6 & $9.689\e{-3}$ & $3.11\e{-2}$ \\
+192 & 40 & 8 & $9.837\e{-3}$ & $1.63\e{-2}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent with fitted orders $1.94$ and $2.24$, which is the order the scheme is.
+This ladder is a separate mode of the executable (\code{-refine}) and carries its
+own assertion, that the worst order exceed $1.7$.
+
+Refining $W$ at fixed $R$ would not measure an order, and tuning it would be
+worse than useless. At fixed $R$ two errors of opposite sign compete:
+under-resolution of the profile, $O((h/W)^2)$ and negative, and the finite
+thickness of the interface against the curvature, $O(W/R)$ and positive. Measured
+at $R=28$, the deficit runs $-6.51\e{-2}$ at $W=4$, $-2.68\e{-2}$ at $W=6$,
+$-9.7\e{-3}$ at $W=8$ and $+1.00\e{-2}$ at $W=12$. It passes through zero near
+$W=10$, and a width chosen there would look excellent while measuring nothing but
+the cancellation.
+
+\paragraph{Three operator forms, and the density ratio.} Surface tension reaches
+the flow by two independent routes, and the case runs both. The stress form
+(\code{MultiphaseBGK}) puts the capillary tensor into the equilibrium's second
+moment and carries density in the zeroth, as every single-phase operator in this
+code base does; it is matched-density only. The potential form
+(\code{MultiphasePotentialBGK}) applies $F_s = \mu_\phi\nabla\phi$ as a body force
+on a distribution whose zeroth moment is a normalised \emph{pressure}, and it is
+the one that reaches a ratio. The third form is that same potential physics
+collided in central moments (\code{MultiphaseCentralMoments}, selected by
+\code{-op cm}), which is what \S\ref{sec:layered} runs by default. At a matched
+density the first two share no code beyond the phase field that feeds them, so
+their disagreement bounds both.
+
+\begin{center}\small
+\begin{tabular}{lccccc}
+\toprule
+form & $\rho_H/\rho_L$ & $\Delta p$ & $\sigma$ & rel.\ err & $\max|\uu|$ \\
+\midrule
+stress    & 1   & $4.65468\e{-4}$ & $9.30935\e{-3}$ & $6.91\e{-2}$ & $5.34\e{-5}$ \\
+potential & 1   & $4.63803\e{-4}$ & $9.27607\e{-3}$ & $7.24\e{-2}$ & $1.67\e{-5}$ \\
+potential & 10  & $4.85739\e{-4}$ & $9.71478\e{-3}$ & $2.85\e{-2}$ & $3.21\e{-6}$ \\
+potential & 100 & $4.91735\e{-4}$ & $9.83470\e{-3}$ & $1.65\e{-2}$ & $4.90\e{-7}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The two forms differ by $3.58\e{-3}$ at $R=20$ with matched densities.
+Surface tension is a property of the interface, so the recovered value must not
+move with the density ratio; the total spread over a hundredfold ratio is
+$5.59\e{-2}$, and the table shows where it comes from. The measurement gets
+\emph{better} as the ratio rises, from $7.24\e{-2}$ low at a matched density to
+$1.65\e{-2}$ at a ratio of $100$, so most of the spread is the matched-density
+row's ordinary resolution deficit rather than any dependence on the ratio itself.
+The spurious currents fall by more than an order of magnitude across the same
+sweep.
+
+The pressure column is worth reading against \S\ref{sec:gauge}. Under the stress
+form the jump rides on a background of $\rho\cs^2$: $p_{\rm in}=0.334116$ against
+$p_{\rm out}=0.333333$ at $R=12$. Under the potential form, seeded at $p=0$, the
+far field sits at $-6.8\e{-5}$ and the interior at $+3.96\e{-4}$, so the whole of
+what is stored is the Laplace jump. Reconstructing that pressure is where a
+mistake was made and then measured: the potential form stores $\tilde{p}$, and
+$p = \rho(\phi)\cs^2\tilde{p}$ requires the \emph{local} density under the default
+normalisation. Using a constant instead turned a $1.7\%$ error at a ratio of $100$
+into $19.5\%$ with the physics untouched --- a diagnostic reading the wrong
+quantity, not a scheme going wrong. The spread above is likewise normalised by
+the \emph{prescribed} $\sigma$ rather than by the smallest measured one, because a
+measured value returning negative would otherwise flip the sign of the quotient
+and turn a gross failure into an apparent pass; it did, once.
+
+\paragraph{The phase lattice.} \code{-plat} selects a D2Q5 phase field with a
+first-order equilibrium or the D2Q9 default with the full second-order one. A
+static droplet cannot tell them apart in $\sigma$ --- $9.738\e{-3}$ against
+$9.722\e{-3}$ at $R=20$, $W=6$, since $\uu$ is zero and the equilibrium's
+$\uu$-truncation has nothing to act on --- but the spurious currents halve
+between them, $3.63\e{-5}$ to $1.64\e{-5}$. The advection accuracy the
+second-order form buys needs a moving interface to show, which this case does not
+have.
+
+\paragraph{Acceptance.} Eight criteria, all passing on the run tabulated above:
+
+\begin{center}\small
+\begin{tabular}{lcc}
+\toprule
+criterion & tolerance & measured \\
+\midrule
+interface width maintained              & $1\%$      & $2.79\e{-4}$ \\
+flat interface drives no flow           & $10^{-6}$  & $2.22\e{-9}$ \\
+$\Delta p\,R$ constant across $R$       & $2\%$      & $1.06\e{-2}$ \\
+$\sigma$ at this resolution             & $10\%$     & $6.50\e{-2}$ \\
+spurious currents                       & $10^{-3}$  & $5.65\e{-5}$ \\
+$\phi$ conserved to round-off           & $10^{-11}$ & $8.72\e{-13}$ \\
+stress and potential forms agree        & $2\%$      & $3.58\e{-3}$ \\
+$\sigma$ independent of $\rho_H/\rho_L$ & $8\%$      & $5.59\e{-2}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The tolerance on $\sigma$ is deliberately loose because
+\code{-refine} asserts the order that the absolute value at any one resolution
+cannot.
+
+\subsection{Layered Poiseuille flow}
+\label{sec:layered}
+
+\code{ViscousInterfaceForce} sat in the tree from the moment the pressure form
+landed, implemented and unexercised: it is identically zero in a static droplet,
+and the cases that do excite it --- Rayleigh--Taylor, water entry --- have no
+exact answer to check against. This is the case that does, and it is registered
+under \code{ctest} as \code{layered\_poiseuille}.
+
+Two immiscible layers lie between parallel plates, driven along the channel by a
+uniform force $G$ per unit volume, fluid 1 ($\mu_1,\rho_1$) below and fluid 2
+above, no-slip at $y=\pm h$. The flow is fully developed, $\uu = u(y)\hat{x}$ with
+$\partial_x u = 0$, so the nonlinear term vanishes \emph{identically} rather than
+approximately and the steady profile solves the full Navier--Stokes equations for
+any pair of densities:
+\begin{equation}
+  u_k(y) = -\frac{G y^2}{2\mu_k} + a_k y + c, \qquad
+  a_1 = \frac{Gh}{2}\,\frac{\mu_1-\mu_2}{\mu_1(\mu_1+\mu_2)}, \qquad
+  a_2 = a_1\frac{\mu_1}{\mu_2}, \qquad
+  c = \frac{Gh^2}{\mu_1+\mu_2},
+  \label{eq:layered}
+\end{equation}
+from $u(\pm h)=0$, continuity of $u$, and continuity of the \emph{shear stress}
+$\mu\,{\rm d}u/{\rm d}y$ at the interface. The interface velocity $c$ is the
+cleanest number in the problem: one closed form, no fitting, and dependent on
+both viscosities. That the density does not appear anywhere in
+\eqref{eq:layered} is the whole point of using it here.
+
+\paragraph{What each ingredient is on the hook for.} The interpolation $\mu(\phi)$
+owns the kink in ${\rm d}u/{\rm d}y$: get it wrong and the two parabolas join at
+the wrong slope ratio. $F_\nu = \nu(\nabla\uu+\nabla\uu^{\!\top})\!\cdot\!\nabla\rho$
+is proportional to $\nabla\rho$, so it is active here and only here among the
+cases with exact answers --- a viscosity ratio alone leaves it zero. And
+$\rho(\phi)$ enters through $F_\nu$ and through the forcing prefactor but not
+through the answer, so a density ratio changes what the code must do while
+leaving what it must produce fixed. That is the kind of contrast that catches a
+term rather than a constant.
+
+The driving force is applied through the operator's external force slot as a
+uniform $G$, not through the body-force acceleration $\bm{b}$: $F_b = \rho\bm{b}$
+would drive the two layers unequally and give a different, much less clean exact
+solution. $G$ is chosen so that $c$ hits a fixed target of $0.02$, which holds
+the Mach number as the grid refines --- otherwise a finer grid is also a faster
+flow and the fitted order picks up the Mach error along with the discretisation.
+The reference fluid is $\mu_2=0.1$, $\rho_2=1$; the contrasts are a viscosity
+ratio of $5$ and a density ratio of $10$, interface width $4$, mobility $0.02$,
+on a channel $16$ cells long with solid rows top and bottom.
+
+\paragraph{Two things measured before anything is scored.} The field is seeded
+with \eqref{eq:layered} rather than with rest. Relaxation to steady state is
+diffusive and takes $O(H^2/\nu)$ steps, and the first version of this case duly
+reported an unconverged answer as a converged one; starting from the analytic
+profile leaves only the discretisation difference to relax. This does not beg the
+question, because the scheme relaxes to \emph{its own} steady state and the error
+measured is the distance between that and the exact one --- and the steadiness
+detector, a relative change below $10^{-10}$ over $500$ steps, still has to fire.
+The single-phase control reaches it at $18\,500$ and $63\,000$ steps; every
+configuration with a contrast runs to the $120\,000$-step cap.
+
+The interface also does not stay exactly where it is placed. Its $\phi=1/2$
+crossing settles a fraction of a cell off centre while the conserved integral of
+$\phi$ is unchanged, and that offset does not shrink with resolution. The exact
+solution is therefore generalised to an arbitrary interface height $s$, with
+$h_1 = h+s$ and $h_2 = h-s$,
+\begin{equation}
+  a_1 = \frac{G\,(h_2^2\mu_1 - h_1^2\mu_2)}{2\mu_1(\mu_2 h_1 + \mu_1 h_2)},
+  \qquad
+  c = \frac{G h_1^2}{2\mu_1} + a_1 h_1,
+\end{equation}
+which reduces to \eqref{eq:layered} at $s=0$, and every profile is scored against
+the interface position it actually has. Comparing against a centreline solution
+would measure where the interface ended up rather than whether the profile around
+it is right, and those are separate questions deserving separate answers.
+
+\paragraph{The contrasts, one at a time.}
+
+\begin{center}\small
+\begin{tabular}{lcccccc}
+\toprule
+configuration & $H$ & $L_2(u)$ & order & $u_{\rm iface}$ err & $y_{\rm iface}$ & $\max|F_p|/G$ \\
+\midrule
+single phase   & 32 & $2.6751\e{-4}$ & ---     & $1.13\e{-3}$ & 0.1025 & 0 \\
+               & 64 & $6.6877\e{-5}$ & $2.00$  & $2.85\e{-4}$ & 0.0905 & 0 \\
+viscosity only & 32 & $3.6187\e{-2}$ & ---     & $5.02\e{-2}$ & 0.1093 & 0 \\
+               & 64 & $2.3587\e{-2}$ & $0.62$  & $2.60\e{-2}$ & 0.0893 & 0 \\
+density only   & 32 & $2.5078\e{-2}$ & ---     & $3.41\e{-2}$ & 0.1967 & $2.20\e{2}$ \\
+               & 64 & $2.8995\e{-2}$ & $-0.21$ & $3.80\e{-2}$ & 0.2992 & $4.08\e{2}$ \\
+both           & 32 & $4.2967\e{-2}$ & ---     & $1.99\e{-2}$ & 0.1840 & $7.33\e{1}$ \\
+               & 64 & $4.2896\e{-2}$ & $0.00$  & $1.56\e{-2}$ & 0.2683 & $1.36\e{2}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The first pair is the control and says the base scheme is exact and
+second order on a problem it should solve exactly. The second is the diffuse
+interface smoothing a kink in ${\rm d}u/{\rm d}y$ over $W$ cells, which is first
+order in $W/h$ and converges accordingly; with \code{-fine} adding $H=128$ the
+column reads $3.6\e{-2}$, $2.4\e{-2}$, $1.3\e{-2}$ at orders $0.62$ and $0.82$,
+against $2.7\e{-4}$, $6.7\e{-5}$, $1.6\e{-5}$ at $2.00$ and $2.08$ for the
+control. The third pair should not happen at all. The exact profile does not
+contain $\rho$, so a density ratio alone must leave the answer unchanged, and
+instead it leaves a few per cent that refinement does not remove --- $2.5\e{-2}$,
+$2.9\e{-2}$, $2.4\e{-2}$ at $H=32$, $64$, $128$, with no order to fit. With both
+contrasts on, that residual dominates and the total stops converging as well.
+
+Splitting the error by distance from the interface separates a term that lives
+\emph{at} the interface from one that biases the whole profile, and the two need
+different explanations. For the control at $H=64$ the split is
+$3.343\e{-5}$ near against $5.792\e{-5}$ far. For the density-only case it starts
+concentrated, $2.386\e{-2}$ near against $7.706\e{-3}$ far at $H=32$, and spreads
+across the channel under refinement, $2.254\e{-2}$ against $1.824\e{-2}$ at
+$H=64$. That is the fingerprint of a force that must cancel globally rather than
+of a local stencil error.
+
+\paragraph{It is conditioning, and it is reported rather than asserted.} The
+diagnosis --- that $F_p$ scales with the pressure \emph{level}, must cancel
+against $\rho\cs^2\nabla\tilde{p}$ to a few hundred times the driving force, and
+so becomes harder to cancel as the grid refines --- is given in
+\S\ref{sec:gauge}, along with the gauge experiment that confirms it. What this
+case contributes is the measurement. Under the default local-$\rho$
+normalisation the density-only residual runs at order $-0.21$ with $|F_p|/G$
+reaching $2.20\e{2}$ at $H=32$ and $4.08\e{2}$ at $H=64$; under the
+constant-$\rho_0$ normalisation the same configuration converges at order $0.95$:
+
+\begin{center}\small
+\begin{tabular}{lcccc}
+\toprule
+normalisation & $H$ & $L_2(u)$ & order & $\max|F_p|/G$ \\
+\midrule
+local $\rho$ (default) & 32 & $2.5078\e{-2}$ & ---     & $2.20\e{2}$ \\
+                       & 64 & $2.8995\e{-2}$ & $-0.21$ & $4.08\e{2}$ \\
+constant $\rho_0$      & 32 & $1.8572\e{-2}$ & ---     & $3.79\e{2}$ \\
+                       & 64 & $9.6381\e{-3}$ & $0.95$  & $7.47\e{2}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Note what does not improve: $|F_p|/G$ is \emph{larger} under the
+constant reference, $3.79\e{2}$ against $2.20\e{2}$ at $H=32$. The gain is not
+that the term shrinks but that it stops tracking the pressure level. Neither
+normalisation dominates and neither is asserted here; the default remains
+local-$\rho$, and \S\ref{sec:gauge} says where each belongs.
+
+\paragraph{Does $F_\nu$ earn its place?} Switching it off with both contrasts on
+is the measurement that answers this, and it is the reason the case was written.
+
+\begin{center}\small
+\begin{tabular}{cccc}
+\toprule
+$H$ & $L_2$ with $F_\nu$ & $L_2$ without & ratio \\
+\midrule
+32 & $4.2967\e{-2}$ & $4.2837\e{-1}$ & $9.97$ \\
+64 & $4.2896\e{-2}$ & $5.9350\e{-1}$ & $13.84$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent An order of magnitude, growing with resolution, on top of a residual
+that the pressure force already keeps from converging. The form was checked as
+well as the presence: the LBE with this equilibrium recovers
+$\nabla\!\cdot\!(\nu S)$, not $(1/\rho)\nabla\!\cdot\!(\mu S)$, and the difference
+is exactly $\nu S\!\cdot\!\nabla\rho$, so the implemented expression is the right
+one. Substituting the plausible alternative $(\nabla\mu)\!\cdot\!S$ makes the
+error larger, $1.8\e{-1}$ at $H=32$; that reading was tried and reverted.
+
+One limitation of the term is not tested here. Its stencil reads $\uu$ at every
+neighbour including non-fluid ones, where the velocity field holds whatever the
+solver left there, so an interface touching a wall takes a one-sided derivative
+as though it were central. In this case the interface sits at mid-channel and
+never meets the plates, so the defect cannot appear --- which means the case
+establishes the term's form and its necessity, not its behaviour at a wall.
+
+\paragraph{Acceptance.} Three assertions, all passing: the single-phase control
+is second order, $2.00$ against a threshold of $1.8$; $F_\nu$ is necessary, the
+best ratio being $13.8$ against a threshold of $3$; and $\phi$ is conserved to
+$1.19\e{-11}$ against a tolerance of $10^{-9}$. The non-convergence at a density
+ratio is printed with the results and deliberately not asserted, because it is a
+known property of the formulation rather than a regression to be guarded.
+
+\subsection{A floating body: Archimedes and the metacentre}
+\label{sec:floating}
+
+Water entry has no closed form to check against, which is why it is a
+demonstrator. Hydrostatics of a floating body has two, both sharp, and neither
+carries a tunable constant; \code{validation/floating\_body} puts the volume
+penalisation of \S\ref{sec:penalisation} against both.
+
+The first is the draft. A box of height $H$ and density $\rho_b$ floating between
+fluids of density $\rho_w$ and $\rho_a$ sits at
+\begin{equation}
+  d = H\,\frac{\rho_b-\rho_a}{\rho_w-\rho_a},
+  \label{eq:draft}
+\end{equation}
+which is Archimedes with the air's buoyancy \emph{kept} rather than dropped. At
+the density ratio of $50$ used here the air carries $2$ per cent of the answer,
+so discarding it would be a larger error than anything measured below.
+
+The second is the stability. A box floats upright only if its metacentric height
+is positive; in two dimensions, with waterplane second moment $B^3/12$ and
+displaced area $Bd$,
+\begin{equation}
+  GM = BM - BG = \frac{B^2}{12\,d} - \frac{H-d}{2},
+  \label{eq:gm}
+\end{equation}
+and the \emph{sign} of that number decides whether a heeled box returns to
+upright or lies down.
+
+\paragraph{Why the second one is the test worth having.} Two boxes are run: a
+raft with $B=2H$ and a pillar with $B=H/2$. They have the same area, the same
+density, the same gravity, the same resolution and the same code path, and differ
+only in which side is longer --- $GM=+13.61$ against $-6.80$ from \eqref{eq:gm}.
+A computed quantity has to change sign between them, and no tolerance has to be
+chosen to notice. Almost any error in the coupling --- a sign in the righting
+moment, the first moments $\bm{S}$ dropped, the inertia taken from the nominal
+rectangle rather than the smoothed one --- would make both boxes do the same
+thing, and that is precisely what this pair cannot tolerate.
+
+Both cases use $\rho_w/\rho_a=50$, $\rho_b=0.5\,\rho_w$, $g=2\e{-4}$,
+$\nu=0.02$, an interface width of $4$ cells and $H=32$, on $192\times128$ (raft,
+upright) and $128\times128$ (pillar), with the pressure-form central-moment
+operator and a D2Q9 phase field. Surface tension is set to exactly zero on
+purpose: both answers are hydrostatic, the Bond number at these proportions is
+in the thousands, and capillarity would contribute far less than the
+discretisation while adding its own spurious currents to the measurement. The
+interface stays sharp regardless --- that is the conservative Allen--Cahn
+operator's work, and it does not go through $\kappa$. Run lengths are set from
+the linearised roll stiffness $(\rho_w-\rho_a)\,g\,B d\,|GM|$ against the body's
+own inertia: $2538$ steps to the period for the raft, $1796$ for the pillar,
+where the same number is instead the e-folding time of the capsize. Averages are
+taken over the second half of each run only, because the tank is closed and
+periodic in $x$, so the body's own wake wraps round and comes back; a single
+instantaneous draft carries that wave and the mean does not.
+
+\paragraph{The wall-sided correction, and a discrepancy that was nearly charged
+to the solver.} The righting couple is read at step $0$, where the fluid is still
+at rest and hydrostatic, so there is nothing in it but the integral of
+$\chi\rho\,\bm{r}$ and it can be put straight against metacentric theory. The
+raft is released at $15^\circ$, which is not a small angle: as it heels the
+emerging and immerging wedges stop being mirror images and the arm grows to
+\begin{equation}
+  GZ = \Big(GM + \tfrac12 BM \tan^2\theta\Big)\sin\theta ,
+  \qquad
+  T = -(\rho_w-\rho_a)\,g\,B\,d\;GZ .
+  \label{eq:wallsided}
+\end{equation}
+For the raft the quadratic term is $+5.7$ per cent of the linear arm, and it
+holds while the deck stays dry and the bilge stays wet --- out to $26^\circ$ at
+these proportions. Against the textbook small-angle formula the measured couple
+was about $7$ per cent out, of which \eqref{eq:wallsided} accounts for most; the
+correction was applied only after the discrepancy had been found, and without it
+the remainder would have been charged to the solver. With it the measured
+$-37.070$ stands against $-36.628$, $1.2$ per cent. For the pillar at $5^\circ$
+the quadratic term is negligible and the comparison is $1.4205$ against
+$1.4559$, $2.4$ per cent; the upright box at zero heel returns $-6.65\e{-16}$,
+which is the couple being zero rather than small.
+
+\begin{center}\small
+\begin{tabular}{lrr}
+\toprule
+ & measured & expected \\
+\midrule
+draft $/H$ (Archimedes)                  & $0.4991$   & $0.4898$ \\
+waterline slip on the hull $/d$          & $0.0175$   & $0$ \\
+righting couple, raft (wall-sided)       & $-37.070$  & $-36.628$ \\
+righting couple, pillar (wall-sided)     & $+1.4205$  & $+1.4559$ \\
+raft tilt, rms over second half (deg)    & $1.96$     & $<7.5$ \\
+pillar tilt, final (deg)                 & $64.51$    & $>45$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The draft and slip are held to $6$ per cent, the two couples to $5$.
+The raft, released at $15^\circ$, settles to an rms tilt of $1.96^\circ$. The
+pillar, released at $5^\circ$, is at $64.5^\circ$ after three e-folding times
+and still turning; its resting state is a raft with $B$ and $H$ exchanged,
+$GM=+6.8$, but reaching that far equilibrium is a much longer run than a
+regression test should be, so what is asserted is only that it has left upright
+for good --- past $45^\circ$, where the rotated raft's righting arm has taken
+over --- and the final angle is printed for whoever wants to look.
+
+\paragraph{The draft is measured twice, and the pair is the interesting part.}
+The geometric route takes the body's centre height against the free surface,
+the latter read as the water column height $\int\phi\,dy$ far from the body,
+which absorbs the level rise the body's own displacement causes in a closed
+tank. The mass route inverts \eqref{eq:draft} through $m_f=\int\chi\rho$, the
+fictitious fluid mass the rigid-body solve actually uses for buoyancy. The
+second is nearly circular --- $m_f=m_b$ is the fixed point of the solve, so on
+its own its $0.4905\,H$, $0.14$ per cent off Archimedes, says only that the
+solve converged. The \emph{difference} is not circular: at $0.4991\,H$ against
+$0.4905\,H$ it is $1.8$ per cent, and it \emph{bounds} the amount by which the
+phase field inside the penalised region has drifted away from the free surface
+outside it. That is the one failure mode this coupling has that nothing else in
+the suite would catch, because there is no contact-line model: the waterline on
+the hull is advected with the body rather than pinned to the water, and if it
+slides then buoyancy is being computed for a body that is not the one on screen.
+It is a bound and not a measurement, because the same gap also contains the
+smoothed hull edge, the diffuse interface and the column integral of $\phi$, and
+those do not separate here. What can be said is that the gap is small, and that
+it is the right quantity to watch if a case ever puts a body somewhere the
+interface has to move along it.
+
+\paragraph{The unit test.} \code{tests/test\_body} runs no flow. It pins down the
+three things a simulation would hide rather than expose, in $29$ checks. First,
+that the indicator turns: $\chi$ is evaluated in the body frame, so a rotation
+applied to the wrong side of the transform gives a shape that turns the wrong
+way, which in a symmetric case looks like nothing at all. The shape used is
+deliberately not square --- a square would rotate onto itself and every check
+would pass without the transform doing anything --- and its area is rotation
+invariant to $6.1\e{-6}$ at $30^\circ$ and $2.2\e{-16}$ at $90^\circ$, matching
+$2h_x\!\cdot\!2h_y$ to $4.8\e{-5}$. Second, that the $3\times3$ sway--heave--roll
+system, which is solved in closed form through its Schur complement, actually
+satisfies its own equations: the solution is substituted back and the largest row
+residual, scaled by the size of the terms in the row, is zero to round-off at
+$m_b/m_f$ of $5$, $1$ and $0.1$. The middle one is the case the classical Uhlmann
+arrangement divides by zero on and the last is the one it gets the sign wrong on,
+and the check that this is nevertheless the \emph{same} equation is that with the
+first moments zeroed and rotation locked the closed-form reaction still satisfies
+$(m_b-m_f)\,d\bm{U} = \bm{R} + (m_b-m_f)\bm{g}$ to $6.0\e{-17}$ wherever that
+relation is defined. Third, that the reported reaction is the force that was
+written: $\bm{R}$ and the torque are returned in closed form rather than reduced
+from the force array, which is worth a full sweep a step and is exact only if the
+closed form is right, so the test sums the array that was actually populated --- 
+in a sheared velocity field over a stratified density, so that all seven
+integrals are non-zero and nothing cancels by symmetry --- and finds $R_x$ and
+$R_y$ agreeing to $7.1\e{-15}$ and $1.4\e{-14}$ on a reaction of magnitude
+$17.469$, and the torque to $1.4\e{-14}$ on $58.544$. Alongside these: a body
+alone with gravity falls at exactly $g$ and does not start spinning, locking
+rotation leaves no roll, locking translation leaves the roll row standing alone
+rather than solving the $3\times3$ and discarding two rows, the out-of-plane
+force is identically zero, and no force is left behind on ground the body has
+vacated.
+
+\paragraph{The second moment is larger than the rectangle's, and must be.} The
+indicator's area matches the sharp rectangle to $5\e{-5}$, but its second moment
+exceeds it by $2.55$ per cent at a smoothing width of $1.5$ cells, and the test
+asserts that excess is positive and below $6$ per cent rather than asserting it
+away. The tanh smoothing moves equal amounts of indicator across each face, and
+the $r^2$ weight values what went out more highly than what came in, so a larger
+second moment is the correct answer. This is the whole reason mass and inertia
+are taken as integrals of $\chi$ rather than from textbook formulae: a body given
+the nominal rectangle's inertia would roll a few per cent too fast.
+
+\paragraph{FP32.} Every acceptance row reproduces to the digits printed above
+except the waterline slip, $0.0176$ against $0.0175$, and the mass draft's
+departure from Archimedes, $0.15$ per cent against $0.14$. The unit test passes
+all $29$ checks; the $3\times3$ residuals rise from zero to $7.0\e{-9}$,
+$1.5\e{-8}$ and $5.8\e{-8}$ at the three mass ratios, against a tolerance of
+$2\e{-5}$. Everything algebraic in the test is checked relative to the size of
+the terms in it --- the $3\times3$ carries masses of order $10^5$ against
+accelerations of order $10^{-4}$, so an absolute tolerance would be meaningless
+in FP64 and unsatisfiable in FP32 --- and the Schur complement is nowhere near
+cancelling for these numbers, $|\bm{S}|^2\!/A$ being a few per cent of $B$, so
+single precision loses only its own epsilon.
+
+\paragraph{What is not tested.} The roll \emph{period}, which would need the added
+inertia of the entrained water and has no closed form; only the sign of the
+stiffness and the magnitude of the couple at release are asserted. The draft of a
+body small enough for surface tension to matter, at Bond number of order one,
+which this formulation cannot produce because it has no contact line and
+therefore no surface-tension contribution to the draft at all. Ballast, since the
+body's centre of mass is taken to be the centre of the rectangle --- which is
+what lets its own weight drop out of the roll equation, and is exactly the
+standard way of making a tall body float upright that this cannot express. And
+any of it in three dimensions, where the rigid-body solve would be a $6\times6$
+with a rotating inertia tensor and a quaternion; the fluid side would not change.
+
 
 %==============================================================================
 \section{Validation campaign}
@@ -4168,6 +5671,253 @@ does not reach the top --- it is not a general bound.
 
 
 %==============================================================================
+\section{Demonstrator: two-phase flow with a moving body}
+\label{sec:mpdemo}
+
+The two cases in this section are demonstrators, and the distinction the
+repository draws is worth repeating before either of them is shown. A validation
+case has something to be right against --- an analytic solution, a published
+benchmark, a convergence rate --- and fails if it misses it. A demonstrator has
+none of that: it shows the solver running on a problem the rest of the suite
+cannot express, and the only thing it can fail is to crash. The two do not share
+a directory, and no demonstrator is registered with \code{add\_test}. The same
+rule governed the aorta (\S\ref{sec:aorta}) and the city (\S\ref{sec:urban}),
+and it governs these: \textbf{no number in this section is a claim of accuracy}.
+The accuracy claims for the multiphase module are the static droplet, the
+layered channel and the floating box, and they are made where those cases are.
+What is shown here is an interface that rolls up, reconnects and keeps going,
+and a rigid body that falls into one under its own weight.
+
+\subsection{Rayleigh--Taylor instability}
+\label{sec:rt}
+
+Heavy fluid over light in a box $W$ wide and $4W$ tall, periodic in $x$, no-slip
+on the top and bottom, with the interface given a single-mode perturbation at
+the box wavelength,
+\[
+  y_i(x) = 2W + 0.1\,W\cos\frac{2\pi x}{W}.
+\]
+The controlling groups are the Atwood number and a Reynolds number built on the
+free-fall velocity,
+\begin{equation}
+  \mathrm{At} = \frac{\rho_H-\rho_L}{\rho_H+\rho_L}, \qquad
+  \mathrm{Re} = \frac{W\sqrt{gW}}{\nu}, \qquad
+  t^{*} = t \Big/ \sqrt{\frac{W}{g\,\mathrm{At}}},
+  \label{eq:rtgroups}
+\end{equation}
+and the driver takes $g = U^2/W$ so that $U$ \emph{is} the free-fall velocity
+and $\nu = WU/\mathrm{Re}$ follows. Reporting time as $t^{*}$ makes runs at the
+same $\mathrm{At}$ comparable regardless of the lattice numbers underneath. The
+defaults are $W = 128$, $\mathrm{At} = 0.5$, $\mathrm{Re} = 256$, $U = 0.04$,
+interface width $W_{\rm int} = 5$, mobility $0.02$ and $\sigma = 1\e{-4}$, on
+D2Q9 for both the fluid and the phase field. Only the pressure-based operator is
+used: it is the only one here that reaches a density ratio at all.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[height=0.42\textheight]{rt_phi_panels.png}
+\caption{Rayleigh--Taylor instability at $\mathrm{At}=0.5$, $\mathrm{Re}=256$,
+$W=128$, central-moment operator. Phase field at
+$t^{*} = 0$, $1$, $2$ and $3$. The single-mode perturbation steepens into a
+falling spike, the spike rolls up into a mushroom, and by $t^{*}=3$ the stem has
+gone secondarily unstable --- the beads along it are Kelvin--Helmholtz billows on
+the shear between the descending spike and the rising fluid beside it. Nothing
+here is a measurement; what it shows is an interface that rolls up, reconnects
+and keeps going without the phase field being reinitialised.}
+\label{fig:rt}
+\end{figure}
+
+\paragraph{The initial condition is hydrostatic through the diffuse interface,
+and it has to be.} The pressure is seeded by integrating the \emph{actual}
+density profile away from the interface rather than a step, which the $\tanh$
+profile makes closed-form. With $\delta = y - y_i(x)$ and
+$\phi = \tfrac12\big(1+\tanh(2\delta/W_{\rm int})\big)$,
+\begin{equation}
+  p = -g\,I(\delta), \qquad
+  I(\delta) = \rho_L\,\delta
+    + \tfrac12(\rho_H-\rho_L)\Big[\delta
+    + \tfrac{W_{\rm int}}{2}\ln\cosh\frac{2\delta}{W_{\rm int}}\Big],
+  \label{eq:rthydro}
+\end{equation}
+and the populations are seeded with $\tilde p = p/(\rho(\phi)\cs^2)$, not with a
+uniform $\tilde p$ --- a uniform one starts the box with the whole hydrostatic
+imbalance as an acoustic transient, larger than the instability it is meant to
+be watching. Assuming a sharp interface instead leaves an imbalance of order
+$(\rho_H-\rho_L)\,g\,W_{\rm int}$ smeared over the interface. That is $1\e{-4}$
+at $\mathrm{At} = 0.5$ and invisible; at $\mathrm{At} = 0.998$ it is $0.25$,
+$\tilde p$ on the light side starts at $0.75$, $|\uu|$ reaches the free-fall
+velocity within thirty steps --- before the instability could have grown at all
+--- and the run is gone by step $120$. A diffuse-interface model deserves a
+diffuse-interface initial condition. The $\ln\cosh$ is evaluated as
+$|z| + \log_1\!p(e^{-2|z|}) - \ln 2$ rather than through $\cosh$, which
+overflows in the far field at any useful box height.
+
+\paragraph{The pressure zero goes at the interface.} Only $\nabla p$ is
+physical, so the level is free in the continuum and is not free on the lattice:
+$\tilde p = p/(\rho\cs^2)$, so a constant added to $p$ is not a constant added
+to $\tilde p$ when $\rho$ varies, and both of the large terms that cancel at the
+interface --- $\rho\cs^2\nabla\tilde p$ and $F_p = -\tilde p\,\cs^2\nabla\rho$
+--- scale with it. Since $p$ is continuous across the interface while $\rho$ is
+not, $\tilde p$ jumps by the density ratio wherever $p$ is not near zero. Two
+measurements of the cost. Referencing $p$ to $\rho_L\cs^2$, a uniform physical
+pressure, made this case diverge inside $424$ steps at $\mathrm{At} = 0.5$, with
+$|\uu|$ at twice the free-fall velocity at step zero, before anything had moved.
+Referencing to the top of the box is harmless at $\mathrm{At} = 0.5$, where
+$g\rho_H\,2W$ is $1\e{-2}$, and is not at $\mathrm{At} = 0.998$, where the same
+quantity is $3.2$ and $\tilde p$ in the light fluid starts at $9.6$.
+
+\paragraph{The collision operator is not a cosmetic choice at high Reynolds
+number.} BGK relaxes every mode at $\omega$, so as $\omega\to2$ the
+non-hydrodynamic modes ring instead of decaying; at $\mathrm{Re} = 30000$ on a
+$128$-wide box $\omega = 1.99795$. Run with \code{-op bgk} the case diverges at
+$t^{*} = 1.5$, where the central-moment operator completes $t^{*} = 3$. That is
+the whole of the argument for a moment operator here, and it is why \code{-op cm}
+is the default.
+
+\paragraph{A known artefact, kept as evidence.} At $\mathrm{At} = 0.998$ ---
+a density ratio of $999$ --- BGK completes the run and produces a phase field
+that is smooth and physically sensible, while its velocity field is dominated by
+a one-cell alternating mode measured $70\times$ stronger than the same case at a
+density ratio of $3$. Grid-scale oscillation that BGK does not damp is exactly
+what the equations predict at that $\omega$, and this measurement is what
+motivated the central-moment operator rather than a consequence discovered
+after it. The clip of that run is retained for that reason and is not a result.
+
+\paragraph{The renderer is a separate program, deliberately.} The case writes
+raw fields, three per frame, in \code{FieldDump.hpp}'s format, and
+\code{render\_rt} turns them into pictures. Welding a rasteriser to the
+simulation makes every change of colour map cost a full re-run --- eight and a
+half minutes at $W = 192$ to alter a hue --- against $2.6$ seconds to re-render
+$181$ frames. One detail of that renderer is a measurement rather than a
+preference: the vorticity scale calibrates on the \emph{last} frame, because the
+first frame of this case is a fluid at rest whose 99.9th-percentile vorticity is
+round-off, $1.4\e{-7}$ against the $6.2\e{-3}$ the developed flow reaches, and
+calibrating there puts the whole film at full saturation. A percentile rather
+than a maximum, so that one hot cell cannot flatten everything else.
+
+Three clips live in \code{demonstrator/anim/}. They are not reproduced as
+figures: a still cannot show a reconnection, which is the thing being
+demonstrated.
+
+\begin{center}\small
+\begin{tabular}{ll}
+\toprule
+file & what it shows \\
+\midrule
+\code{rayleigh\_taylor.mp4}         & $\mathrm{At}=0.5$, $\mathrm{Re}=256$ --- the reference case \\
+\code{rayleigh\_taylor\_re30000.mp4} & $\mathrm{At}=0.1$, $\mathrm{Re}=30000$, central moments \\
+\code{rayleigh\_taylor\_at998.mp4}   & $\mathrm{At}=0.998$ under BGK --- the artefact above \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two things in this case are not to be trusted, both stated in the module headers
+and both live here. The interface never touches a wall within $t^{*} = 3$, which
+is what makes it legitimate to run with no wetting condition; take it further and
+the spike reaches the floor, and what happens there is not modelled. And the
+pressure form's $F_p$ and the LBE's own pressure gradient are different discrete
+operators whose mismatch scales with the density jump and with
+$1/W_{\rm int}^{2}$, so a well-resolved interface matters more here than the
+phase-field literature's usual $W_{\rm int} = 4$ suggests.
+
+\subsection{Water entry of a square}
+\label{sec:waterentry}
+
+A square dropped into a free water surface: approach, impact, cavity, splash-up
+jets, closure. The domain is $6L\times7L$ for a square of side $L$, periodic in
+$x$, with a floor and a lid, and the free surface flat at $y = 4L$. Gravity is
+set from the release height, $g = U^2/(2\,h\,L)$ with $h$ the drop in body
+widths, so the square arrives at the reference speed $U$; time is reported as
+$tU/L$. The defaults are $L = 48$, a density ratio of $50$,
+$\mathrm{Re} = 2000$, $U = 0.05$ and a body twice the density of the water. Both
+phases are given the same kinematic viscosity rather than the true $15\!:\!1$
+air-to-water ratio: the air's only job in this problem is to be light and get out
+of the way, and its physical viscosity buys nothing while costing stability at
+these relaxation rates.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{we_float_panels.png}
+\caption{Water entry of a square at $0.6$ times the water's density, released at
+$25^\circ$ from one body width above the surface; $L=48$, density ratio $50$,
+$\mathrm{Re}=2000$. Phase field above, out-of-plane vorticity below, at
+$tU/L = 0$, $2.4$, $3.3$ and $16.0$. The square strikes on one corner, sheds
+vortices of \emph{opposite} sign from the two corners --- the imbalance between
+them is what turns it --- sinks past its draft, and returns upright and floating.
+A body lighter than the fluid it displaces is the case the classical
+fictitious-mass arrangement cannot express at all (\S\ref{sec:penalisation}).}
+\label{fig:waterentry}
+\end{figure}
+
+\paragraph{It falls rather than being pushed.} De Rosis and Enan run this
+problem with a Peskin immersed boundary and a \emph{prescribed} constant entry
+velocity. Here the body is coupled by volume penalisation, the reaction on it is
+known at every node for free, and it closes Newton's equations --- so the
+deceleration on impact is a result rather than an input. That is the harder
+direction, and it is the reason the coupling had to be arranged so that the body
+and the fluid are solved at the same instant: the classical fictitious-mass step
+divides by $m_b - m_f$, which vanishes for a neutrally buoyant body and changes
+sign for a light one, so the floating case --- the only interesting one, since
+floating is what a density ratio is \emph{for} --- is precisely what that
+arrangement cannot express.
+
+\paragraph{The floating case.} Measured at \code{-rhob 0.6}, the square enters,
+stops, reverses at $tU/L = 5.0$ and rises through $0.56\,L$ before falling back.
+Nothing in that sequence is available to a formulation whose denominator has
+already changed sign, and it is the clearest single demonstration that the
+coupling is well posed across the whole mass range rather than on one side of
+it.
+
+\paragraph{The tilt case.} \code{-theta} releases the square rotated, and the
+roll follows from the same reaction: an off-axis square strikes one corner
+first, the reaction on that corner is not through the centre, and it slaps flat
+--- the reason a belly-flop hurts. The rigid-body solve is a coupled $3\times3$
+in sway, heave and roll, coupled because the first moments of the fictitious
+fluid mass about the body centre are non-zero the moment the body straddles an
+interface, with half of it standing in water and half in air. It is also the
+harshest test of the coupling here, since the impact torque arrives over a
+couple of steps. The hydrostatics the case rests on --- draft, righting couple,
+metacentric sign --- is checked against Archimedes and metacentric theory in
+\code{validation/floating\_body}, which is where those numbers are; this case
+asserts nothing.
+
+\paragraph{One failure that was a driver bug, not a model one.} The body's
+effective mass is $m_b - \int\chi\rho$, and the penalisation reads $\rho$ off the
+phase field. The conservative Allen--Cahn form keeps $\phi$ close to $[0,1]$ but
+does not guarantee it, and an unclamped interpolant lets that bracket collapse or
+change sign --- which is a runaway in Newton's equation rather than in the flow.
+The signature was unambiguous once looked for: the fluid stayed finite at
+$\max|\uu| = 2.1\e{-2}$ while the body left the domain at $5\e{18}\,U$. The
+driver now clamps the interpolant with the same expression the collision
+operator's equation of state uses, and for the same reason.
+
+\paragraph{There is no exact answer here, which is why this is a demonstrator.}
+Wagner's slamming theory covers a \emph{wedge}, whose wetted length grows
+smoothly; a flat-bottomed square has a theoretically singular impact pressure at
+first contact and no closed form at all. What can honestly be shown is the
+qualitative sequence and a force history whose shape is physical, not a number
+to quote. There is also no contact-line model, so the angle at which the free
+surface meets the square's sides is not physics: read the splash and the cavity,
+which are inertia-dominated, not the meniscus, which is not.
+
+\begin{center}\small
+\begin{tabular}{@{}l@{\quad}p{0.55\textwidth}@{}}
+\toprule
+file & what it shows \\
+\midrule
+\code{water\_entry.mp4}          & upright, body twice the water's density, ratio $50$ \\
+\code{water\_entry\_ratio800.mp4} & the same entry at a density ratio of $800$ \\
+\code{water\_entry\_floating.mp4} & \code{-rhob 0.6 -theta 25}: corner first, slaps flat, sinks past its draft, returns upright \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The third is the one the previous formulation could not produce at all, and it
+is the clearest picture of what the roll does: the square strikes one corner,
+sheds a vortex pair of opposite signs from the two corners, and the imbalance
+between them is what turns it.
+
+%==============================================================================
 \section{A second implementation, in CUDA}
 \label{sec:cuda}
 
@@ -4707,6 +6457,9 @@ executable & role \\
 \code{validation/galilean}        & frame invariance across operators \\
 \code{validation/thermal}         & scalar transport $+$ one coupled convection case \\
 \code{validation/mhd}             & resistive decay, Alfv\'en wave, Orszag--Tang divergence \\
+\code{validation/laplace}         & $\Delta p = \sigma/R$, spurious currents, density-ratio sweep \\
+\code{validation/layered\_poiseuille} & two-fluid channel: $\mu(\phi)$, $\bm{F}_\nu$, the pressure force \\
+\code{validation/floating\_body}  & Archimedes' draft and the sign of the metacentric height \\
 \midrule
 \code{validation/grid\_convergence}   & full lattice $\times$ operator sweep, CSV \\
 \code{validation/natural\_convection} & Rayleigh sweep against the benchmark \\
@@ -4884,6 +6637,99 @@ the fitted rate is blamed on the scheme.
 
 \item \textbf{Performance figures are from a compute-bound machine} and do not
   predict GPU behaviour (\S\ref{sec:perf}).
+
+\item \textbf{There is no contact-line or wetting model.} \code{PhaseWall} is
+  zero-flux on the phase populations, which is correct for the transport but sets
+  no contact angle, and the gradient stencil reads whatever $\phi$ the wall node
+  holds; a penalised body is invisible to the phase field, which is advected by
+  the fluid velocity alone. The consequence is measurable rather than notional:
+  in \code{validation/floating\_body} the draft taken from the fictitious mass
+  and the draft taken from the geometry differ by $1.8\%$, and that gap
+  \emph{bounds} how far the waterline slides on the hull without separating it
+  from the discretisation of either measurement. For a small enough body there
+  is also no surface-tension contribution to the draft, so a Bond number of
+  order one is out of scope. An interface should not be put against a wall, and
+  the Rayleigh--Taylor demonstrator is legitimate only because its spike does
+  not reach the floor within $t^{*}=3$.
+
+\item \textbf{The phase field has no open boundary.} The scalar's donor
+  machinery (\S\ref{sec:scalaroutflow}) would port, with the same second pass
+  and the same fence, but it is not written. Every multiphase case here is
+  therefore periodic in one direction and closed by no-slip walls in the other;
+  an interface that must leave the domain is not available.
+
+\item \textbf{There are two pressure normalisations and neither dominates.} With
+  $p = \rho(\phi)\cs^2\tilde p$ the recovered mismatch is
+  $F_p = -\tilde p\,\cs^2\nabla\rho$, which scales with the pressure
+  \emph{level} and is amplified by the density ratio; with a constant
+  $p = \rho_0\cs^2\tilde p$ it becomes $\cs^2(\rho-\rho_0)\nabla\tilde p$ and
+  scales with the gradient. On the layered channel the first does not converge
+  at all --- fitted order $-0.21$, with $\max|F_p|/G$ at $220$ and $408$ for
+  $H = 32$ and $64$ --- while the second converges at $0.95$; a gauge shift in
+  $\tilde p$ that changes no physics moves the error seventeenfold under the
+  first and about twofold under the second. It is not a free win, and what does
+  \emph{not} improve is the size of the term: $F_p/G$ is \emph{larger} under
+  $\rho_0$, $379$ against $220$ at $H = 32$. The recovered pressure term becomes
+  $-(\rho_0/\rho)\cs^2\nabla\tilde p$, so one phase always pays: $\rho_0=\rho_L$
+  diverges at a Laplace jump at a ratio of $10$ and above, on a case the
+  local-$\rho$ form handles at a ratio of $100$, and $\rho_0=\rho_H$ gives the
+  light phase an effective sound speed of $1.83$ lattice units per step at a
+  ratio of $10$ and diverged inside $500$ steps. The default stays local-$\rho$
+  because that is what every validated result in this tree was obtained with.
+
+\item \textbf{The multiphase central-moment operator does not run on D3Q19.}
+  It is built on \code{ProductBasis}, and the \code{static\_assert} says so: a
+  product lattice is required --- D2Q9 or D3Q27 --- and D3Q19 would need the
+  monomial basis and its own equilibrium central moments. The pressure-form BGK
+  operator carries no such restriction, asking only for a Navier--Stokes
+  lattice, so a D3Q19 two-phase run is possible at single-relaxation-time
+  quality --- which is exactly the quality that failed at $\mathrm{Re}=30000$ in
+  \S\ref{sec:rt}.
+
+\item \textbf{Shifted storage is unavailable to the multiphase operators.}
+  \code{ShiftedPopulations} centres the stored variable on $\tilde p = 1$, which
+  is precisely the pressure gauge that must be avoided at a density ratio, and
+  it assumes a reference density of exactly $1$ --- at a ratio of $10$ the
+  stored populations are no longer small and the shift stops buying anything.
+  \code{MultiphaseCentralMoments} therefore declares \code{RawPopulations}, and
+  the FP32 accuracy argument that shifted storage exists for does not apply to
+  these cases.
+
+\item \textbf{The rigid body is two-dimensional.} \code{PenalisedBody} carries
+  one angle and one angular velocity about $z$, and says so in the compiler's
+  voice as well as in prose: instantiated on a 3D lattice it would silently
+  model an infinite prism. A three-dimensional body is a $6\times6$ system with
+  a rotating inertia tensor and a quaternion, and does not exist here. The fluid
+  side would not change.
+
+\item \textbf{The body is of uniform density.} Its centre of mass is taken to be
+  the centre of the rectangle, which is what lets its own weight drop out of the
+  roll equation and leaves $-(\bm S\times\bm g)$ as the whole righting couple. So
+  the metacentric height follows from the shape and the draft alone ---
+  $+13.61$ for the raft and $-6.80$ for the pillar in
+  \code{validation/floating\_body}, the two boxes differing only in which side is
+  longer --- and ballast low in a hull, the standard way to make a tall body
+  float upright, is exactly what cannot be expressed. It would need a second
+  centre, a metacentric height that no longer follows from the draft, and a
+  weight torque restored to the roll row.
+
+\item \textbf{There is no collision model.} Two bodies, or a body meeting a
+  wall, will interpenetrate: nothing computes a contact force. The floor stop in
+  the water-entry demonstrator is a clamp in the driver on the square's diagonal
+  reach, and it is a clamp, not physics.
+
+\item \textbf{The only body shape is a rectangle.} \code{Rect::chi} is the sole
+  indicator provided. Anything with a signed distance function drops straight
+  in, and nothing else does.
+
+\item \textbf{Penalisation has no sub-cell surface.} The body is resolved to the
+  smoothing width of its indicator, so a pressure read at the face of the square
+  is a smoothed pressure over a cell or two, and the draft is resolved to the
+  interface width. Integrated force is far more trustworthy than local pressure
+  here, which is the usual situation with this family of methods. The smoothing
+  is not free of bias either: at a width of $1.5$ cells the indicator's second
+  moment exceeds the sharp rectangle's by $2.55\%$, which is why mass and inertia
+  are taken from $\chi$ rather than from the nominal dimensions.
 \end{enumerate}
 
 %==============================================================================
