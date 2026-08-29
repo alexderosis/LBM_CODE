@@ -58,7 +58,14 @@ static void write_case(const std::string& dir, Index nx, Index ny, Index nz,
 }
 
 int main(int argc, char** argv) {
-  const std::string dir = (argc > 1) ? argv[1] : ".";
+  // The first argument that is NOT a flag. Kokkos parses its own --kokkos-*
+  // options but leaves them in argv, so taking argv[1] blindly makes a scratch
+  // directory out of "--kokkos-num-threads=4" and the run dies trying to write
+  // into it. This is the only registered test that takes a positional argument,
+  // and it broke the moment the suite started passing a thread count.
+  std::string dir = ".";
+  for (int i = 1; i < argc; ++i)
+    if (argv[i][0] != '-') { dir = argv[i]; break; }
   std::printf("\nHeight-field geometry reader\n%s\n\n", std::string(70, '=').c_str());
 
   const Index nx = 7, ny = 5, nz = 9;

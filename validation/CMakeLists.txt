@@ -2,7 +2,7 @@ foreach(v poiseuille decaying_flows galilean thermal mhd regularized hartmann sc
   add_executable(${v} ${v}.cpp)
   target_link_libraries(${v} PRIVATE lbm)
   if(LBM_BUILD_TESTS)
-    add_test(NAME ${v} COMMAND ${v})
+    add_test(NAME ${v} COMMAND ${v} ${LBM_TEST_ARGS})
   endif()
 endforeach()
 

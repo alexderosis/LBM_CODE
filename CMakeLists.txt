@@ -116,6 +116,34 @@ target_compile_options(lbm INTERFACE
 add_executable(lbm_app src/app/main.cpp)
 target_link_libraries(lbm_app PRIVATE lbm)
 
+#-------------------------------------------------------------------------------
+# Threads for the test suite.
+#
+# The Threads backend defaults to ONE thread and ignores OMP_NUM_THREADS, so
+# without this every test runs serial. That is not a correctness problem --
+# CPU results are bitwise reproducible across thread counts, which is what makes
+# it safe to do at all -- but it is most of the suite's wall time. Measured on
+# `laplace`: 93.6 s serial against 33.1 s on four threads.
+#
+# FOUR, not the core count. This was developed on an M1 with four performance
+# cores and four efficiency ones, where eight threads measured 39% SLOWER than
+# four on the Rayleigh-Taylor case; cmake's ProcessorCount would report eight and
+# pick the worse number. Override for a machine with a different shape, or set 0
+# to pass nothing and get the old serial behaviour.
+#-------------------------------------------------------------------------------
+set(LBM_TEST_THREADS 4 CACHE STRING
+    "Threads passed to each test; 0 passes nothing and runs them serial")
+
+set(LBM_TEST_ARGS "")
+if(LBM_TEST_THREADS GREATER 0)
+  if(Kokkos_ENABLE_THREADS OR Kokkos_ENABLE_OPENMP)
+    set(LBM_TEST_ARGS --kokkos-num-threads=${LBM_TEST_THREADS})
+    message(STATUS "LBM: tests run with ${LBM_TEST_THREADS} thread(s)")
+  else()
+    message(STATUS "LBM: no host-parallel backend, tests run serial")
+  endif()
+endif()
+
 if(LBM_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
