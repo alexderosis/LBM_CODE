@@ -261,9 +261,13 @@ static Case run(Index N, double radius, double sigma, double W, double tau,
     for (Index y = 0; y < N; ++y)
       for (Index x = 0; x < N; ++x) {
         const Index id = d.id(x, y);
+        // p = rho(phi) cs2 p~: this case runs the DEFAULT local-rho
+        // normalisation, so the local density is what converts p~ to a
+        // pressure. Reconstructing with a constant instead silently reports
+        // the wrong pressure jump -- measured, it turned a 1.7% error at a
+        // ratio of 100 into 19.5%, with the physics untouched.
         double pv = double(h(id)) / 3.0;
-        if constexpr (pot)
-          pv *= rho_l + double(hf(id)) * (rho_h - rho_l);
+        if constexpr (pot) pv *= rho_l + double(hf(id)) * (rho_h - rho_l);
         const double dx = double(x) - double(ctr), dy = double(y) - double(ctr);
         const double r = std::sqrt(dx * dx + dy * dy);
         if (r < lo)      { si += pv; ++ni; }

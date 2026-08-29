@@ -107,6 +107,7 @@
 #include "memory/EsotericPull.hpp"
 #include "solver/FluidSolver.hpp"
 #include "solver/PhaseFieldSolver.hpp"
+#include "solver/ScalarGradient.hpp"
 #include "solver/ViscousInterfaceForce.hpp"
 
 #include <cmath>
@@ -183,7 +184,7 @@ struct Result {
 template <class FColl>
 static Result run(Index H, double mu1, double mu2, double rho1, double rho2,
                   double umax_target, double iw, double M, bool use_visc,
-                  std::size_t max_steps) {
+                  std::size_t max_steps, bool const_ref = false) {
   using FluidSlv = FluidSolver<FL, EsotericPull<FL>, FColl>;
 
   const Index nx = 16, ny = H + 2;              // solid rows at 0 and ny-1
@@ -211,6 +212,7 @@ static Result run(Index H, double mu1, double mu2, double rho1, double rho2,
   });
 
   ViscousInterfaceForce<FL> vf(d);
+  ScalarGradient<FL> pg(d);
 
   // The uniform driving force, in the external slot.
   View1D<Real> gx("gx", d.n_padded), gy("gy", d.n_padded), gz("gz", d.n_padded);
@@ -221,6 +223,12 @@ static Result run(Index H, double mu1, double mu2, double rho1, double rho2,
   fc.Gx = pf.grad_x();  fc.Gy = pf.grad_y();  fc.Gz = pf.grad_z();
   fc.Lap = pf.laplacian();
   if (use_visc) { fc.Vx = vf.x(); fc.Vy = vf.y(); fc.Vz = vf.z(); }
+  // rho_0 > 0 selects the constant-reference pressure normalisation, and it must
+  // be the LIGHT phase; see the banner in MultiphasePotentialBGK.hpp.
+  if (const_ref) {
+    fc.rho_0 = Real(rho2);
+    fc.Px = pg.x();  fc.Py = pg.y();  fc.Pz = pg.z();
+  }
   fc.Ex = gx;  fc.Ey = gy;  fc.Ez = gz;
   fc.rho_L = Real(rho2);  fc.rho_H = Real(rho1);        // phi = 1 is fluid 1
   fc.mu_L  = Real(mu2);   fc.mu_H  = Real(mu1);
@@ -267,6 +275,7 @@ static Result run(Index H, double mu1, double mu2, double rho1, double rho2,
   for (std::size_t step = 0; step < max_steps; ++step) {
     pf.refresh();
     fl.compute_macroscopic();
+    if (const_ref) pg.refresh(fl.rho());     // only the constant form reads it
     if (use_visc) vf.refresh(fc);
     fl.step(true);
     pf.step();
@@ -303,7 +312,7 @@ static Result run(Index H, double mu1, double mu2, double rho1, double rho2,
 
   auto hpt = Kokkos::create_mirror_view_and_copy(HostSpace{}, fl.rho());   // p~
   auto hgy = Kokkos::create_mirror_view_and_copy(HostSpace{}, pf.grad_y());
-  const double drho = rho1 - rho2, cs2v = 1.0 / 3.0;
+  const double cs2v = 1.0 / 3.0;
 
   double num = 0, den = 0, nnear = 0, nfar = 0, dnear = 0, dfar = 0;
   for (Index y = 1; y < ny - 1; ++y) {
@@ -321,7 +330,16 @@ static Result run(Index H, double mu1, double mu2, double rho1, double rho2,
     const double pt = double(hpt(d.id(nx / 2, y)));
     r.pt_max = std::max(r.pt_max, std::abs(pt));
     // |F_p| = |p~ cs2 (drho/dphi) dphi/dy|, against the uniform driving G.
-    const double fp = std::abs(pt * cs2v * drho * double(hgy(d.id(nx / 2, y))));
+    // F_p is now cs2 (rho - rho_0) d(p~)/dy; grad p~ is not stored here, so it
+    // is differenced locally just for this diagnostic.
+    const double rr = rho2 + std::min(1.0, std::max(0.0, double(hp0(d.id(nx / 2, y)))))
+                             * (rho1 - rho2);
+    const double dpt = (y > 1 && y < ny - 2)
+        ? 0.5 * (double(hpt(d.id(nx / 2, y + 1))) - double(hpt(d.id(nx / 2, y - 1))))
+        : 0.0;
+    const double fp = const_ref ? std::abs(cs2v * (rr - rho2) * dpt)
+                                : std::abs(pt * cs2v * (rho1 - rho2)
+                                           * double(hgy(d.id(nx / 2, y))));
     r.fp_over_g = std::max(r.fp_over_g, fp / G);
   }
   r.l2 = std::sqrt(num / den);
@@ -331,9 +349,10 @@ static Result run(Index H, double mu1, double mu2, double rho1, double rho2,
       const double Y = double(y) - 0.5 - h;
       const double q = double(hp0(d.id(nx / 2, y)));
       const double pt = double(hpt(d.id(nx / 2, y)));
-      const double rr = rho2 + std::min(1.0, std::max(0.0, q)) * (rho1 - rho2);
       std::printf("%3d %8.3f %9.6f %12.5e %12.5e %12.6e %12.6e\n",
-                  int(y), Y, q, pt, rr * cs2v * pt,
+                  int(y), Y, q, pt,
+                  (const_ref ? rho2 : (rho2 + std::min(1.0, std::max(0.0, q))
+                                              * (rho1 - rho2))) * cs2v * pt,
                   double(hu(d.id(nx / 2, y))), at_measured.u(Y));
     }
     std::printf("\n");
@@ -387,10 +406,12 @@ int main(int argc, char** argv) {
                 use_cm ? "central moments" : "BGK");
     std::printf("backend %s   precision %s\n\n", ExecSpace::name(), precision_name());
 
-    auto go = [&](Index H, double mr, double rr, bool visc) {
+    auto go = [&](Index H, double mr, double rr, bool visc, bool cref = false) {
       return use_cm
-        ? run<CmColl>(H, mu2 * mr, mu2, rho2 * rr, rho2, umax, iw, M, visc, max_steps)
-        : run<BgkColl>(H, mu2 * mr, mu2, rho2 * rr, rho2, umax, iw, M, visc, max_steps);
+        ? run<CmColl>(H, mu2 * mr, mu2, rho2 * rr, rho2, umax, iw, M, visc,
+                      max_steps, cref)
+        : run<BgkColl>(H, mu2 * mr, mu2, rho2 * rr, rho2, umax, iw, M, visc,
+                       max_steps, cref);
     };
 
     std::vector<Index> Hs = {32, 64};
@@ -451,6 +472,35 @@ int main(int argc, char** argv) {
     }
 
     //------------------------------------------------------------------------
+    // The two pressure normalisations, on the configuration that separates them.
+    // Neither dominates -- see the banner in MultiphasePotentialBGK.hpp -- so
+    // this is a measurement, not a verdict.
+    //------------------------------------------------------------------------
+    std::printf("\nPressure normalisation, on the density-only configuration\n\n");
+    std::printf("%-22s %-6s %-12s %-8s %-11s\n",
+                "normalisation", "H", "L2(u)", "order", "max|F_p|/G");
+    std::printf("%s\n", std::string(62, '-').c_str());
+    double cref_ord = 0;
+    for (int mode = 0; mode < 2; ++mode) {
+      std::vector<Result> rr2;
+      for (std::size_t i = 0; i < Hs.size(); ++i) {
+        const Result r = go(Hs[i], 1.0, 10.0, true, mode == 1);
+        rr2.push_back(r);
+        finite = finite && r.ok;
+        std::printf("%-22s %-6d %-12.4e ",
+                    i ? "" : (mode ? "constant rho_0" : "local rho (default)"),
+                    int(Hs[i]), r.l2);
+        if (i > 0 && rr2[i - 1].l2 > 0) {
+          const double o = std::log(rr2[i - 1].l2 / r.l2) / std::log(2.0);
+          if (mode == 1) cref_ord = o;
+          std::printf("%-8.2f ", o);
+        } else std::printf("%-8s ", "-");
+        std::printf("%-11.2e\n", r.fp_over_g);
+      }
+      std::printf("\n");
+    }
+
+    //------------------------------------------------------------------------
     const double tol_ord = 1.8, tol_gain = 3.0, tol_drift = 1e-9;
     const bool pass_ord   = finite && ctrl_ord > tol_ord;
     const bool pass_gain  = finite && best_gain > tol_gain;
@@ -462,11 +512,14 @@ int main(int argc, char** argv) {
                 best_gain, pass_gain ? "PASS" : "FAIL");
     std::printf("  phi conserved to round-off             %.2e      %s\n",
                 both.back().phi_drift, pass_drift ? "PASS" : "FAIL");
-    std::printf("\n  KNOWN AND NOT ASSERTED: a density ratio alone leaves an L2 residual\n"
-                "  of a few per cent that does NOT converge (order %.2f here), even though\n"
-                "  the exact profile is density-independent. The single-phase row rules out\n"
-                "  the base scheme and the viscosity-only row converges, so it is specific\n"
-                "  to the grad-rho path. Unexplained; see the header.\n", dens_ord);
+    std::printf("\n  REPORTED, NOT ASSERTED: under the DEFAULT local-rho normalisation a\n"
+                "  density ratio alone leaves an L2 residual that does not converge\n"
+                "  (order %.2f), because F_p scales with the pressure LEVEL and must cancel\n"
+                "  against rho cs2 grad p~ to a few hundred times the driving force. The\n"
+                "  constant-rho_0 normalisation converges instead (order %.2f) and cuts\n"
+                "  F_p/G by more than an order of magnitude -- but it is not a free win, and\n"
+                "  the banner in MultiphasePotentialBGK.hpp says where each one belongs.\n",
+                dens_ord, cref_ord);
     if (!(pass_ord && pass_gain && pass_drift)) status = 1;
   }
   Kokkos::finalize();

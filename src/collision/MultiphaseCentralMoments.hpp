@@ -52,6 +52,52 @@
 //  truncation are absent rather than reproduced. That is the same choice
 //  MomentCollision makes for single-phase flow, for the same reason.
 //
+//  ============ TWO PRESSURE NORMALISATIONS, AND NEITHER DOMINATES ============
+//  rho_0 <= 0  (DEFAULT):  p = rho(phi) cs2 p~,  F_p = -p~ cs2 grad rho
+//  rho_0 >  0           :  p = rho_0    cs2 p~,  F_p =  cs2 (rho - rho_0) grad p~
+//
+//  The first is De Rosis & Enan's. Because p is continuous while rho is not, p~
+//  jumps by the whole density ratio across an interface, so F_p scales with the
+//  pressure LEVEL and is amplified by the ratio. validation/layered_poiseuille
+//  measures the cost against an exact solution: F_p reaches 220 times the driving
+//  force, the residual does not converge (order -0.21), and a pure gauge shift in
+//  p~ -- which changes no physics -- moves the error seventeenfold.
+//
+//  The second normalises by a CONSTANT, so p~ is uniform wherever p is and F_p
+//  scales with the pressure GRADIENT instead. On that same case:
+//
+//      normalisation    order (offset 0)   order (offset 0.2)   gauge sensitivity
+//      local rho        -0.21              -0.37                17.3x / 19.4x
+//      constant rho_0    0.95               0.86                 1.93x / 2.04x
+//
+//  It converges where the other does not, and is an order of magnitude less
+//  sensitive to a shift that changes no physics. Note what does NOT improve:
+//  F_p/G is LARGER, 379 against 220 at H = 32. The gain is not that the term
+//  shrinks but that it stops tracking the pressure level. The residual 1.9x is
+//  the discrete equilibrium's own p~ dependence -- f^eq = w_i[p~ + Phi] carries
+//  (p~ - 1) into its higher moments, so a p~ offset is not a pure gauge on the
+//  lattice even when it is one in the continuum.
+//
+//  IT IS NOT A FREE WIN. The recovered pressure term becomes
+//  -(rho_0/rho) cs2 grad p~, so one phase always pays:
+//
+//    * rho_0 = rho_L: the heavy phase runs at an effective sound speed
+//      cs sqrt(rho_L/rho_H) -- stable, but the pressure term there is a
+//      cancellation of ratio size. Fine where grad p is diffuse; at a Laplace
+//      jump, where grad p is concentrated at the interface, it diverges at
+//      ratio 10 and above, on a case the local-rho form handles at ratio 100.
+//    * rho_0 = rho_H: the LIGHT phase gets sound speed cs sqrt(rho_H/rho_L),
+//      which at a ratio of 10 is 1.83 lattice units per step -- past the lattice
+//      speed. Tried first, diverged inside 500 steps.
+//
+//  So the local-rho form suits problems whose pressure is near zero at the
+//  interface (a static droplet with the gauge at zero), and the constant-rho_0
+//  form suits problems with a real pressure field but diffuse gradients (a driven
+//  channel). The default stays local-rho because that is what every validated
+//  result in this tree was obtained with; rho_0 makes the alternative available
+//  where it is the better choice, and layered_poiseuille exercises both.
+//  ===========================================================================
+//
 //  RELAXATION, following Eq. (35) K = diag[1,1,1,1,1, w,w,w,w,w, 1,...,1]:
 //      order 0     conserved -- p~ is untouched
 //      order 1     exact, not relaxed: see THE FORCE below
@@ -110,8 +156,16 @@ struct MultiphaseCentralMoments {
   // that the two owners never have to agree about who clears the array.
   View1D<Real> Ex, Ey, Ez;
 
+  // Gradient of p~, owned by a ScalarGradient. Empty switches the pressure force
+  // off, which is only correct at a matched density.
+  View1D<Real> Px, Py, Pz;
+
   Real phi_L = Real(0), phi_H = Real(1);
   Real rho_L = Real(1), rho_H = Real(1);
+  // Reference density for the pressure normalisation. ZERO (the default) keeps
+  // the local-rho form of the reference; a positive value selects the constant
+  // form, and must be the LIGHT phase or the acoustic CFL is violated.
+  Real rho_0 = Real(0);
   Real mu_L  = Real(0.1), mu_H = Real(0.1);     // DYNAMIC viscosities
   Real beta = Real(0), kappa = Real(0);
   Real bx = Real(0), by = Real(0), bz = Real(0);
@@ -147,6 +201,12 @@ struct MultiphaseCentralMoments {
   KOKKOS_INLINE_FUNCTION Real viscosity_at(Index n) const {
     const Local l = local(n);  return l.mu / l.rho;
   }
+  // > 0 selects the constant-reference normalisation; see the banner.
+  KOKKOS_INLINE_FUNCTION bool constant_reference() const { return rho_0 > Real(0); }
+  // The density that converts p~ to a physical pressure, for diagnostics.
+  KOKKOS_INLINE_FUNCTION Real pressure_scale(Real rho_local) const {
+    return constant_reference() ? rho_0 : rho_local;
+  }
   KOKKOS_INLINE_FUNCTION Real drho_dphi() const {
     return (rho_H - rho_L) / (phi_H - phi_L);
   }
@@ -157,15 +217,22 @@ struct MultiphaseCentralMoments {
     const Real phi0 = Real(0.5) * (phi_L + phi_H);
     const Real mu_phi = Real(4) * beta * (l.p - phi_L) * (l.p - phi_H) * (l.p - phi0)
                       - kappa * Lap(n);
-    const Real coef = mu_phi - p_tilde * cs2v * drho_dphi();
+    // F_s is always a multiple of grad phi. F_p is a multiple of grad phi in the
+    // local-rho form and of grad p~ in the constant-rho_0 one, so it is carried
+    // separately and only shares a direction with F_s in the first.
+    const bool cref = constant_reference();
+    const Real coef = cref ? mu_phi : (mu_phi - p_tilde * cs2v * drho_dphi());
+    const Real dr = cref ? cs2v * (l.rho - rho_0) : Real(0);
+    const bool have_p = cref && Px.data() != nullptr;
     const bool have_v = Vx.data() != nullptr;
     const bool have_e = Ex.data() != nullptr;
-    F[0] = coef * Gx(n) + (have_v ? Vx(n) : Real(0)) + (have_e ? Ex(n) : Real(0))
-         + l.rho * bx;
-    F[1] = coef * Gy(n) + (have_v ? Vy(n) : Real(0)) + (have_e ? Ey(n) : Real(0))
-         + l.rho * by;
-    F[2] = (L::D == 3) ? coef * Gz(n) + (have_v ? Vz(n) : Real(0))
-                           + (have_e ? Ez(n) : Real(0)) + l.rho * bz
+    F[0] = coef * Gx(n) + (have_p ? dr * Px(n) : Real(0))
+         + (have_v ? Vx(n) : Real(0)) + (have_e ? Ex(n) : Real(0)) + l.rho * bx;
+    F[1] = coef * Gy(n) + (have_p ? dr * Py(n) : Real(0))
+         + (have_v ? Vy(n) : Real(0)) + (have_e ? Ey(n) : Real(0)) + l.rho * by;
+    F[2] = (L::D == 3) ? coef * Gz(n) + (have_p ? dr * Pz(n) : Real(0))
+                           + (have_v ? Vz(n) : Real(0)) + (have_e ? Ez(n) : Real(0))
+                           + l.rho * bz
                        : Real(0);
   }
 
@@ -183,7 +250,7 @@ struct MultiphaseCentralMoments {
     Macro m{s, Real(0), Real(0), Real(0)};
     const Local l = local(n);
     Real F[3];
-    force(l, n, s, F);
+    force(l, n, density(m), F);
     const Real h = Real(0.5) / l.rho;
     m.ux = mx + h * F[0];  m.uy = my + h * F[1];  m.uz = mz + h * F[2];
     return m;
