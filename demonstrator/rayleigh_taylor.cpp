@@ -100,12 +100,16 @@
 
 using namespace lbm;
 
-using FL = D2Q9;
-using PL = D2Q9;                       // full lattice: lower spurious currents
-using BgkColl = MultiphasePotentialBGK<FL, SecondOrderPhi<FL>, RawPopulations>;
-using CmColl  = MultiphaseCentralMoments<FL>;
-using PColl   = PhaseFieldBGK<PL>;
-using PhaseSlv = PhaseFieldSolver<PL, EsotericPull<PL>, PColl>;
+// The lattices are template parameters rather than typedefs so that this case
+// can run on D3Q27 as well as D2Q9. That is not a generality for its own sake:
+// comparing this model against the colour gradient of demonstrator/rt_colour.cpp
+// is only a comparison of the two INTERFACE-CAPTURE SCHEMES if the lattice is
+// held fixed, and the colour-gradient operator exists only on D3Q27. Run on
+// different lattices, the difference between the two films confounds the model
+// with the velocity set, and there is no way afterwards to say which produced
+// what. -3d puts this case on D3Q27 in the same four-cell slab.
+template <class FLat> using BgkOf = MultiphasePotentialBGK<FLat, SecondOrderPhi<FLat>, RawPopulations>;
+template <class FLat> using CmOf  = MultiphaseCentralMoments<FLat>;
 
 //------------------------------------------------------------------------------
 // Raw field dumps, NOT pictures.
@@ -147,31 +151,40 @@ static void dump_field(const std::string& path, Index nx, Index ny, Get get) {
 struct Params {
   Index W; double At, Re, U, iw, M, sigma, tmax;
   int nframes; std::string dump; const char* op;
+  bool three_d; int nz;
 };
 
-template <class FColl>
+template <class FLat, class PLat, class FColl>
 static void simulate(const Params& P) {
-  using FluidSlv = FluidSolver<FL, EsotericPull<FL>, FColl>;
+  using FluidSlv = FluidSolver<FLat, EsotericPull<FLat>, FColl>;
+  using PColl    = PhaseFieldBGK<PLat>;
+  using PhaseSlv = PhaseFieldSolver<PLat, EsotericPull<PLat>, PColl>;
 
   const Index W = P.W, nx = P.W, ny = 4 * P.W;
+  const Index nz = Index(FLat::D == 3 ? P.nz : 1);
   const double g   = P.U * P.U / double(W);
   const double nu  = double(W) * P.U / P.Re;
   const double rho_l = 1.0, rho_h = (1.0 + P.At) / (1.0 - P.At);
   const double t_ref = std::sqrt(double(W) / (g * P.At));
   const std::size_t nsteps = std::size_t(P.tmax * t_ref);
 
-  std::printf("Rayleigh-Taylor   D2Q9 fluid (pressure form, %s) + D2Q9 phase field\n",
-              FColl::name);
+  std::printf("Rayleigh-Taylor   %s fluid (pressure form, %s) + %s phase field\n",
+              FLat::name, FColl::name, PLat::name);
   std::printf("backend %s   precision %s\n", ExecSpace::name(), precision_name());
-  std::printf("%dx%d   At = %.4f (rho_H/rho_L = %.2f)   Re = %.0f   nu = %.3e\n",
-              int(nx), int(ny), P.At, rho_h / rho_l, P.Re, nu);
+  if (nz > 1)
+    std::printf("%dx%dx%d slab, no-slip walls in y   At = %.4f (rho_H/rho_L = %.2f)"
+                "   Re = %.0f   nu = %.3e\n",
+                int(nx), int(ny), int(nz), P.At, rho_h / rho_l, P.Re, nu);
+  else
+    std::printf("%dx%d   At = %.4f (rho_H/rho_L = %.2f)   Re = %.0f   nu = %.3e\n",
+                int(nx), int(ny), P.At, rho_h / rho_l, P.Re, nu);
   std::printf("g = %.3e   U = %.3f   W_int = %.1f   M = %.3f   sigma = %.1e\n",
               g, P.U, P.iw, P.M, P.sigma);
   const double tau = nu / (1.0 / 3.0);
   std::printf("tau = %.3e   omega = %.6f\n", tau, 1.0 / (tau + 0.5));
   std::printf("t* = %.1f is %zu steps (t_ref = %.1f)\n\n", P.tmax, nsteps, t_ref);
 
-  Domain d(nx, ny, 1, /*periodic x*/ true, /*y*/ false, /*z*/ true);
+  Domain d(nx, ny, nz, /*periodic x*/ true, /*y*/ false, /*z*/ true);
 
   PColl pc;
   pc.omega = PColl::omega_from_mobility(Real(P.M));
@@ -188,7 +201,7 @@ static void simulate(const Params& P) {
     return Real(0.5) * (Real(1) + Kokkos::tanh(Real(2) * (y - yi) / iwr));
   });
 
-  ViscousInterfaceForce<FL> vf(d);
+  ViscousInterfaceForce<FLat> vf(d);
 
   FColl fc;
   fc.phi = pf.phi();
@@ -225,6 +238,7 @@ static void simulate(const Params& P) {
   vf.set_velocity(fl.ux(), fl.uy(), fl.uz());
   vf.set_phase_gradient(pf.grad_x(), pf.grad_y(), pf.grad_z());
 
+  const Index zs = nz / 2;      // the slice that is measured and rendered
   const std::size_t every = nsteps / std::size_t(P.nframes > 0 ? P.nframes : 1);
   int frame = 0;
   std::printf("%-8s %-9s %-11s %-11s %-11s %-11s\n",
@@ -244,17 +258,17 @@ static void simulate(const Params& P) {
       bool bad = false;
       for (Index y = 1; y < ny - 1; ++y)
         for (Index x = 0; x < nx; ++x) {
-          const double p = double(hp(d.id(x, y)));
+          const double p = double(hp(d.id(x, y, zs)));
           if (!std::isfinite(p)) bad = true;
           if (p > 0.5 && y < spike)  spike = y;
           if (p < 0.5 && y > bubble) bubble = y;
-          const double a = double(hu(d.id(x, y))), b = double(hv(d.id(x, y)));
+          const double a = double(hu(d.id(x, y, zs))), b = double(hv(d.id(x, y, zs)));
           umx = std::max(umx, std::sqrt(a * a + b * b));
           // Peak vorticity, reported so the colour scale of the render can be
           // set from the flow instead of guessed at.
           const Index xp = (x + 1) % nx, xm = (x + nx - 1) % nx;
-          const double wz = 0.5 * (double(hv(d.id(xp, y))) - double(hv(d.id(xm, y))))
-                          - 0.5 * (double(hu(d.id(x, y + 1))) - double(hu(d.id(x, y - 1))));
+          const double wz = 0.5 * (double(hv(d.id(xp, y, zs))) - double(hv(d.id(xm, y, zs))))
+                          - 0.5 * (double(hu(d.id(x, y + 1, zs))) - double(hu(d.id(x, y - 1, zs))));
           wmx = std::max(wmx, std::abs(wz));
         }
       const double ts = double(step) / t_ref;
@@ -267,9 +281,9 @@ static void simulate(const Params& P) {
           std::snprintf(nm, sizeof nm, "%s/rt_%04d_%s.bin", P.dump.c_str(), frame, f);
           return std::string(nm);
         };
-        dump_field(at("phi"), nx, ny, [&](Index x, Index y) { return hp(d.id(x, y)); });
-        dump_field(at("ux"),  nx, ny, [&](Index x, Index y) { return hu(d.id(x, y)); });
-        dump_field(at("uy"),  nx, ny, [&](Index x, Index y) { return hv(d.id(x, y)); });
+        dump_field(at("phi"), nx, ny, [&](Index x, Index y) { return hp(d.id(x, y, zs)); });
+        dump_field(at("ux"),  nx, ny, [&](Index x, Index y) { return hu(d.id(x, y, zs)); });
+        dump_field(at("uy"),  nx, ny, [&](Index x, Index y) { return hv(d.id(x, y, zs)); });
       }
       ++frame;
       if (bad) { std::printf("  DIVERGED\n"); break; }
@@ -290,7 +304,7 @@ static void simulate(const Params& P) {
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   {
-    Params P{128, 0.5, 256.0, 0.04, 5.0, 0.02, 1e-4, 3.0, 120, "", "cm"};
+    Params P{128, 0.5, 256.0, 0.04, 5.0, 0.02, 1e-4, 3.0, 120, "", "cm", false, 4};
     for (int i = 1; i < argc; ++i) {
       auto nx = [&](double& v) { if (i + 1 < argc) v = std::atof(argv[++i]); };
       if      (!std::strcmp(argv[i], "-w"))       { if (i+1<argc) P.W = Index(std::atoi(argv[++i])); }
@@ -304,9 +318,17 @@ int main(int argc, char** argv) {
       else if (!std::strcmp(argv[i], "-nframes")) { if (i+1<argc) P.nframes = std::atoi(argv[++i]); }
       else if (!std::strcmp(argv[i], "-dump"))    { if (i+1<argc) P.dump = argv[++i]; }
       else if (!std::strcmp(argv[i], "-op"))      { if (i+1<argc) P.op = argv[++i]; }
+      else if (!std::strcmp(argv[i], "-3d"))      P.three_d = true;
+      else if (!std::strcmp(argv[i], "-nz"))      { if (i+1<argc) P.nz = std::atoi(argv[++i]); }
     }
-    if (!std::strcmp(P.op, "bgk")) simulate<BgkColl>(P);
-    else                           simulate<CmColl>(P);
+    const bool bgk = !std::strcmp(P.op, "bgk");
+    if (P.three_d) {
+      if (bgk) simulate<D3Q27, D3Q27, BgkOf<D3Q27>>(P);
+      else     simulate<D3Q27, D3Q27, CmOf<D3Q27>>(P);
+    } else {
+      if (bgk) simulate<D2Q9, D2Q9, BgkOf<D2Q9>>(P);
+      else     simulate<D2Q9, D2Q9, CmOf<D2Q9>>(P);
+    }
   }
   Kokkos::finalize();
   return 0;

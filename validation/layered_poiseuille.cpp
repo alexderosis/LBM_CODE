@@ -202,7 +202,7 @@ static Result run(Index H, double mu1, double mu2, double rho1, double rho2,
   pc.width = Real(iw);
   PhaseSlv pf(d, pc);
 
-  const Index hxp = d.hx, hyp = d.hy;
+  const Index hyp = d.hy;
   const Real iwr = Real(iw), hh = Real(h);
   // phi = 1 BELOW the centreline: fluid 1 is the lower layer.
   pf.initialize_field(KOKKOS_LAMBDA(Index n) {
