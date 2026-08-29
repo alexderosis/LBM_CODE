@@ -268,7 +268,7 @@ static void simulate(const Params& P) {
   }
   std::printf("\n%d frame(s)%s\n", frame,
               P.dump.empty() ? " (pass -dump <dir> to write the fields)"
-                             : " dumped; render with demonstrator/render_rt -body");
+                             : " dumped; render with demonstrator/render_rt");
 }
 
 int main(int argc, char** argv) {

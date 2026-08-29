@@ -179,7 +179,7 @@ penalisation rather than an immersed boundary — see `PenalisedBody.hpp` for wh
 ```
 build/demonstrator/water_entry -l 48 -ratio 50 -rhob 2 -theta 0 \
   -tmax 6 -nframes 150 -dump <dir> --kokkos-num-threads=4
-build/demonstrator/render_rt -in <dir> -out <frames> -n 151 -body -pal aurora
+build/demonstrator/render_rt -in <dir> -out <frames> -n 151 -pal aurora
 ```
 
 `-rhob` is the body's density as a multiple of the water's, `-drop` its release
@@ -204,3 +204,16 @@ checked against Archimedes and metacentric theory in
 slamming theory covers a wedge; a flat-bottomed square has a singular impact
 pressure and no closed form. There is also no contact-line model, so read the
 splash, not the meniscus.
+
+### The three clips in `anim/`
+
+| file | what it shows |
+|---|---|
+| `water_entry.mp4` | `-rhob 2`, upright, ratio 50 — the reference entry |
+| `water_entry_ratio800.mp4` | the same at a density ratio of 800 |
+| `water_entry_floating.mp4` | `-rhob 0.6 -theta 25` — enters on a corner, slaps flat, sinks past its draft and comes back up upright |
+
+The third is the one the previous formulation could not produce at all. It is
+also the clearest picture of what the roll actually does: the square strikes one
+corner, sheds a vortex pair of opposite signs from the two corners, and the
+imbalance between them is what turns it.
