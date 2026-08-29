@@ -134,6 +134,10 @@ struct MultiphasePotentialBGK {
   // Viscous interface force, owned by ViscousInterfaceForce. Empty is allowed
   // and means "matched density", where the term is zero anyway.
   View1D<Real> Vx, Vy, Vz;
+  // An arbitrary EXTERNAL force field, per node. Empty means none. This is the
+  // slot an immersed or penalised solid writes into -- kept separate from Vx so
+  // that the two owners never have to agree about who clears the array.
+  View1D<Real> Ex, Ey, Ez;
 
   Real phi_L = Real(0), phi_H = Real(1);
   Real rho_L = Real(1), rho_H = Real(1);
@@ -154,7 +158,15 @@ struct MultiphasePotentialBGK {
   KOKKOS_INLINE_FUNCTION Local local(Index n) const {
     constexpr Real cs2v = cs2<L, Real>();
     const Real p = phi(n);
-    const Real s = (p - phi_L) / (phi_H - phi_L);
+    // CLAMPED. The conservative Allen-Cahn form keeps phi close to [0,1] but does
+    // not guarantee it: shear against a solid, or any under-resolved feature,
+    // overshoots it locally. Interpolating rho off an unclamped phi then puts the
+    // density outside the two phases it is meant to lie between -- and a large
+    // enough undershoot makes rho NEGATIVE, at which point 1/rho in the velocity
+    // and the force is unbounded. Clamping the INTERPOLANT rather than phi itself
+    // leaves the transported field alone; only the equation of state is bounded.
+    Real s = (p - phi_L) / (phi_H - phi_L);
+    s = s < Real(0) ? Real(0) : (s > Real(1) ? Real(1) : s);
     const Real r = rho_L + s * (rho_H - rho_L);          // Eq. (25)
     const Real m = mu_L + s * (mu_H - mu_L);
     const Real tau = m / (r * cs2v);                     // Eq. (12)
@@ -183,9 +195,13 @@ struct MultiphasePotentialBGK {
                       - kappa * Lap(n);                              // Eq. (19)
     const Real coef = mu_phi - p_tilde * cs2v * drho_dphi();         // (18) + (22)
     const bool have_v = Vx.data() != nullptr;
-    F[0] = coef * Gx(n) + (have_v ? Vx(n) : Real(0)) + l.rho * bx;
-    F[1] = coef * Gy(n) + (have_v ? Vy(n) : Real(0)) + l.rho * by;
-    F[2] = (L::D == 3) ? coef * Gz(n) + (have_v ? Vz(n) : Real(0)) + l.rho * bz
+    const bool have_e = Ex.data() != nullptr;
+    F[0] = coef * Gx(n) + (have_v ? Vx(n) : Real(0)) + (have_e ? Ex(n) : Real(0))
+         + l.rho * bx;
+    F[1] = coef * Gy(n) + (have_v ? Vy(n) : Real(0)) + (have_e ? Ey(n) : Real(0))
+         + l.rho * by;
+    F[2] = (L::D == 3) ? coef * Gz(n) + (have_v ? Vz(n) : Real(0))
+                           + (have_e ? Ez(n) : Real(0)) + l.rho * bz
                        : Real(0);
   }
 
