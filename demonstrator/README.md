@@ -163,3 +163,44 @@ physically sensible but its velocity field is dominated by a one-cell
 alternating mode, measured 70x stronger than the same render at a density ratio
 of 3 — grid-scale oscillation that BGK does not damp, which is the measurement
 that motivated the central-moment operator. Do not show it as a result.
+
+## water_entry
+
+A square dropped into a free water surface: approach, impact, cavity, splash-up
+jets. The multiphase module carrying a moving rigid body, coupled by volume
+penalisation rather than an immersed boundary — see `PenalisedBody.hpp` for why.
+
+| file | what it is |
+|---|---|
+| `water_entry.cpp` | the case: diffuse free surface, hydrostatic seed through the interface, a falling body with its reaction fed back into Newton |
+
+### Running
+
+```
+build/demonstrator/water_entry -l 48 -ratio 50 -rhob 2 -theta 0 \
+  -tmax 6 -nframes 150 -dump <dir> --kokkos-num-threads=4
+build/demonstrator/render_rt -in <dir> -out <frames> -n 151 -body -pal aurora
+```
+
+`-rhob` is the body's density as a multiple of the water's, `-drop` its release
+height in body widths, and `-theta` its release tilt in degrees. `-l` sets the
+side of the square and everything scales off it.
+
+**IT FALLS RATHER THAN BEING PUSHED.** De Rosis & Enan run this problem with a
+prescribed constant entry velocity; here the reaction closes Newton's equations,
+so the deceleration on impact is a result. `-rhob` below 1 floats: the square
+enters, stops, reverses and bobs — measured at `-rhob 0.6`, reversing at
+`t U/L = 5.0` and rising through 0.56 L before falling back. That case is the
+one the classical Uhlmann fictitious-mass correction cannot express at all,
+since its denominator `m_b - m_f` changes sign there.
+
+**`-theta` makes it roll.** An off-axis square strikes one corner first and
+slaps flat, which is not available to a translation-only body. The rigid-body
+solve is a coupled 3x3 in sway, heave and roll; the hydrostatics it rests on is
+checked against Archimedes and metacentric theory in
+`validation/floating_body.cpp`, which is where the numbers are.
+
+**There is no exact answer here**, which is why this is a demonstrator. Wagner's
+slamming theory covers a wedge; a flat-bottomed square has a singular impact
+pressure and no closed form. There is also no contact-line model, so read the
+splash, not the meniscus.

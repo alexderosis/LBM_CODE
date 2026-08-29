@@ -13,9 +13,16 @@
 //  De Rosis & Enan run this problem (Sec. III.G) with a Peskin immersed boundary
 //  and a PRESCRIBED constant entry velocity. This uses volume penalisation and
 //  lets the square FALL, which is the harder direction: the reaction is fed back
-//  into Newton's equation, so the deceleration on impact is a result rather than
+//  into Newton's equations, so the deceleration on impact is a result rather than
 //  an input. See PenalisedBody.hpp for why penalisation and not IBM, and for the
 //  fictitious-mass correction that makes the free fall well posed.
+//
+//  THE SQUARE MAY ALSO TURN. -theta releases it tilted, and the roll follows from
+//  the same reaction: an off-axis square strikes one corner first, the reaction
+//  on that corner is not through the centre, and it slaps flat. That sequence is
+//  the reason a belly-flop hurts, and it is not available to a translation-only
+//  body. The tilt is also the harshest test of the coupling here, because the
+//  impact torque arrives in a couple of steps.
 //
 //  THE PHASES. phi = 1 is water, phi = 0 is air, and the free surface starts
 //  flat. Both share a kinematic viscosity here rather than the true 15:1 air to
@@ -76,7 +83,7 @@ static void dump_field(const std::string& path, Index nx, Index ny, Get get) {
 
 struct Params {
   Index W;                 // square side, in cells -- everything scales off it
-  double ratio, Re, U, iw, M, sigma, body_rho, drop, tmax;
+  double ratio, Re, U, iw, M, sigma, body_rho, drop, tmax, theta;
   int nframes; std::string dump; const char* op;
 };
 
@@ -101,7 +108,8 @@ static void simulate(const Params& P) {
   const double tau = nu / (1.0 / 3.0);
   std::printf("impact U = %.4f   g = %.3e   drop = %.2f L   omega = %.6f\n",
               U, g, P.drop, 1.0 / (tau + 0.5));
-  std::printf("body rho = %.1f x water   %zu steps\n\n", P.body_rho, nsteps);
+  std::printf("body rho = %.2f x water   tilt = %.1f deg   %zu steps\n\n",
+              P.body_rho, P.theta, nsteps);
 
   Domain d(nx, ny, 1, /*periodic x*/ true, /*y*/ false, /*z*/ true);
 
@@ -111,7 +119,7 @@ static void simulate(const Params& P) {
   PhaseSlv pf(d, pc);
 
   const Real yw = Real(y_water), iwr = Real(P.iw);
-  const Index hx = d.hx, hy = d.hy;
+  const Index hy = d.hy;
   pf.initialize_field(KOKKOS_LAMBDA(Index n) {
     Index px, py, pz; d.coords(n, px, py, pz);
     const Real y = Real(py - hy);
@@ -124,8 +132,11 @@ static void simulate(const Params& P) {
   body.shape = Rect{Real(0.5 * double(nx)),
                     Real(y_water + P.drop * double(L) + 0.5 * double(L)),
                     Real(0.5 * double(L)), Real(0.5 * double(L)), Real(1.5)};
+  body.shape.set_angle(Real(P.theta * M_PI / 180.0));
   body.vx = Real(0);
   body.vy = Real(0);
+  body.omega = Real(0);
+  body.by = Real(-g);          // the same vector the collision operator is given
 
   FColl fc;
   fc.phi = pf.phi();
@@ -166,17 +177,17 @@ static void simulate(const Params& P) {
   vf.set_phase_gradient(pf.grad_x(), pf.grad_y(), pf.grad_z());
   body.set_velocity(fl.ux(), fl.uy());
 
-  const Real area = body.penalised_area();
-  const Real m_body = Real(P.body_rho * rho_h) * area;
-  std::printf("penalised area %.1f cells (nominal %d), body mass %.3e\n\n",
-              double(area), int(L * L), double(m_body));
+  body.set_uniform_density(Real(P.body_rho * rho_h));
+  std::printf("penalised area %.1f cells (nominal %d), body mass %.3e, I %.3e\n\n",
+              double(body.penalised_area()), int(L * L),
+              double(body.mass), double(body.inertia));
 
   const std::size_t every = nsteps / std::size_t(P.nframes > 0 ? P.nframes : 1);
   int frame = 0;
-  std::printf("%-8s %-9s %-10s %-11s %-12s %-11s %6s %6s %10s %10s\n",
-              "t U/L", "step", "y_c/L", "V/U", "F_y", "max |u|", "phi<", "phi>",
-              "p~ min", "p~ max");
-  std::printf("%s\n", std::string(102, '-').c_str());
+  std::printf("%-8s %-9s %-9s %-10s %-8s %-11s %-11s %-10s %6s %6s\n",
+              "t U/L", "step", "y_c/L", "V/U", "tilt", "F_y", "torque",
+              "max |u|", "phi<", "phi>");
+  std::printf("%s\n", std::string(104, '-').c_str());
 
   auto phi_view = pf.phi();
   // Same clamp as the collision operator's equation of state, and for the same
@@ -194,12 +205,9 @@ static void simulate(const Params& P) {
     pf.refresh();
     fl.compute_macroscopic();
     vf.refresh(fc);
+    // Measures the fluid, solves the coupled 3x3 for the new velocity and spin,
+    // and writes the force that drives the fluid to it -- all inside refresh.
     const auto R = body.refresh(dens_of);
-
-    // Newton with the fictitious fluid removed; see PenalisedBody.hpp.
-    const Real m_eff = m_body - R.fluid_mass;
-    const Real acc = (m_eff > Real(1e-9))
-                   ? (R.fy + m_eff * Real(-g)) / m_eff : Real(0);
 
     if (every && step % every == 0) {
       auto hp = Kokkos::create_mirror_view_and_copy(HostSpace{}, pf.phi());
@@ -221,10 +229,12 @@ static void simulate(const Params& P) {
           const double a = double(hu(d.id(x, y))), b = double(hv(d.id(x, y)));
           umx = std::max(umx, std::sqrt(a * a + b * b));
         }
-      std::printf("%-8.3f %-9zu %-10.4f %-11.4f %-12.4e %-11.3e %6.3f %6.3f %10.2e %10.2e\n",
+      std::printf("%-8.3f %-9zu %-9.4f %-10.4f %-8.2f %-11.4e %-11.4e %-10.3e %6.3f %6.3f\n",
                   double(step) * U / double(L), step,
                   (double(body.shape.cy) - y_water) / double(L),
-                  double(body.vy) / U, double(R.fy), umx, pmin, pmax, qmin, qmax);
+                  double(body.vy) / U, double(body.shape.theta) * 180.0 / M_PI,
+                  double(R.fy), double(R.torque), umx, pmin, pmax);
+      (void)qmin; (void)qmax;
       if (!P.dump.empty()) {
         char nm[512];
         auto at = [&](const char* f) {
@@ -246,12 +256,14 @@ static void simulate(const Params& P) {
     fl.step(true);
     pf.step();
 
-    // Body state, explicit Euler at dt = 1 -- the fluid step is the timescale.
-    body.vy += acc;
-    body.shape.cy += body.vy;
-    if (body.shape.cy - body.shape.hy < Real(2)) {   // reached the floor
-      body.shape.cy = body.shape.hy + Real(2);
-      body.vy = Real(0);
+    body.advance();
+    // A floor stop, not a contact model -- see PenalisedBody.hpp. The reach of
+    // the tilted square is its diagonal, so the clamp uses that.
+    const Real half = std::sqrt(double(body.shape.hx * body.shape.hx +
+                                       body.shape.hy * body.shape.hy));
+    if (body.shape.cy - half < Real(2)) {
+      body.shape.cy = half + Real(2);
+      if (body.vy < Real(0)) body.vy = Real(0);
     }
   }
   std::printf("\n%d frame(s)%s\n", frame,
@@ -262,7 +274,7 @@ static void simulate(const Params& P) {
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   {
-    Params P{48, 50.0, 2000.0, 0.05, 5.0, 0.02, 1e-4, 2.0, 1.0, 6.0, 150, "", "cm"};
+    Params P{48, 50.0, 2000.0, 0.05, 5.0, 0.02, 1e-4, 2.0, 1.0, 6.0, 0.0, 150, "", "cm"};
     for (int i = 1; i < argc; ++i) {
       auto nx = [&](double& v) { if (i + 1 < argc) v = std::atof(argv[++i]); };
       if      (!std::strcmp(argv[i], "-l"))       { if (i+1<argc) P.W = Index(std::atoi(argv[++i])); }
@@ -275,6 +287,7 @@ int main(int argc, char** argv) {
       else if (!std::strcmp(argv[i], "-rhob"))    nx(P.body_rho);
       else if (!std::strcmp(argv[i], "-drop"))    nx(P.drop);
       else if (!std::strcmp(argv[i], "-tmax"))    nx(P.tmax);
+      else if (!std::strcmp(argv[i], "-theta"))   nx(P.theta);   // release tilt, degrees
       else if (!std::strcmp(argv[i], "-nframes")) { if (i+1<argc) P.nframes = std::atoi(argv[++i]); }
       else if (!std::strcmp(argv[i], "-dump"))    { if (i+1<argc) P.dump = argv[++i]; }
       else if (!std::strcmp(argv[i], "-op"))      { if (i+1<argc) P.op = argv[++i]; }
