@@ -106,3 +106,60 @@ to converge but only its last beats need rendering.
 ```
 python3 demonstrator/make_aorta_anim.py <dump_dir> out.mp4 15 --period 2000 --probe 100
 ```
+
+## rayleigh_taylor
+
+Heavy fluid over light in a box W x 4W, periodic in x, no-slip top and bottom,
+with the interface given a single-mode perturbation of amplitude 0.1 W. The
+multiphase module doing what it was built for: an interface that rolls up,
+reconnects and keeps going. Uses the pressure-based operator, which is the only
+one here that reaches a density ratio at all.
+
+| file | what it is |
+|---|---|
+| `rayleigh_taylor.cpp` | the case: hydrostatic initialisation, front tracking, raw field dumps |
+| `render_rt.cpp` | frame renderer — phase field and vorticity, three palettes |
+
+### Running
+
+```
+build/demonstrator/rayleigh_taylor -w 192 -at 0.1 -re 30000 -op cm \
+  -nframes 180 -dump <dir> --kokkos-num-threads=4
+build/demonstrator/render_rt -in <dir> -out <frames> -n 181 -pal aurora -up 2 -crop 350,860
+ffmpeg -framerate 24 -i <frames>/rt_%04d.ppm -c:v libx264 -pix_fmt yuv420p out.mp4
+```
+
+`-at` is the Atwood number, so `rho_H/rho_L = (1+At)/(1-At)`; `-re` is built on
+the free-fall velocity `sqrt(gW)`; time is reported as `t* = t / sqrt(W/(g At))`
+so runs at the same At compare regardless of the lattice numbers underneath.
+
+**THE RENDERER IS SEPARATE ON PURPOSE**, for the reason `vol_aorta` and
+`vol_urban` are: welded to the simulation, every change of colour map costs a
+full re-run — eight and a half minutes at W = 192 to alter a hue. Fields go out
+raw in `FieldDump.hpp`'s format and `render_rt` turns 181 frames into pictures in
+2.6 seconds. Palettes are `aurora` (default), `paper` (light ground, for slides
+on white) and `neon`.
+
+**The vorticity scale calibrates on the LAST frame, not the first.** The first
+frame of this case is a fluid at rest, so its 99.9th-percentile vorticity is
+round-off — 1.4e-07 against the 6.2e-03 the developed flow reaches — and
+calibrating there puts the whole film at full saturation. A percentile rather
+than a maximum, so one hot cell cannot flatten everything else.
+
+**Use `-op cm` at any serious Reynolds number.** BGK relaxes every mode at
+omega, and at Re = 30000 omega is 1.99795; it diverges at `t* = 1.5` where the
+central-moment operator completes `t* = 3`.
+
+### The three clips in `anim/`
+
+| file | what it shows |
+|---|---|
+| `rayleigh_taylor.mp4` | At = 0.5, Re = 256 — the reference case, sound |
+| `rayleigh_taylor_re30000.mp4` | At = 0.1, Re = 30000 — the high-Re case, sound |
+| `rayleigh_taylor_at998.mp4` | At = 0.998 under **BGK**, and a KNOWN ARTEFACT |
+
+The third is kept as evidence, not as a showcase. Its phase field is smooth and
+physically sensible but its velocity field is dominated by a one-cell
+alternating mode, measured 70x stronger than the same render at a density ratio
+of 3 — grid-scale oscillation that BGK does not damp, which is the measurement
+that motivated the central-moment operator. Do not show it as a result.

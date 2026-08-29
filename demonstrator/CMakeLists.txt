@@ -8,7 +8,7 @@
 # Mixing the two dilutes what "validation" means, so they do not share a
 # directory and no demonstrator is registered with add_test.
 
-foreach(d aorta urban)
+foreach(d aorta urban rayleigh_taylor)
   add_executable(${d} ${d}.cpp)
   target_link_libraries(${d} PRIVATE lbm)
   # FieldDump.hpp is a diagnostic helper shared with the validation cases and
@@ -33,3 +33,10 @@ add_executable(vol_aorta vol_aorta.cpp)
 add_executable(vol_urban vol_urban.cpp)
 find_package(Threads REQUIRED)
 target_link_libraries(vol_urban PRIVATE Threads::Threads)
+
+# Frame renderer for the Rayleigh-Taylor dumps. Plain host C++ for the same
+# reason vol_aorta and vol_urban are: it reads dump files, and building a figure
+# tool against the solver would make the figure depend on the simulation
+# compiling. Keeping it separate is also what makes re-colouring a second's work
+# instead of a re-run.
+add_executable(render_rt render_rt.cpp)
