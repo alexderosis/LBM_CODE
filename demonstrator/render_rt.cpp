@@ -15,6 +15,12 @@
 //      rt_%04d_phi.bin, rt_%04d_ux.bin, rt_%04d_uy.bin
 //  each  int32 nx, int32 ny, then nx*ny float32, row major.
 //
+//  An OPTIONAL rt_%04d_body.bin carries a solid indicator in [0,1] -- the
+//  water-entry case writes one -- and is composited over both panels wherever it
+//  is present. It is picked up automatically: no flag, because a frame either
+//  has a body in it or does not, and asking the user to remember which is a way
+//  of getting silently bodyless pictures.
+//
 //  WHAT IT DRAWS. Two panels: the phase field, and the out-of-plane vorticity
 //  d(uy)/dx - d(ux)/dy by central differences with periodic wrap in x.
 //
@@ -183,13 +189,15 @@ int main(int argc, char** argv) {
 
   for (int fr = 0; fr < n; ++fr) {
     char nm[512];
-    Field phi, ux, uy;
+    Field phi, ux, uy, solid;
     std::snprintf(nm, sizeof nm, "%s/rt_%04d_phi.bin", in.c_str(), fr);
     if (!read_field(nm, phi)) { std::printf("  missing %s, stopping\n", nm); break; }
     std::snprintf(nm, sizeof nm, "%s/rt_%04d_ux.bin", in.c_str(), fr);
     if (!read_field(nm, ux)) break;
     std::snprintf(nm, sizeof nm, "%s/rt_%04d_uy.bin", in.c_str(), fr);
     if (!read_field(nm, uy)) break;
+    std::snprintf(nm, sizeof nm, "%s/rt_%04d_body.bin", in.c_str(), fr);
+    const bool has_body = read_field(nm, solid);
 
     const int nx = phi.nx, ny = phi.ny;
     auto at = [&](const std::vector<float>& v, int x, int y) {
@@ -230,6 +238,23 @@ int main(int argc, char** argv) {
           c = (t < 0) ? ramp(P.vneg, P.nv, m) : ramp(P.vpos, P.nv, m);
         } else {
           c = Rgb{10, 10, 14};                        // divider
+        }
+        // The body last, over whichever panel it lands on. Composited by chi
+        // rather than thresholded, so its smoothed edge -- which is the edge the
+        // solver actually applies -- is what gets drawn, not a sharper one the
+        // simulation never saw.
+        if (has_body && col != nx + gap / 2) {
+          const int bx = (col < nx) ? col : (col - nx - gap);
+          if (bx >= 0 && bx < nx) {
+            const double q = double(solid.v[std::size_t(y) * nx + bx]);
+            if (q > 0.004) {
+              const Rgb body{34, 38, 48}, edge{176, 184, 198};
+              // A pale rim where chi is mid-range: the penalised surface is a
+              // band, and showing it as one is more honest than a hard outline.
+              const double rim = 4.0 * q * (1.0 - q);
+              c = mix(mix(c, body, std::min(1.0, q * 1.6)), edge, 0.55 * rim);
+            }
+          }
         }
         const std::size_t o = (std::size_t(py) * W + px) * 3;
         img[o] = c.r; img[o + 1] = c.g; img[o + 2] = c.b;
