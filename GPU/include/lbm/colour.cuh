@@ -269,6 +269,16 @@ struct ColourModel {
     return rho_r * phi_i(i, alpha_r) + rho_b * phi_i(i, alpha_b);
   }
 
+  //--------------------------------------------------------------------------
+  // The pressure, Eq. (26): p = sum_k rho_k cs_k^2, each phase with its own
+  // alpha. This is the trace of the rest term and the quantity that is
+  // continuous through the interface -- the whole reason that term is per
+  // colour. It is also what the closed-form central moments are written in.
+  //--------------------------------------------------------------------------
+  LBM_HD LBM_INLINE Real pressure(Real rho_r, Real rho_b) const {
+    return rho_r * cs2_of_alpha(alpha_r) + rho_b * cs2_of_alpha(alpha_b);
+  }
+
   // f_i^eq(rho_r, rho_b, u = 0): every other term of Eq. (18) carries a u or a
   // G, and G vanishes with u, so the rest term is the whole equilibrium at rest.
   // This is what the recolouring is written against.
@@ -312,11 +322,190 @@ struct ColourModel {
 };
 
 //==============================================================================
+//  CLOSED-FORM CENTRAL MOMENTS, AND WHY THEY ARE WORTH THE DERIVATION.
+//
+//  The first version of this operator built the equilibrium and the
+//  perturbation as POPULATIONS and transformed both, which is exact by
+//  construction and was the right way to get it correct. It cost four
+//  transforms per node and six live 27-arrays, and a T4 measured what that
+//  buys: 20.2 MLUPS against the single-phase core's 950, with ptxas reporting
+//  119 registers and a 216-byte STACK FRAME -- two arrays that did not fit in
+//  registers and lived in local memory, read and written at every node.
+//
+//  So the equilibrium's and the perturbation's central moments are derived
+//  here instead. NOTHING BELOW IS ASSUMED FROM THE PRODUCT-FORM EQUILIBRIUM:
+//  Eq. (18) is not that equilibrium, so eq_moment() of core.cuh -- where every
+//  central moment above order 0 collapses to zero -- does not apply and would
+//  be silently wrong if reused. Each piece was derived symbolically over exact
+//  rationals and checked against the transform it replaces, and
+//  test/host_colour.cpp asserts that agreement on random states.
+//
+//  THE THREE PIECES OF Eq. (18), each with its own structure.
+//
+//  (a) THE REST TERM, sum_k rho_k phi_i(alpha_k). Its raw moments are
+//      isotropic and, remarkably, GEOMETRIC in the number of squared indices:
+//      sum_i phi_i c_x^2 = cs_k^2, and then c_x^2 c_y^2 gives cs_k^2/3 and
+//      c_x^2 c_y^2 c_z^2 gives cs_k^2/9. That makes the central moments a
+//      difference of two separable products,
+//
+//          k = 3P * prod_a W(p_a) - 3S * prod_a D(p_a),
+//          W = (1, -u_a, u_a^2),   D = (1, -u_a, u_a^2 - cs^2),
+//
+//      with P = sum_k rho_k cs_k^2 the PRESSURE and S = P - rho cs^2. Note W is
+//      just (-u_a)^p, so the first product is (-1)^n prod u^p.
+//
+//  (b) THE VELOCITY POLYNOMIAL, rho w_i (3cu + 4.5cu^2 - 1.5u^2 + 4.5cu^3
+//      - 4.5 cu u^2). Its central moments collapse to
+//
+//          k = rho * C[p+q+r] * ux^p uy^q uz^r,   C = 0, 1, -1, 1, -2, 5, -11,
+//
+//      i.e. the coefficient depends only on the TOTAL order. That is a property
+//      of the third-order truncation on this lattice, not a general one.
+//
+//  (c) Phi_i of Eq. (21) AND the perturbation of Eq. (30) share a structure:
+//      every ODD raw moment vanishes, leaving a second-order tensor T, a
+//      fourth-order pair (Q, R) and a sixth-order scalar H. cg_source_high()
+//      below is the shift of exactly such a source, derived once and used for
+//      both. Its 17 cases are machine-generated from the symbolic derivation
+//      rather than transcribed, because 27 formulas copied by eye is precisely
+//      how a silent error gets in.
+//
+//  TWO CONSEQUENCES WORTH STATING, both now visible rather than computed:
+//
+//    * ORDER 1 VANISHES FOR BOTH SOURCES. The perturbation contributes nothing
+//      to momentum and neither does the equilibrium -- so the first-order line
+//      of the collision carries only the body force. That is the "conserves
+//      momentum" property the test measures, here as an identity.
+//    * ORDER 2 OF THE EQUILIBRIUM IS S delta_ab + Psi_ab, with no u-dependence
+//      at all: the c_n and 3S products cancel exactly at second order. At a
+//      matched density S = 0 and the classical result -- equilibrium central
+//      moments vanish above order 0 -- is recovered as a special case.
+//==============================================================================
+
+// The raw moments of a source whose odd moments all vanish. Both Phi_i and the
+// perturbation are of this kind, so one struct and one shift serve both.
+struct CgSource {
+  Real Txx, Tyy, Tzz, Txy, Txz, Tyz;   // order 2
+  Real Qxy, Qxz, Qyz;                  // order 4, the (2,2,0) family
+  Real Rx, Ry, Rz;                     // order 4, the (2,1,1) family
+  Real H;                              // order 6
+};
+
+//------------------------------------------------------------------------------
+// The central moment of such a source at one slot, for order >= 3 only -- order
+// 0 and 1 vanish identically and order 2 is just T, so the caller reads those
+// off directly. MACHINE-GENERATED; see the banner above.
+//------------------------------------------------------------------------------
+LBM_HD LBM_INLINE Real cg_source_high(int slot, const CgSource& s,
+                                      Real ux, Real uy, Real uz) {
+  const Real ux2 = ux * ux, uy2 = uy * uy, uz2 = uz * uz;
+  switch (slot) {
+      case 5:   // (0,1,2)
+        return -Real(2)*s.Tyz*uz - s.Tzz*uy ;
+      case 7:   // (0,2,1)
+        return -Real(2)*s.Tyz*uy - s.Tyy*uz ;
+      case 8:   // (0,2,2)
+        return s.Qyz - (Real(1)/Real(3))*s.Tzz - (Real(1)/Real(3))*s.Tyy +
+               Real(4)*s.Tyz*uy*uz + s.Tzz*uy2 + s.Tyy*uz2 ;
+      case 11:   // (1,0,2)
+        return -Real(2)*s.Txz*uz - s.Tzz*ux ;
+      case 13:   // (1,1,1)
+        return -s.Tyz*ux - s.Txz*uy - s.Txy*uz ;
+      case 14:   // (1,1,2)
+        return s.Rz - (Real(1)/Real(3))*s.Txy + Real(2)*s.Tyz*ux*uz +
+               Real(2)*s.Txz*uy*uz + s.Txy*uz2 + s.Tzz*ux*uy ;
+      case 15:   // (1,2,0)
+        return -Real(2)*s.Txy*uy - s.Tyy*ux ;
+      case 16:   // (1,2,1)
+        return s.Ry - (Real(1)/Real(3))*s.Txz + Real(2)*s.Tyz*ux*uy + s.Txz*uy2 +
+               Real(2)*s.Txy*uy*uz + s.Tyy*ux*uz ;
+      case 17:   // (1,2,2)
+        return -Real(2)*s.Rz*uy - Real(2)*s.Ry*uz - s.Qyz*ux +
+               (Real(2)/Real(3))*s.Txz*uz + (Real(2)/Real(3))*s.Txy*uy +
+               (Real(1)/Real(3))*s.Tzz*ux + (Real(1)/Real(3))*s.Tyy*ux -
+               Real(4)*s.Tyz*ux*uy*uz - Real(2)*s.Txz*uy2*uz - Real(2)*s.Txy*uy*uz2 -
+               s.Tzz*ux*uy2 - s.Tyy*ux*uz2 ;
+      case 19:   // (2,0,1)
+        return -Real(2)*s.Txz*ux - s.Txx*uz ;
+      case 20:   // (2,0,2)
+        return s.Qxz - (Real(1)/Real(3))*s.Tzz - (Real(1)/Real(3))*s.Txx +
+               Real(4)*s.Txz*ux*uz + s.Tzz*ux2 + s.Txx*uz2 ;
+      case 21:   // (2,1,0)
+        return -Real(2)*s.Txy*ux - s.Txx*uy ;
+      case 22:   // (2,1,1)
+        return s.Rx - (Real(1)/Real(3))*s.Tyz + s.Tyz*ux2 + Real(2)*s.Txz*ux*uy +
+               Real(2)*s.Txy*ux*uz + s.Txx*uy*uz ;
+      case 23:   // (2,1,2)
+        return -Real(2)*s.Rz*ux - Real(2)*s.Rx*uz - s.Qxz*uy +
+               (Real(2)/Real(3))*s.Tyz*uz + (Real(2)/Real(3))*s.Txy*ux +
+               (Real(1)/Real(3))*s.Tzz*uy + (Real(1)/Real(3))*s.Txx*uy -
+               Real(2)*s.Tyz*ux2*uz - Real(4)*s.Txz*ux*uy*uz - Real(2)*s.Txy*ux*uz2 -
+               s.Tzz*ux2*uy - s.Txx*uy*uz2 ;
+      case 24:   // (2,2,0)
+        return s.Qxy - (Real(1)/Real(3))*s.Tyy - (Real(1)/Real(3))*s.Txx +
+               Real(4)*s.Txy*ux*uy + s.Tyy*ux2 + s.Txx*uy2 ;
+      case 25:   // (2,2,1)
+        return -Real(2)*s.Ry*ux - Real(2)*s.Rx*uy - s.Qxy*uz +
+               (Real(2)/Real(3))*s.Tyz*uy + (Real(2)/Real(3))*s.Txz*ux +
+               (Real(1)/Real(3))*s.Tyy*uz + (Real(1)/Real(3))*s.Txx*uz -
+               Real(2)*s.Tyz*ux2*uy - Real(2)*s.Txz*ux*uy2 - Real(4)*s.Txy*ux*uy*uz -
+               s.Tyy*ux2*uz - s.Txx*uy2*uz ;
+      case 26:   // (2,2,2)
+        return s.H - (Real(1)/Real(3))*s.Qyz - (Real(1)/Real(3))*s.Qxz -
+               (Real(1)/Real(3))*s.Qxy + (Real(1)/Real(9))*s.Tzz +
+               (Real(1)/Real(9))*s.Tyy + (Real(1)/Real(9))*s.Txx + Real(4)*s.Rz*ux*uy
+               + Real(4)*s.Ry*ux*uz + Real(4)*s.Rx*uy*uz + s.Qyz*ux2 + s.Qxz*uy2 +
+               s.Qxy*uz2 - (Real(4)/Real(3))*s.Tyz*uy*uz -
+               (Real(4)/Real(3))*s.Txz*ux*uz - (Real(4)/Real(3))*s.Txy*ux*uy -
+               (Real(1)/Real(3))*s.Tzz*uy2 - (Real(1)/Real(3))*s.Tzz*ux2 -
+               (Real(1)/Real(3))*s.Tyy*uz2 - (Real(1)/Real(3))*s.Tyy*ux2 -
+               (Real(1)/Real(3))*s.Txx*uz2 - (Real(1)/Real(3))*s.Txx*uy2 +
+               Real(4)*s.Tyz*ux2*uy*uz + Real(4)*s.Txz*ux*uy2*uz +
+               Real(4)*s.Txy*ux*uy*uz2 + s.Tzz*ux2*uy2 + s.Tyy*ux2*uz2 +
+               s.Txx*uy2*uz2 ;
+      default: return Real(0);
+  }
+}
+
+//------------------------------------------------------------------------------
+// The per-axis factors of the rest term's two separable products, and the
+// total-order coefficient of the velocity polynomial. Written as ternaries
+// rather than indexed tables ON PURPOSE: a local array indexed by a runtime
+// value is placed in local memory, which is the very thing this rewrite exists
+// to remove.
+//------------------------------------------------------------------------------
+LBM_HD LBM_INLINE Real cg_upow(int e, Real u) {
+  return (e == 0) ? Real(1) : ((e == 1) ? u : u * u);
+}
+LBM_HD LBM_INLINE Real cg_dfac(int e, Real u) {
+  return (e == 0) ? Real(1)
+                  : ((e == 1) ? -u : u * u - ColourLattice::cs2());
+}
+// c_n = 3P(-1)^n + rho C_n, the rest term and the velocity polynomial combined.
+LBM_HD LBM_INLINE Real cg_cN(int ord, Real P3, Real rho) {
+  Real C;
+  switch (ord) {
+    case 0:  C = Real(0);   break;
+    case 1:  C = Real(1);   break;
+    case 2:  C = -Real(1);  break;
+    case 3:  C = Real(1);   break;
+    case 4:  C = -Real(2);  break;
+    case 5:  C = Real(5);   break;
+    default: C = -Real(11); break;
+  }
+  return ((ord & 1) ? -P3 : P3) + rho * C;
+}
+
+//==============================================================================
 //  Suboperators (1) and (2), on the colour-blind populations.
 //
 //  f is overwritten with the post-collision, post-perturbation state; the caller
 //  recolours it. The gradients arrive BY VALUE rather than as arrays, so this
 //  function reads no memory at all and a test can drive it directly.
+//
+//  ONE transform in, one out. The equilibrium and the perturbation never become
+//  populations and never become moment arrays; they are evaluated per slot from
+//  the closed forms above.
 //==============================================================================
 LBM_HD LBM_INLINE
 void colour_collide(const ColourModel& m, Real f[27], Real rho_r, Real rho_b,
@@ -324,58 +513,87 @@ void colour_collide(const ColourModel& m, Real f[27], Real rho_r, Real rho_b,
   const Real rho   = rho_r + rho_b;
   const Real nubar = m.nu_at(p);
   const Real omega = m.omega_at(p);
+  const Real ux = u[0], uy = u[1], uz = u[2];
 
-  //---- G and u.grad(rho) for Phi_i, Eq. (24) ----
-  Real G[3][3];
-  for (int i = 0; i < 3; ++i)
-    for (int j = 0; j < 3; ++j)
-      G[i][j] = (u[i] * dr[j] + u[j] * dr[i]) / Real(48);
-  const Real udrho = u[0] * dr[0] + u[1] * dr[1] + u[2] * dr[2];
+  //---- Phi_i, Eq. (21), through its raw moments.
+  // 48 G_ab = u_a dr_b + u_b dr_a, so G is never formed.
+  const Real udr = ux * dr[0] + uy * dr[1] + uz * dr[2];
+  const Real Exx = nubar * (Real(2) * ux * dr[0] + udr);
+  const Real Eyy = nubar * (Real(2) * uy * dr[1] + udr);
+  const Real Ezz = nubar * (Real(2) * uz * dr[2] + udr);
+  const Real Exy = nubar * (ux * dr[1] + uy * dr[0]);
+  const Real Exz = nubar * (ux * dr[2] + uz * dr[0]);
+  const Real Eyz = nubar * (uy * dr[2] + uz * dr[1]);
+  const Real t3  = nubar * udr / Real(3);
 
-  Real fe[27];
-  m.equilibrium(fe, rho_r, rho_b, u, G, nubar, udrho);
-
-  //---- (2) THE PERTURBATION, Eq. (30), added to the populations before the
-  // transform: it is a second-moment source, and the transform carries it into
-  // the right slots without their having to be written by hand.
+  //---- (2) THE PERTURBATION, Eq. (30), through its raw moments.
   //
   // THE COEFFICIENT IS A, NOT A/2, and this is the reading most likely to be
-  // reverted by someone checking the port against the paper. Eq. (30) is written
-  // PER COLOUR and Eq. (39) sums the capillary stress over k as well as over i;
+  // reverted by someone checking against the paper. Eq. (30) is written PER
+  // COLOUR and Eq. (39) sums the capillary stress over k as well as over i;
   // applied to the colour-blind population the two halves add. Derived from
-  // Eq. (39) rather than copied from Eq. (32), a flat interface gives
-  // sigma = (2 A tau / 9) delta(phi) with phi running -1 to +1, so delta = 2 and
-  // sigma = 4 A tau / 9, which is Eq. (32) exactly. With A/2 a static droplet
-  // reports a surface tension 50% low with every other property intact.
+  // Eq. (39), a flat interface gives sigma = (2 A tau / 9) delta(phi) with phi
+  // running -1 to +1, so delta = 2 and sigma = 4 A tau / 9, which is Eq. (32)
+  // exactly. With A/2 a static droplet reports a tension 50% low with every
+  // other property of the model intact.
+  //
+  // The second moment is (2/9) A |grad phi| (n_a n_b - delta_ab) with n the unit
+  // colour gradient -- so its NORMAL component vanishes identically for every
+  // direction of n, and the tangential one does not. Writing it as
+  // g_a g_b / |g| keeps the unit vector implicit and costs one reciprocal.
+  Real Pxx = Real(0), Pyy = Real(0), Pzz = Real(0);
+  Real Pxy = Real(0), Pxz = Real(0), Pyz = Real(0);
+  Real Qxy = Real(0), Qxz = Real(0), Qyz = Real(0);
+  Real Rx  = Real(0), Ry  = Real(0), Rz  = Real(0);
   const Real gm2 = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
-  Real pert[27];
   if (gm2 > Real(1e-24) && m.A != Real(0)) {
-    const Real gm   = cg_sqrt(gm2);
-    const Real invm = Real(1) / gm;
-    const Real nh[3] = {g[0] * invm, g[1] * invm, g[2] * invm};
-    for (int i = 0; i < 27; ++i) {
-      const Real cn = Real(ColourLattice::cx(i)) * nh[0]
-                    + Real(ColourLattice::cy(i)) * nh[1]
-                    + Real(ColourLattice::cz(i)) * nh[2];
-      pert[i] = m.A * gm * (ColourLattice::w(i) * cn * cn - ColourModel::B_i(i));
-    }
-  } else {
-    for (int i = 0; i < 27; ++i) pert[i] = Real(0);
+    const Real gm  = cg_sqrt(gm2);
+    const Real inv = Real(1) / gm;
+    const Real ca  = Real(2) * m.A / Real(9);
+    const Real cq  = Real(2) * m.A / Real(27) * inv;
+    Pxx = ca * (g[0] * g[0] * inv - gm);
+    Pyy = ca * (g[1] * g[1] * inv - gm);
+    Pzz = ca * (g[2] * g[2] * inv - gm);
+    Pxy = ca * g[0] * g[1] * inv;
+    Pxz = ca * g[0] * g[2] * inv;
+    Pyz = ca * g[1] * g[2] * inv;
+    Qxy = -cq * g[2] * g[2];
+    Qxz = -cq * g[1] * g[1];
+    Qyz = -cq * g[0] * g[0];
+    Rx  =  cq * g[1] * g[2];
+    Ry  =  cq * g[0] * g[2];
+    Rz  =  cq * g[0] * g[1];
   }
 
-  //---- (1) the central-moment collision ----
-  const Real ub[3] = {u[0], u[1], u[2]};
-  Real k[27], ke[27], kp[27];
-  to_moments(f,    ub, k);
-  to_moments(fe,   ub, ke);
-  to_moments(pert, ub, kp);
+  // Above second order the two sources are only ever needed added together.
+  CgSource s;
+  s.Txx = Exx + Pxx;  s.Tyy = Eyy + Pyy;  s.Tzz = Ezz + Pzz;
+  s.Txy = Exy + Pxy;  s.Txz = Exz + Pxz;  s.Tyz = Eyz + Pyz;
+  s.Qxy = nubar * (Real(2) * (ux * dr[0] + uy * dr[1]) / Real(3)) + t3 + Qxy;
+  s.Qxz = nubar * (Real(2) * (ux * dr[0] + uz * dr[2]) / Real(3)) + t3 + Qxz;
+  s.Qyz = nubar * (Real(2) * (uy * dr[1] + uz * dr[2]) / Real(3)) + t3 + Qyz;
+  s.Rx  = nubar * (uy * dr[2] + uz * dr[1]) / Real(3) + Rx;
+  s.Ry  = nubar * (ux * dr[2] + uz * dr[0]) / Real(3) + Ry;
+  s.Rz  = nubar * (ux * dr[1] + uy * dr[0]) / Real(3) + Rz;
+  s.H   = t3;                                  // the perturbation has none
 
+  //---- (1) the central-moment collision. The only transform in the operator.
+  const Real ub[3] = {ux, uy, uz};
+  Real k[27];
+  to_moments(f, ub, k);
+
+  const Real P  = m.pressure(rho_r, rho_b);
+  const Real S  = P - rho * ColourLattice::cs2();
+  const Real P3 = Real(3) * P;
+  const Real S3 = P3 - rho;                        // 3S, exactly
+
+  // order 1: conserved. s0 = s1 = 0 in Eq. (15) means the collision leaves them
+  // alone, and BOTH sources have a vanishing first central moment, so the body
+  // force is the only thing that moves them.
   const Real fw = rho - m.rho_ref;
-  const Real F[3] = {fw * m.bx, fw * m.by, fw * m.bz};
-
-  // order 1: conserved, plus the body force. s0 = s1 = 0 in Eq. (15) means the
-  // collision leaves them alone; the force is the only thing that moves them.
-  for (int a = 0; a < 3; ++a) k[cg_i1(a)] += F[a] + kp[cg_i1(a)];
+  k[cg_i1(0)] += fw * m.bx;
+  k[cg_i1(1)] += fw * m.by;
+  k[cg_i1(2)] += fw * m.bz;
 
   // order 2: trace at s2b, deviatoric and shear at s2v. THE PERTURBATION IS NOT
   // RELAXED -- it is a source, and the (1 - s/2) factor a Guo force carries does
@@ -384,10 +602,12 @@ void colour_collide(const ColourModel& m, Real f[27], Real rho_r, Real rho_b,
   // one relaxation time. Applying (1 - s/2) here puts sigma out by that factor,
   // and the static droplet reports it.
   {
-    Real d[3], e[3], q[3];
+    const Real e[3] = {S + Exx, S + Eyy, S + Ezz};   // equilibrium, closed form
+    const Real q[3] = {Pxx, Pyy, Pzz};               // perturbation
+    Real d[3];
     Real tr = Real(0), tre = Real(0), trq = Real(0);
     for (int a = 0; a < 3; ++a) {
-      d[a] = k[cg_i2d(a)];  e[a] = ke[cg_i2d(a)];  q[a] = kp[cg_i2d(a)];
+      d[a] = k[cg_i2d(a)];
       tr += d[a];  tre += e[a];  trq += q[a];
     }
     const Real invD = Real(1) / Real(3);
@@ -396,16 +616,21 @@ void colour_collide(const ColourModel& m, Real f[27], Real rho_r, Real rho_b,
       k[cg_i2d(a)] = (Real(1) - omega) * (d[a] - tr * invD)
                    + omega * (e[a] - tre * invD)
                    + (q[a] - trq * invD) + tr_post * invD;
-    for (int a = 0; a < 3; ++a)
-      for (int b = a + 1; b < 3; ++b) {
-        const int id = cg_i2s(a, b);
-        k[id] = (Real(1) - omega) * k[id] + omega * ke[id] + kp[id];
-      }
+    k[cg_i2s(0, 1)] = (Real(1) - omega) * k[cg_i2s(0, 1)] + omega * Exy + Pxy;
+    k[cg_i2s(0, 2)] = (Real(1) - omega) * k[cg_i2s(0, 2)] + omega * Exz + Pxz;
+    k[cg_i2s(1, 2)] = (Real(1) - omega) * k[cg_i2s(1, 2)] + omega * Eyz + Pyz;
   }
 
-  // order >= 3: s3 = s4 = s5 = s6 = 1, so straight to equilibrium.
-  for (int n = 0; n < 27; ++n)
-    if (order_of(n) >= 3) k[n] = ke[n] + kp[n];
+  // order >= 3: s3 = s4 = s5 = s6 = 1, so straight to equilibrium plus source.
+#pragma unroll
+  for (int n = 0; n < 27; ++n) {
+    const int pe = p_of(n), qe = q_of(n), re = r_of(n);
+    const int ord = pe + qe + re;
+    if (ord < 3) continue;
+    k[n] = cg_cN(ord, P3, rho) * cg_upow(pe, ux) * cg_upow(qe, uy) * cg_upow(re, uz)
+         - S3 * cg_dfac(pe, ux) * cg_dfac(qe, uy) * cg_dfac(re, uz)
+         + cg_source_high(n, s, ux, uy, uz);
+  }
 
   to_populations(k, ub, f);
 }

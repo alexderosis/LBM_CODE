@@ -42,6 +42,79 @@ static void check(bool ok, const char* what, double detail = 0.0) {
 
 static double worst(double a, double b) { return std::fabs(a) > std::fabs(b) ? a : b; }
 
+
+//==============================================================================
+//  THE IMPLEMENTATION THIS REPLACED, kept here as the reference.
+//
+//  colour_collide() used to build the equilibrium and the perturbation as
+//  POPULATIONS and transform both, which is exact by construction. It now
+//  evaluates their central moments in closed form instead, to get rid of four
+//  live 27-arrays and three of the four transforms. That is only worth doing if
+//  the two agree, so the old path lives here and section 6 asserts it.
+//==============================================================================
+static void reference_collide(const ColourModel& m, Real f[27], Real rho_r,
+                              Real rho_b, const Real u[3], Real p,
+                              const Real g[3], const Real dr[3]) {
+  const Real rho   = rho_r + rho_b;
+  const Real nubar = m.nu_at(p);
+  const Real omega = m.omega_at(p);
+
+  Real G[3][3];
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j)
+      G[i][j] = (u[i] * dr[j] + u[j] * dr[i]) / Real(48);
+  const Real udrho = u[0] * dr[0] + u[1] * dr[1] + u[2] * dr[2];
+
+  Real fe[27];
+  m.equilibrium(fe, rho_r, rho_b, u, G, nubar, udrho);
+
+  const Real gm2 = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
+  Real pert[27];
+  if (gm2 > Real(1e-24) && m.A != Real(0)) {
+    const Real gm = std::sqrt(gm2), invm = Real(1) / gm;
+    const Real nh[3] = {g[0] * invm, g[1] * invm, g[2] * invm};
+    for (int i = 0; i < 27; ++i) {
+      const Real cn = Real(D3Q27::cx(i)) * nh[0] + Real(D3Q27::cy(i)) * nh[1]
+                    + Real(D3Q27::cz(i)) * nh[2];
+      pert[i] = m.A * gm * (D3Q27::w(i) * cn * cn - ColourModel::B_i(i));
+    }
+  } else {
+    for (int i = 0; i < 27; ++i) pert[i] = Real(0);
+  }
+
+  const Real ub[3] = {u[0], u[1], u[2]};
+  Real k[27], ke[27], kp[27];
+  to_moments(f, ub, k);
+  to_moments(fe, ub, ke);
+  to_moments(pert, ub, kp);
+
+  const Real fw = rho - m.rho_ref;
+  const Real F[3] = {fw * m.bx, fw * m.by, fw * m.bz};
+  for (int a = 0; a < 3; ++a) k[cg_i1(a)] += F[a] + kp[cg_i1(a)];
+  {
+    Real d[3], e[3], q[3];
+    Real tr = Real(0), tre = Real(0), trq = Real(0);
+    for (int a = 0; a < 3; ++a) {
+      d[a] = k[cg_i2d(a)];  e[a] = ke[cg_i2d(a)];  q[a] = kp[cg_i2d(a)];
+      tr += d[a];  tre += e[a];  trq += q[a];
+    }
+    const Real invD = Real(1) / Real(3);
+    const Real tr_post = (Real(1) - m.omega_bulk) * tr + m.omega_bulk * tre + trq;
+    for (int a = 0; a < 3; ++a)
+      k[cg_i2d(a)] = (Real(1) - omega) * (d[a] - tr * invD)
+                   + omega * (e[a] - tre * invD)
+                   + (q[a] - trq * invD) + tr_post * invD;
+    for (int a = 0; a < 3; ++a)
+      for (int b = a + 1; b < 3; ++b) {
+        const int id = cg_i2s(a, b);
+        k[id] = (Real(1) - omega) * k[id] + omega * ke[id] + kp[id];
+      }
+  }
+  for (int n = 0; n < 27; ++n)
+    if (order_of(n) >= 3) k[n] = ke[n] + kp[n];
+  to_populations(k, ub, f);
+}
+
 int main() {
   std::printf("Colour-gradient checks, host build, Real = %s\n",
               sizeof(Real) == 4 ? "float" : "double");
@@ -309,7 +382,67 @@ int main() {
   }
 
   //===========================================================================
-  std::printf("\n6. THE PORT ITSELF: three passes, Esoteric Pull, a real droplet\n\n");
+  std::printf("\n6. the closed form against the transform it replaced\n\n");
+  //===========================================================================
+  {
+    // A deterministic sweep of states: density ratios, velocities, colour
+    // gradients at every orientation including axis-aligned and zero, density
+    // gradients, body forces, viscosity ratios. If the derivation dropped a
+    // term anywhere, one of these finds it.
+    double worst_pop = 0, worst_rel = 0;
+    int cases = 0;
+    const double gam[3] = {1.0, 10.0, 100.0};
+    const double gs[5][3] = {{0,0,0}, {0.2,0,0}, {0.1,-0.05,0.02},
+                             {-0.3,0.15,0.25}, {0.02,0.02,0.02}};
+    const double us[4][3] = {{0,0,0}, {0.05,0,0}, {0.03,-0.02,0.01},
+                             {-0.08,0.06,-0.04}};
+    for (int gi = 0; gi < 3; ++gi)
+      for (int gg = 0; gg < 5; ++gg)
+        for (int uu = 0; uu < 4; ++uu) {
+          ColourModel m;
+          m.alpha_b = Real(8.0 / 27.0);
+          m.alpha_r = Real(ColourModel::alpha_r_from_ratio(Real(gam[gi]),
+                                                           Real(8.0 / 27.0)));
+          m.rho_r0 = Real(gam[gi]);  m.rho_b0 = Real(1);
+          m.nu_r = Real(0.1);  m.nu_b = Real(0.02);      // a viscosity ratio too
+          m.A = Real(0.004);   m.beta = Real(0.7);
+          m.omega_bulk = Real(0.9);
+          m.bx = Real(1e-5); m.by = Real(-2e-5); m.bz = Real(3e-6);
+          m.rho_ref = Real(0.5 * (gam[gi] + 1.0));
+
+          const Real rr = Real(0.6 * gam[gi]), rb = Real(0.35);
+          const Real u[3] = {Real(us[uu][0]), Real(us[uu][1]), Real(us[uu][2])};
+          const Real g[3] = {Real(gs[gg][0]), Real(gs[gg][1]), Real(gs[gg][2])};
+          const Real dr[3] = {Real(0.4), Real(-0.25), Real(0.1)};
+          const Real ph = m.order_parameter(rr, rb);
+
+          Real fa[27], fb[27];
+          for (int i = 0; i < 27; ++i) {
+            const double v = D3Q27::w(i) * (double(rr) + double(rb))
+                           * (1.0 + 0.03 * std::sin(1.7 * i + 0.4 * gg + 0.9 * uu));
+            fa[i] = Real(v);  fb[i] = Real(v);
+          }
+          colour_collide(m, fa, rr, rb, u, ph, g, dr);
+          reference_collide(m, fb, rr, rb, u, ph, g, dr);
+
+          double scale = 0;
+          for (int i = 0; i < 27; ++i) scale = std::max(scale, std::fabs(double(fb[i])));
+          for (int i = 0; i < 27; ++i) {
+            const double d = std::fabs(double(fa[i]) - double(fb[i]));
+            worst_pop = std::max(worst_pop, d);
+            if (scale > 0) worst_rel = std::max(worst_rel, d / scale);
+          }
+          ++cases;
+        }
+    const double tol = (sizeof(Real) == 4) ? 3e-6 : 1e-13;
+    check(worst_rel < tol,
+          "closed form == transform, every state", worst_rel);
+    std::printf("        (%d states; worst relative difference %.3e)\n",
+                cases, worst_rel);
+  }
+
+  //===========================================================================
+  std::printf("\n7. THE PORT ITSELF: three passes, Esoteric Pull, a real droplet\n\n");
   //===========================================================================
   {
     const int nx = 12, ny = 12, nz = 12;
