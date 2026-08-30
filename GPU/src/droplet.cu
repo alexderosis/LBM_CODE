@@ -24,6 +24,11 @@
 //  rho_b = 0.018 at r = R - W, contributing 6e-3 to the pressure against a
 //  Laplace jump of 5.9e-5 -- a hundred times the quantity being measured.
 //
+//  -window changes that gap, in units of W, and the default stays 3. It exists
+//  so this driver and bubble.cu can be measured THE SAME WAY when the two
+//  models are compared: bubble.cu justifies 2 on its own error structure, and
+//  a comparison run must not let the measurement differ along with the model.
+//
 //  WHAT THE PARENT MEASURED, and what this is expected to reproduce: gamma = 1
 //  within 0.87% and gamma = 10 within 0.77%. AT gamma = 100 AND 1000 THE PARENT
 //  OVERESTIMATES sigma and the cause is not settled -- four hypotheses were
@@ -65,6 +70,7 @@ struct DropletInit {
 int main(int argc, char** argv) {
   int n = 64, steps = 4000, report = 0;
   double R = 16.0, W = 4.0, gamma = 1.0, sigma = 1e-3, tau = 0.8;
+  double window = 3.0;   // averaging half-gap, in interface widths
   for (int i = 1; i < argc; ++i) {
     auto num = [&](double& v) { if (i + 1 < argc) v = std::atof(argv[++i]); };
     if      (!std::strcmp(argv[i], "-n"))     { if (i + 1 < argc) n = std::atoi(argv[++i]); }
@@ -75,6 +81,7 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "-gamma")) num(gamma);
     else if (!std::strcmp(argv[i], "-sigma")) num(sigma);
     else if (!std::strcmp(argv[i], "-tau"))   num(tau);
+    else if (!std::strcmp(argv[i], "-window")) num(window);
   }
 
   const auto dev = backend::device_info();
@@ -99,8 +106,9 @@ int main(int argc, char** argv) {
   cg.model.A       = Real(A);
   cg.model.beta    = Real(0.7);
 
-  std::printf("%d^3   R = %.1f   W = %.1f   gamma = %.0f   tau = %.2f   nu = %.4f\n",
-              n, R, W, gamma, tau, nu);
+  std::printf("%d^3   R = %.1f   W = %.1f   gamma = %.0f   tau = %.2f   nu = %.4f"
+              "   window = %.1fW\n",
+              n, R, W, gamma, tau, nu, window);
   std::printf("sigma asked = %.6e   (A = %.6e)   %d steps\n\n", sigma, A, steps);
 
   cg.initialise_with(DropletInit{n, Real(R), Real(W), Real(gamma), Real(1)});
@@ -128,8 +136,8 @@ int main(int argc, char** argv) {
           const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
           const double p = double(hr[id]) * cs2r + double(hb[id]) * cs2b;
           if (!std::isfinite(p)) o.bad = true;
-          if      (r < R - 3 * W) { pin  += p; ++nin; minor += double(hb[id]); }
-          else if (r > R + 3 * W) { pout += p; ++nout; }
+          if      (r < R - window * W) { pin  += p; ++nin; minor += double(hb[id]); }
+          else if (r > R + window * W) { pout += p; ++nout; }
           const double a = hu[id], b = hv[id], e = hw[id];
           o.umax = std::max(o.umax, std::sqrt(a * a + b * b + e * e));
           mred += double(hr[id]);
@@ -145,17 +153,19 @@ int main(int argc, char** argv) {
 
   // THE WINDOW MUST EXIST. Averaging over no cells gives zero, and zero minus
   // the outside pressure is a large negative "surface tension" that looks like a
-  // physics failure and is a geometry mistake. R > 3W is required for the core to
-  // be non-empty at all, and the box must reach 3W beyond the interface.
+  // physics failure and is a geometry mistake. R > kW is required for the core to
+  // be non-empty at all, and the box must reach kW beyond the interface, where k
+  // is -window (default 3, see the header).
   {
     const Out probe = measure();
     if (probe.nin == 0 || probe.nout == 0) {
       std::printf("  NO AVERAGING WINDOW: %ld cells inside (needs r < %.1f), "
                   "%ld outside (needs r > %.1f).\n",
-                  probe.nin, R - 3 * W, probe.nout, R + 3 * W);
-      std::printf("  The core needs R > 3W, and the box needs half-diagonal > R + 3W.\n");
+                  probe.nin, R - window * W, probe.nout, R + window * W);
+      std::printf("  The core needs R > %.1fW, and the box half-diagonal > R + %.1fW.\n",
+                  window, window);
       std::printf("  With R = %.1f and W = %.1f that means n > %.0f.\n",
-                  R, W, 2.0 * (R + 3 * W) / std::sqrt(3.0));
+                  R, W, 2.0 * (R + window * W) / std::sqrt(3.0));
       return 1;
     }
   }

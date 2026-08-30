@@ -35,6 +35,16 @@
 //  measurement at the per-cent level, and it buys back a core large enough to
 //  average over.
 //
+//  -window overrides that gap, in units of W, and the default stays 2. It is
+//  there so this driver and src/droplet.cu can be measured IDENTICALLY when the
+//  two models are compared -- otherwise the measurement differs along with the
+//  model and the comparison says nothing.
+//
+//  -nu MATCHES KINEMATIC viscosity across the phases, setting mu_L = nu and
+//  mu_H = nu gamma. That is the flag a comparison against src/droplet.cu wants,
+//  because that driver sets nu_r = nu_b directly. Matching mu instead (the -mul
+//  / -muh default) leaves the heavy phase at nu/gamma; see main().
+//
 //  Runs on the host with no GPU, at a smaller grid:
 //     c++ -std=c++17 -O2 -Iinclude -x c++ src/bubble.cu -o bubble
 //==============================================================================
@@ -64,6 +74,8 @@ int main(int argc, char** argv) {
   int n = 64, steps = 6000, report = 0;
   double R = 16.0, W = 4.0, gamma = 1.0, sigma = 1e-3;
   double mobility = 0.05, mu_L = 0.05, mu_H = 0.05, gauge = 0.0;
+  double window = 2.0;   // averaging half-gap, in interface widths
+  double nu_matched = -1.0;        // -nu: set mu from rho, see below
   int viscous = 1;
   for (int i = 1; i < argc; ++i) {
     auto num = [&](double& v) { if (i + 1 < argc) v = std::atof(argv[++i]); };
@@ -79,7 +91,21 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "-mul"))    num(mu_L);
     else if (!std::strcmp(argv[i], "-muh"))    num(mu_H);
     else if (!std::strcmp(argv[i], "-gauge"))  num(gauge);
+    else if (!std::strcmp(argv[i], "-window")) num(window);
+    else if (!std::strcmp(argv[i], "-nu"))     num(nu_matched);
   }
+
+  // MATCHED KINEMATIC viscosity, applied AFTER the parse loop so that -nu and
+  // -gamma may appear in either order. Doing it inside the loop reads whatever
+  // gamma happened to be at that point, which is the default when -nu comes
+  // first -- a silent wrong run, not an error.
+  //
+  // mu_L = nu rho_L and mu_H = nu rho_H. Both mu and rho interpolate linearly
+  // in phi, so mu(phi) = nu rho(phi) EXACTLY and nu is the same constant
+  // everywhere; omega is then 1/(nu/cs2 + 1/2), independent of gamma. Matching
+  // mu instead leaves the heavy phase at nu/gamma, and at gamma = 100 that is
+  // omega = 1.994 against a limit of 2 -- which is what diverged.
+  if (nu_matched > 0) { mu_L = nu_matched * 1.0; mu_H = nu_matched * gamma; }
 
   const auto dev = backend::device_info();
   std::printf("Static droplet, phase field   D3Q27 fluid + D3Q7 phase\n");
@@ -95,10 +121,21 @@ int main(int argc, char** argv) {
   pf.fluid.kappa = Real(MultiphaseModel::kappa_from_sigma(Real(sigma), Real(W)));
   pf.enable_viscous_force(viscous != 0);
 
+  // OMEGA IS PRINTED, NOT LEFT TO BE INFERRED. omega = 1/(mu/(rho cs2) + 1/2),
+  // so matching mu across a large ratio drives the HEAVY phase towards 2 while
+  // every input still looks reasonable. A gamma = 100 run at mu = 0.05 gives
+  // omega = 1.994 and diverges; the number that says so belongs on screen
+  // before the run, not in a post-mortem.
+  const double cs2f = 1.0 / 3.0;
+  const double omL = 1.0 / (mu_L / (1.0     * cs2f) + 0.5);
+  const double omH = 1.0 / (mu_H / (gamma   * cs2f) + 0.5);
   std::printf("%d^3   R = %.1f   W = %.1f   gamma = %.0f   M = %.3f   "
-              "mu = %.3f / %.3f%s\n",
-              n, R, W, gamma, mobility, mu_L, mu_H,
+              "window = %.1fW%s\n",
+              n, R, W, gamma, mobility, window,
               viscous ? "" : "   (F_nu off)");
+  std::printf("mu = %.4f / %.4f   nu = %.4f / %.4f   omega = %.3f / %.3f%s\n",
+              mu_L, mu_H, mu_L / 1.0, mu_H / gamma, omL, omH,
+              (omL > 1.9 || omH > 1.9) ? "   <-- OVER 1.9, EXPECT DIVERGENCE" : "");
   std::printf("sigma asked = %.6e   (beta = %.4e, kappa = %.4e)   "
               "p~ gauge = %.3f   %d steps\n\n",
               sigma, double(pf.fluid.beta), double(pf.fluid.kappa), gauge, steps);
@@ -131,8 +168,8 @@ int main(int argc, char** argv) {
           const double rho = double(pf.fluid.local(Real(ph)).rho);
           const double p = rho * cs2 * double(hpt[id]);
           if (!std::isfinite(p) || !std::isfinite(ph)) o.bad = true;
-          if      (r < R - 2 * W) { pin  += p; ++nin; }
-          else if (r > R + 2 * W) { pout += p; ++nout; }
+          if      (r < R - window * W) { pin  += p; ++nin; }
+          else if (r > R + window * W) { pout += p; ++nout; }
           const double a = hu[id], b = hv[id], e = hw[id];
           o.umax = std::max(o.umax, std::sqrt(a*a + b*b + e*e));
           o.phi_min = std::min(o.phi_min, ph);
@@ -152,10 +189,10 @@ int main(int argc, char** argv) {
     if (probe.nin == 0 || probe.nout == 0) {
       std::printf("  NO AVERAGING WINDOW: %ld inside (needs r < %.1f), "
                   "%ld outside (needs r > %.1f).\n",
-                  probe.nin, R - 2 * W, probe.nout, R + 2 * W);
-      std::printf("  The core needs R > 2W, and the box half-diagonal > R + 2W,\n"
+                  probe.nin, R - window * W, probe.nout, R + window * W);
+      std::printf("  The core needs R > %.1fW, and the box half-diagonal > R + %.1fW,\n"
                   "  i.e. n > %.0f at this R and W.\n",
-                  2.0 * (R + 2 * W) / std::sqrt(3.0));
+                  window, window, 2.0 * (R + window * W) / std::sqrt(3.0));
       return 1;
     }
   }
