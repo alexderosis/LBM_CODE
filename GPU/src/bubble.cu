@@ -45,6 +45,14 @@
 //  because that driver sets nu_r = nu_b directly. Matching mu instead (the -mul
 //  / -muh default) leaves the heavy phase at nu/gamma; see main().
 //
+//  -w MEANS SOMETHING DIFFERENT IN src/droplet.cu. This driver seeds
+//  tanh[2(r-R)/W]; that one seeds tanh[(r-R)/W], so its -w 4 is twice this
+//  interface. Here W is a model parameter -- beta_from_sigma and
+//  kappa_from_sigma both read it -- so it cannot be redefined to match; the
+//  colour-gradient run has to be given -w 2 instead. A comparison against
+//  droplet.cu -w 4 is measuring the interface width, not the model, and it is
+//  worth ten percentage points at gamma = 100. See that file for the numbers.
+//
 //  Runs on the host with no GPU, at a smaller grid:
 //     c++ -std=c++17 -O2 -Iinclude -x c++ src/bubble.cu -o bubble
 //==============================================================================

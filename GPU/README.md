@@ -600,23 +600,61 @@ construction rather than after a measurement.
 
 ### The two engines on the same measurement
 
-Same lattice, same box, same R and W, same asked sigma, same precision:
+Tesla T4, FP32, 64³, R = 16, sigma asked 1e−3, **nu = 0.1 in both phases of both
+models**, averaging gap 12 lattice cells in both, 60000 steps. Every case flat to
+the digits shown from 20000 on, except where noted.
 
-| gamma | colour gradient | phase field |
-|---|---|---|
-| 1 | −2.48% | −6.17% |
-| 10 | −3.02% | −4.27% |
-| 100 | not run | −3.75% |
+| gamma | colour gradient | its spurious current | phase field | its spurious current |
+|---|---|---|---|---|
+| 1 | **+0.94%** | 1.98e−05 | −6.17% | 6.65e−06 |
+| 10 | **+0.67%** | 1.22e−05 | −4.32% | 1.11e−06 |
+| 100 | −3.36% | 3.51e−05 | −3.77% | 2.99e−07 |
 
-**Read this as two drivers at their own defaults, not as a verdict on two
-models.** The colour-gradient case runs at tau = 0.8 (nu = 0.1) and the
-phase-field one at mu = 0.05, so the viscosities differ — the same
-change-two-things-at-once trap that the R/W confound in the colour-gradient
-section describes. What the table does support is that both reach the same
-measurement to within a few per cent on the same hardware, and that their errors
-move in OPPOSITE directions with the density ratio: the colour gradient degrades
-as the ratio rises, the phase field improves. A controlled comparison would fix
-the kinematic viscosity in both and has not been run.
+The colour gradient is the more accurate of the two on Laplace's law at every
+ratio tested, and the phase field carries the smaller spurious current at every
+ratio — by a factor of 3 at gamma = 1 and of 118 at gamma = 100, where its
+current *falls* with the ratio while the colour gradient's does not. The
+accuracy gap closes as the ratio rises: at gamma = 100 the two are within half a
+percentage point of each other. The colour gradient's gamma = 100 case is the
+one still creeping at 60000 steps (−1.23% at 20000, −3.24% at 40000, −3.36% at
+60000), so read it as near-converged rather than converged.
+
+**Getting this table wrong once is worth recording, because the first version of
+it was wrong in a way that inverted the conclusion.** `-w` does not mean the
+same thing in the two drivers:
+
+    droplet.cu seeds  tanh[ (r-R)/W ]        bubble.cu seeds  tanh[ 2(r-R)/W ]
+
+so `-w 4` in both gives the colour gradient a **twice as wide** interface. Run
+that way it reads −2.50%, −3.54%, −13.61% across the three ratios — a model
+that degrades steeply with the density ratio and loses to the phase field at
+gamma = 100. It is not: at a matched interface the same three numbers are
++0.94%, +0.67%, −3.36%. Ten percentage points at gamma = 100 were the seeded
+interface width, not the physics.
+
+The mismatch is not reconciled in the code, because W is not the same kind of
+quantity in the two models. In the phase field it is a model parameter and
+`beta_from_sigma` and `kappa_from_sigma` both read it; in the colour gradient
+the interface width is an *outcome* of recolouring and W only seeds it. The
+comparable pair is therefore `droplet -w 2 -window 6` against `bubble -w 4
+-window 3` — same physical profile, same 12-cell measurement gap. That the two
+match is checkable rather than asserted: the effective-radius diagnostic reads
+16.203 from both drivers at step 0, to five digits.
+
+Two smaller things the sweep settled. The phase field is **window-independent to
+five digits** (2W and 3W give the same answer at every ratio), while the colour
+gradient moves four percentage points at gamma = 100 — exactly where its own
+banner predicted, and the mechanism is measurable: mean light-phase density in
+the core is 2.3e−08 at 3W against 2.8e−06 at 2W, two orders of magnitude more
+contamination, weighted gamma-fold because cs_b² = gamma cs_r². And neither
+droplet changes size — both models conserve their own indicator, so the
+effective radius is fixed at its seeded value from step 0 and is a diagnostic of
+the profile, not of relaxation.
+
+What is still *not* controlled here: the colour gradient has no mobility and the
+phase field has no recolouring, so the mechanism that maintains the interface
+differs by construction. That is a difference between the models, not a
+parameter left unmatched.
 
 ## Verification
 

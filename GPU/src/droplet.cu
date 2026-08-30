@@ -29,6 +29,26 @@
 //  models are compared: bubble.cu justifies 2 on its own error structure, and
 //  a comparison run must not let the measurement differ along with the model.
 //
+//  -w DOES NOT MEAN THE SAME THING HERE AS IN bubble.cu, AND A COMPARISON THAT
+//  ASSUMES IT DOES IS WRONG. This driver seeds
+//
+//      tanh[ (r - R) / W ],        bubble.cu seeds  tanh[ 2(r - R) / W ],
+//
+//  so -w 4 here is TWICE the interface of -w 4 there. The conventions are not
+//  reconciled because W is not the same kind of quantity in the two models: in
+//  the phase field it is a model parameter that also sets beta and kappa, while
+//  here the interface width is an OUTCOME of recolouring and W only seeds it.
+//
+//  Measured, and it is not a small effect. At 64^3, R = 16, nu = 0.1, gamma =
+//  100, against bubble.cu at -w 4:
+//
+//      -w 4 -window 3   sigma error -13.61%     (a 2x wider interface)
+//      -w 2 -window 6    sigma error  -3.36%     (matched; same gap, 12 cells)
+//
+//  A run meant to be compared with bubble.cu -w 4 -window 3 is therefore
+//  -w 2 -window 6. Confirmed matched by the diagnostic: r_eff at step 0 is
+//  16.203 from both drivers, to five digits.
+//
 //  WHAT THE PARENT MEASURED, and what this is expected to reproduce: gamma = 1
 //  within 0.87% and gamma = 10 within 0.77%. AT gamma = 100 AND 1000 THE PARENT
 //  OVERESTIMATES sigma and the cause is not settled -- four hypotheses were
