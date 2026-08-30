@@ -498,35 +498,82 @@ Written and debugged with no GPU, then run on one. Tesla T4, sm_75, CUDA 12.8.
 The build was clean first try, nine targets, 6m38s, and the FP64 build of the
 same driver is clean too.
 
-**The device reproduced the host reference to every digit printed.** Same case,
-40³ with R = 10 and W = 2, 3000 steps, both in FP64 — one on a laptop through the
-serial driver in `hostsim.hpp`, one in CUDA kernels on the card:
+> **The numbers in this section were re-measured after a defect was found in the
+> driver.** `src/droplet.cu` seeded `tanh[(r-R)/W]` where Saito et al. Eqs.
+> (41)–(42), the parent's `validation/static_droplet.cpp` and `src/bubble.cu`
+> all seed `tanh[2(r-R)/W]` — so every colour-gradient case here ran at twice
+> the intended interface width. Fixed; what it cost is at the end of this
+> section.
+
+**The device reproduced the host reference to every digit printed**, on
+everything except one noisy diagnostic. Same case, 40³ with R = 10 and W = 2,
+3000 steps, both in FP64 — one on a laptop through the serial driver in
+`hostsim.hpp`, one in CUDA kernels on the card:
 
 | | sigma | error | R_eff | spurious current | blue in the core |
 |---|---|---|---|---|---|
-| host reference, FP64 | 1.025048e-03 | +2.50% | 10.319 | 1.835e-05 | 1.684e-04 |
-| T4, FP64 | 1.025048e-03 | +2.50% | 10.319 | 1.835e-05 | 1.684e-04 |
-| T4, FP32 | 1.024569e-03 | +2.46% | 10.319 | 1.842e-05 | 1.685e-04 |
+| host reference, FP64 | 1.047132e-03 | +4.71% | 10.082 | 1.654e-05 | 1.720e-04 |
+| T4, FP64 | 1.047132e-03 | +4.71% | 10.082 | 1.575e-05 | 1.720e-04 |
+| T4, FP32 | 1.041813e-03 | +4.18% | 10.082 | 1.650e-05 | 1.720e-04 |
 
 That is the whole return on writing the numerical core as `LBM_HD`: the kernels
 and the reference driver are not similar, they are the same arithmetic, and FP32
-costs four hundredths of a percentage point on this measurement.
+costs half a percentage point on this measurement.
+
+**The spurious current is the exception, and it is the diagnostic rather than
+the port.** It is a pointwise *maximum* of a quantity near 1.6e-05, and running
+the device out to 24000 steps shows it wandering — 1.575e-05, 1.617e-05,
+1.610e-05, 1.609e-05, 1.611e-05 — while sigma sits at +4.71% unchanged to three
+decimals from step 3000 onward. A 5% gap between host and device on a fluctuating
+max, with every converged quantity matching to seven digits, is that fluctuation
+and not a disagreement about the answer.
 
 **Laplace's law at the resolution the parent uses**, 64³ with R = 16 and W = 4,
-20000 steps:
+window 3W, nu = 0.1 in both phases, run to 60000 steps (FP64 row to 20000):
 
 | gamma | precision | sigma measured | asked | error | spurious current |
 |---|---|---|---|---|---|
-| 1 | FP32 | 9.744986e-04 | 1e-03 | −2.55% | 2.029e-05 |
-| 1 | FP64 | 9.726696e-04 | 1e-03 | −2.73% | 2.017e-05 |
-| 10 | FP32 | 9.652156e-04 | 1e-03 | −3.48% | 1.125e-05 |
+| 1 | FP32 | 1.009376e-03 | 1e-03 | **+0.94%** | 1.984e-05 |
+| 1 | FP64 | 1.009339e-03 | 1e-03 | **+0.93%** | 1.977e-05 |
+| 10 | FP32 | 1.006689e-03 | 1e-03 | **+0.67%** | 1.215e-05 |
+| 100 | FP32 | 9.663819e-04 | 1e-03 | −3.36% | 3.511e-05 |
 
-**The sign of the error is geometry, not precision and not the port.** At
-R = 10, W = 2 the measured tension is 2.5% HIGH; at R = 16, W = 4 it is 2.6% LOW,
-and FP64 moves it by 0.2 points either way. The two errors that make it up — the
-discrete capillary stress and the discrete pressure balance — evidently cross
-somewhere between those two interface resolutions. Worth knowing before reading
-a single droplet's number as a verdict on the model.
+The parent measures gamma = 1 within 0.87% and gamma = 10 within 0.77% on the
+same model. The port now agrees with it to about a tenth of a point at both
+ratios, in both precisions.
+
+**A claim this section used to make, and which the fix removed.** It read: *the
+sign of the error is geometry, not precision and not the port* — +2.5% at
+R = 10, W = 2 against −2.6% at R = 16, W = 4, with the two constituent errors
+"evidently crossing somewhere between those two interface resolutions." There is
+no crossing. At the corrected seed and fixed gamma = 10 the error is **+4.71%**
+at R = 10, W = 2 and **+0.67%** at R = 16, W = 4: same sign, monotonically
+smaller as the interface is better resolved, which is what convergence is
+supposed to look like. The sign flip was one configuration being run at twice
+the interface width of the other.
+
+### What the wrong seed cost
+
+| gamma | parent | 2x-wide seed | fixed |
+|---|---|---|---|
+| 1 | 0.87% | −2.48% | **+0.94%** |
+| 10 | 0.77% | −3.02% | **+0.67%** |
+| 100 | — | −13.61% | **−3.36%** |
+
+It hid because a wrong interface width is still a *consistent* simulation. The
+device matched the host to every digit, `host_colour`'s 51 algebraic identities
+all held, sigma converged to a steady value and stayed there. Nothing was
+inconsistent — only wrong. The one number that could have shown it was the
+threefold gap against the parent at gamma = 1, and that gap was written down
+here as an open question about the model.
+
+It was found by building the controlled comparison in the next section: at
+`-w 4` the two drivers reported effective radii of 16.78 and 16.20 for the same
+seeded R, which is a tail-volume signature of two different profiles. Both now
+read 16.203. The fix is also self-checking — `droplet -w 2 -window 6` on the old
+code and `droplet -w 4 -window 3` on the new one are the same physical
+configuration, and they agree to every digit printed: +0.94%, +0.67%, −3.36%,
+with spurious currents 1.984e-05, 1.215e-05 and 3.511e-05 in both.
 
 ### The 47x, found and fixed
 
@@ -564,9 +611,11 @@ five colour-gradient orientations including zero, four velocities, a body force
 and a non-zero `rho_ref` — to 5.9e-16 in FP64 and 2.1e-07 in FP32, about one ulp.
 
 In FP32 the *results* move within their own noise, which is worth stating
-plainly rather than presenting as an improvement: gamma = 1 at 64³ goes
--2.55% to -2.48%, gamma = 10 goes -3.48% to -3.02%, and 40³ goes +2.46% to
-+2.49%. Different arithmetic order, same operator.
+plainly rather than presenting as an improvement. Different arithmetic order,
+same operator. (The absolute values quoted for that comparison at the time were
+taken at the 2x-wide seed; the closed form and the seed are independent changes,
+and the equivalence assertion in `test/host_colour.cpp` does not depend on any
+initial condition.)
 
 ## The phase field — confirmed on a T4
 
@@ -600,59 +649,48 @@ construction rather than after a measurement.
 
 ### The two engines on the same measurement
 
-Tesla T4, FP32, 64³, R = 16, sigma asked 1e−3, **nu = 0.1 in both phases of both
-models**, averaging gap 12 lattice cells in both, 60000 steps. Every case flat to
-the digits shown from 20000 on, except where noted.
+Tesla T4, FP32, 64³, R = 16, W = 4, sigma asked 1e−3, **nu = 0.1 in both phases
+of both models**, averaging gap 3W in both, 60000 steps.
 
 | gamma | colour gradient | its spurious current | phase field | its spurious current |
 |---|---|---|---|---|
 | 1 | **+0.94%** | 1.98e−05 | −6.17% | 6.65e−06 |
 | 10 | **+0.67%** | 1.22e−05 | −4.32% | 1.11e−06 |
-| 100 | −3.36% | 3.51e−05 | −3.77% | 2.99e−07 |
+| 100 | −3.36% | 3.51e−05 | **−3.77%** | 2.99e−07 |
 
 The colour gradient is the more accurate of the two on Laplace's law at every
 ratio tested, and the phase field carries the smaller spurious current at every
 ratio — by a factor of 3 at gamma = 1 and of 118 at gamma = 100, where its
 current *falls* with the ratio while the colour gradient's does not. The
 accuracy gap closes as the ratio rises: at gamma = 100 the two are within half a
-percentage point of each other. The colour gradient's gamma = 100 case is the
-one still creeping at 60000 steps (−1.23% at 20000, −3.24% at 40000, −3.36% at
-60000), so read it as near-converged rather than converged.
+percentage point of each other, and the colour gradient's case there is the one
+still creeping at 60000 steps (−2.44% at 30000, −3.36% at 60000), so read it as
+near-converged rather than converged. Every other case is flat to the digits
+shown from 30000 on.
 
-**Getting this table wrong once is worth recording, because the first version of
-it was wrong in a way that inverted the conclusion.** `-w` does not mean the
-same thing in the two drivers:
-
-    droplet.cu seeds  tanh[ (r-R)/W ]        bubble.cu seeds  tanh[ 2(r-R)/W ]
-
-so `-w 4` in both gives the colour gradient a **twice as wide** interface. Run
-that way it reads −2.50%, −3.54%, −13.61% across the three ratios — a model
-that degrades steeply with the density ratio and loses to the phase field at
-gamma = 100. It is not: at a matched interface the same three numbers are
-+0.94%, +0.67%, −3.36%. Ten percentage points at gamma = 100 were the seeded
-interface width, not the physics.
-
-The mismatch is not reconciled in the code, because W is not the same kind of
-quantity in the two models. In the phase field it is a model parameter and
-`beta_from_sigma` and `kappa_from_sigma` both read it; in the colour gradient
-the interface width is an *outcome* of recolouring and W only seeds it. The
-comparable pair is therefore `droplet -w 2 -window 6` against `bubble -w 4
--window 3` — same physical profile, same 12-cell measurement gap. That the two
-match is checkable rather than asserted: the effective-radius diagnostic reads
-16.203 from both drivers at step 0, to five digits.
+**Building this table is what found the seed defect above**, and that is the
+argument for building it. Both engines had been measured, both agreed with their
+host references, and neither had anything visibly wrong. It was putting them
+side by side on one case that produced a number which could not be right —
+two effective radii for one seeded R — and the first version of the table, run
+before the fix, inverted the conclusion: it read −2.50%, −3.54%, −13.61% for the
+colour gradient, a model apparently collapsing under density ratio and losing to
+the phase field at gamma = 100. Ten percentage points at gamma = 100 were the
+seeded interface width.
 
 Two smaller things the sweep settled. The phase field is **window-independent to
-five digits** (2W and 3W give the same answer at every ratio), while the colour
-gradient moves four percentage points at gamma = 100 — exactly where its own
-banner predicted, and the mechanism is measurable: mean light-phase density in
-the core is 2.3e−08 at 3W against 2.8e−06 at 2W, two orders of magnitude more
-contamination, weighted gamma-fold because cs_b² = gamma cs_r². And neither
-droplet changes size — both models conserve their own indicator, so the
-effective radius is fixed at its seeded value from step 0 and is a diagnostic of
-the profile, not of relaxation.
+five digits** — 2W and 3W give the same answer at every ratio — while the colour
+gradient moves four percentage points at gamma = 100 (−13.63% at 3W against
+−9.65% at 2W, on the pre-fix seed), exactly where its own banner predicted, with
+the mechanism measurable: mean light-phase density in the core is 2.3e−08 at 3W
+against 2.8e−06 at 2W, two orders of magnitude more contamination, weighted
+gamma-fold because cs_b² = gamma cs_r². And **neither droplet changes size**:
+both models conserve their own indicator, so the effective radius is pinned at
+its seeded value from step 0 and diagnoses the seeded profile rather than any
+relaxation. That is what made it a usable check on the seed.
 
 What is still *not* controlled here: the colour gradient has no mobility and the
-phase field has no recolouring, so the mechanism that maintains the interface
+phase field has no recolouring, so the mechanism maintaining the interface
 differs by construction. That is a difference between the models, not a
 parameter left unmatched.
 

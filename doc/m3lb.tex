@@ -1748,6 +1748,12 @@ populations and Sec.~II.C for the central-moment fluid operator; the rigid-body
 coupling of \S\ref{sec:penalisation} does not, and \S\ref{sec:penalisation}
 says why.
 
+Most of this section is that model. \S\ref{sec:colour} is a \emph{second}
+immiscible model on a different principle, from a different paper, sharing no
+code with the first beyond the lattices and the moment transform --- it is here
+because the two fail differently, and \S\ref{sec:cgvspf} measures both on one
+case. A third route, which resolves only the liquid, is \S\ref{sec:freesurface}.
+
 \subsection{Interface capture: conservative Allen--Cahn}
 \label{sec:ace}
 
@@ -2652,6 +2658,314 @@ a weight torque restored to the third row. The rectangle is also the only
 indicator provided, though anything carrying a signed distance function drops
 straight in.
 
+
+\subsection{A second immiscible model: the colour gradient}\label{sec:colour}
+
+Everything above carries the interface in a field with its own advection
+equation. The colour-gradient model of Saito \emph{et al.}\ (Phys.\ Rev.\ E
+\textbf{98}, 013305, 2018), implemented in \code{ColourGradient.hpp} and
+\code{ColourGradientSolver.hpp}, reaches the same physics with no interface
+equation at all, and it is in the tree because the two fail differently.
+
+Two distribution sets $f_i^r$ and $f_i^b$ are carried. The interface is wherever
+both are non-zero, and it is held together by a \emph{recolouring} step that
+redistributes the colour-blind post-collision state back into red and blue along
+the colour gradient. Nothing diffuses, nothing is reinitialised, and the
+interface width is an \emph{outcome} rather than a parameter --- the opposite of
+the conservative Allen--Cahn equation of \S\ref{sec:ace}, whose $W$ is
+prescribed and whose profile is its exact one-dimensional equilibrium.
+
+\paragraph{Three suboperators.} Equation~(10) of the paper reads right to left,
+\begin{equation}
+  \Omega_i^k = \big(\Omega_i^k\big)^{(3)}
+               \Big[\big(\Omega_i\big)^{(1)} + \big(\Omega_i\big)^{(2)}\Big] :
+\end{equation}
+collide the colour-blind $f_i = f_i^r + f_i^b$, perturb it to make surface
+tension, then recolour. Only the third carries a colour index, which is the
+economy of the scheme: the expensive part, the central-moment collision, is done
+\emph{once} for both fluids.
+
+The single-phase collision is a general MRT in central moments with the
+relaxation grouping $s_0 = s_1 = 0$, five second-order moments at the shear
+rate, the trace on its own, and everything above second order straight to
+equilibrium. That is already what \code{MomentCollision.hpp} does, so
+\code{ProductBasis} is reused unchanged and only the \emph{equilibrium} is new.
+The paper reaches the same operator through De Rosis's nonorthogonal basis and
+this code through a Hermite product basis; above second order the two cannot
+disagree, because when every moment of a subspace relaxes at one rate any basis
+of that subspace gives the same operator, and at second order the split into
+trace and traceless deviatoric is basis-independent for the same reason.
+
+\paragraph{The density ratio lives in the rest weight.} $\phi_i$ of Eq.~(20)
+replaces $w_i$ in the rest term of the equilibrium and carries a free parameter
+$\alpha$,
+\begin{equation}
+  \phi_0 = \alpha, \quad
+  \phi_{|\ci|^2=1} = \tfrac{2(1-\alpha)}{19}, \quad
+  \phi_{|\ci|^2=2} = \tfrac{1-\alpha}{38}, \quad
+  \phi_{|\ci|^2=3} = \tfrac{1-\alpha}{152},
+\end{equation}
+which sums to one for any $\alpha$ and whose second moment is
+$\cs^2 = 9(1-\alpha)/19$. \emph{The sound speed is therefore a property of the
+phase.} Pressure continuity across the interface, $p = \rho\cs^2$, then fixes
+the density ratio without a single density appearing in the collision,
+\begin{equation}
+  \gamma = \frac{\rho_r^0}{\rho_b^0} = \frac{1-\alpha_b}{1-\alpha_r}.
+  \label{eq:cgratio}
+\end{equation}
+Taking $\alpha_b = 8/27$ recovers $\cs^2 = 1/3$ exactly for the blue fluid,
+which is the paper's choice and makes the blue phase an ordinary lattice. Note
+what it does \emph{not} do: it does not make $\cs^2 = 1/3$ anywhere else, so the
+standard lattice sound speed is not available as a global constant here, and
+nothing in the operator assumes it. \code{ProductBasis}'s $\cs^2$ is a basis
+constant, not a physical one, and the two are deliberately different numbers.
+
+The last term of the equilibrium, $\Phi_i$ of Eq.~(21), restores Galilean
+invariance when the density varies, through the second moment, using
+$G = \tfrac{1}{48}[\uu \otimes \nabla\rho + (\uu \otimes \nabla\rho)^{\mathsf T}]$.
+It is the same physics that \code{ViscousInterfaceForce.hpp} adds to the
+phase-field module as an explicit body force
+$\nu(\nabla\uu + \nabla\uu^{\mathsf T})\cdot\nabla\rho$ --- the same missing
+stress, entered by a different door, and here at no extra field beyond
+$\nabla\rho$ because it goes into the equilibrium rather than into $F$. It is
+also the term most easily dropped by accident, and dropping it changes nothing
+that any static test checks.
+
+\paragraph{A factor of two that a running simulation would absorb.} The
+perturbation is written per colour in Eq.~(30) as
+$(A_k/2)|\nabla\phi|[w_i(\ci\cdot\nn)^2 - B_i]$, and Eq.~(39) sums the capillary
+stress over $k$ as well as over $i$ with $A = A_r = A_b$. Applied to the
+colour-blind population --- which is what the paper's own text says is done ---
+the two halves add and the coefficient is $A$, not $A/2$. The distinction is not
+cosmetic, and it was settled by deriving $\sigma$ from Eq.~(39) rather than
+copying Eq.~(32): for a flat interface
+\begin{equation}
+  \sigma = \int (S_{tt} - S_{nn})\,\mathrm{d}n
+         = \frac{2A\tau}{9}\,\Delta\phi
+         = \frac{4A\tau}{9},
+\end{equation}
+since $\phi$ runs from $-1$ to $+1$. That is Eq.~(32) exactly. With $A/2$ it
+would have come out half as large, and a static droplet would have reported a
+surface tension $50\%$ low with every other property of the model intact.
+
+The perturbation conserves mass and momentum exactly and acts only across the
+interface: $\sum_i w_i (\ci\cdot\nn)^4 = 3\cs^4 = 1/3$ cancels
+$\sum_i B_i (\ci\cdot\nn)^2 = 1/3$ identically, so the \emph{normal} component
+of the capillary stress vanishes for every direction of $\nn$ while the
+tangential component does not --- both direction-independent, because D3Q27's
+fourth moment is isotropic.
+
+\paragraph{Recolouring is a partition.} Equations~(33)--(34) split the
+post-collision population back,
+\begin{align}
+  f_i^r &= \frac{\rho_r}{\rho} f_i
+           + \beta \frac{\rho_r \rho_b}{\rho^2}\cos\theta_i\, f_i^{\rm eq}(\rho, \bm{0}), \\
+  f_i^b &= \frac{\rho_b}{\rho} f_i
+           - \beta \frac{\rho_r \rho_b}{\rho^2}\cos\theta_i\, f_i^{\rm eq}(\rho, \bm{0}),
+\end{align}
+with $\cos\theta_i$ the cosine of the angle between $\ci$ and $\nabla\phi$. The
+two sum to $f_i$ identically, so mass and momentum survive whatever $\beta$ is;
+all $\beta$ does is push colour up the gradient. $\beta = 0.7$ is the paper's
+value and the largest that keeps the interface smooth. Note that
+$f_i^{\rm eq}(\rho, \bm{0})$ is simply $\rho\phi_i$: at zero velocity every
+other term of the equilibrium vanishes, $\Phi_i$ included.
+
+\paragraph{What the operator does not own.} It does not stream, it does not hold
+the two distributions, and it does not compute a gradient. Under Esoteric Pull
+the neighbour populations inside a fused kernel are a mixture of two time
+levels, so a gradient taken from them is meaningless; $\nabla\phi$ and
+$\nabla\rho$ are node fields computed by \code{ColourGradientSolver} in a
+separate pass, for exactly the reason \S\ref{sec:ace} gives for the phase field.
+
+\paragraph{Which model to use is not settled here.} The phase field has a
+conservative advection equation and a prescribed interface width; the colour
+gradient has neither. What the colour gradient has instead is the density ratio:
+it reaches $1000$ in the paper's own static tests, where the pressure form of
+\S\ref{sec:gauge} is already fighting its conditioning problem at $100$.
+\S\ref{sec:cgvspf} measures both on one case.
+
+%==============================================================================
+\section{Free-surface flow}
+\label{sec:freesurface}
+
+\S\ref{sec:multiphase} resolves both fluids, and everything difficult about it
+follows from that: the pressure-gauge conditioning of \S\ref{sec:gauge}, the
+$\alpha$ interpolation of \S\ref{sec:colour}, the recolouring. The third route
+in this code changes the bargain instead of the parameters. It does not resolve
+the gas at all. The gas is a \emph{void} held at a prescribed pressure --- no
+populations, no velocity, no dynamics --- and the liquid meets it across a
+boundary condition rather than across a diffuse interface.
+
+What that buys is the thing the other two fight for. There is no density ratio,
+because there is no second density: the ratio is infinite by construction and it
+costs nothing, because the expensive half of the problem was deleted rather than
+discretised.
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+module & interface & fluids resolved & density ratio \\
+\midrule
+phase field (\S\ref{sec:ace}) & diffuse & both & $\sim 100$, with the gauge problem \\
+colour gradient (\S\ref{sec:colour}) & diffuse & both & $1000$ in principle \\
+free surface (this section) & sharp & liquid only & infinite, by construction \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\code{FreeSurfaceSolver.hpp} follows the standard formulation of K\"orner,
+Thies, Hofmann, Theobald \& R\"ude, J.\ Stat.\ Phys.\ \textbf{121}, 179 (2005),
+with the refinements in Th\"urey's and R\"ude's later work. Unlike
+\S\ref{sec:colour} there is no paper in \code{SomeRefs/} to check equation by
+equation, so nothing below cites an equation number and every choice is
+justified from the mechanics.
+
+\subsection{The state, and the mass that is not a moment}
+
+Every cell is Gas, Interface or Fluid (or a wall, or halo). Fluid cells are
+ordinary LBM cells; Gas cells hold nothing. Interface cells are the entire
+method: they carry an explicit mass $m$ alongside their populations, and a fill
+level
+\begin{equation}
+  \varepsilon = m / \rho,
+\end{equation}
+which is $1$ when the cell is full and $0$ when empty. The interface is a
+closed, one-cell-thick shell separating Fluid from Gas, and keeping it closed
+through arbitrary topology change is most of the work.
+
+\emph{Mass is advected, not taken as a moment}, and that is the sharpest
+difference from everything else in this tree. Elsewhere $\rho = \sum_i f_i$ and
+conservation is a property of the collision operator, checkable by algebra. Here
+mass moves because populations cross faces:
+\begin{equation}
+  \mathrm{d}m_i(\xx) = f_{\bar\imath}(\xx + \ci) - f_i(\xx),
+  \label{eq:fsmass}
+\end{equation}
+for both cells Fluid or Interface, scaled by the mean fill level when both are
+Interface, because a half-full cell can only exchange half as much. Nothing
+enforces conservation but the \emph{antisymmetry} of \eqref{eq:fsmass}: what
+$\xx$ sends across a face is exactly what its neighbour receives. That is why
+the validation checks total mass to round-off first and everything else second
+--- it is the one property that can be silently lost.
+
+\subsection{The free-surface condition}
+
+For every direction $i$ whose source cell $\xx - \ci$ is Gas, the population
+that would have arrived is reconstructed as
+\begin{equation}
+  f_i(\xx) = f_i^{\rm eq}(\rho_G, \uu) + f_{\bar\imath}^{\rm eq}(\rho_G, \uu)
+             - f_{\bar\imath}(\xx),
+\end{equation}
+with $\rho_G$ fixing the gas pressure through $p = \rho_G \cs^2$. Its two
+moments are what a free surface \emph{is}: the normal stress equals the gas
+pressure, and the tangential stress vanishes. Here $f_{\bar\imath}(\xx)$ is the
+post-collision population at $\xx$ from the previous step, which the two-lattice
+scheme still holds in its source array, so no extra storage is needed.
+
+The velocity in that reconstruction is one step old. $\uu$ is needed to build
+the equilibria and $\uu$ comes from a sum over the populations, some of which
+are the ones being reconstructed; the circle is broken with the previous step's
+velocity. That is first order in time and is what the literature does. It
+matters where the interface accelerates hard and is invisible in a standing
+wave.
+
+\subsection{Why this module alone uses two-lattice streaming}
+\label{sec:fstwolattice}
+
+Everything else in \code{M3LB} streams by Esoteric Pull (\S\ref{sec:streaming}).
+This solver \code{static\_assert}s \emph{against} it, and the reason is
+structural rather than a matter of effort. Three requirements, of which Esoteric
+Pull fails two outright:
+
+\begin{enumerate}[leftmargin=1.5em,itemsep=2pt]
+\item Mass exchange needs $f_i(\xx)$ and $f_{\bar\imath}(\xx+\ci)$ as
+  \emph{post-collision} values, after the whole domain has collided. In place,
+  those slots hold a mixture of two time levels, and which one depends on parity
+  and on the direction's index. Under two-lattice they are simply the
+  destination array, complete and unambiguous, once the collide pass has fenced.
+\item A cell that fills up turns its gas neighbours into interface cells, which
+  then need populations. In place, a cell's populations live in its neighbours'
+  slots, so initialising a neighbour means writing storage that other cells are
+  concurrently reading through their own aliases.
+\item Reading a neighbour's post-collision state while writing one's own is the
+  normal case here and impossible there.
+\end{enumerate}
+
+Requirement 2 is dodged rather than met: every pass is a \emph{gather}. A cell
+about to become interface initialises itself by averaging its neighbours, and a
+cell with excess mass publishes it in a field that its neighbours collect.
+Nothing ever writes another cell's memory, so there is no race to reason about
+and no atomics --- a deliberate shape, worth keeping even if scatters were free.
+The cost is two population arrays instead of one, which for a method that
+deletes an entire phase is not the expensive part.
+
+\subsection{A standing gravity wave}
+
+The validation case is the linear dispersion relation
+$\omega^2 = g k \tanh(k h)$, and it is that rather than a dam break because a
+dam break's reference is experimental and comparing against a digitised curve
+tests the digitisation as much as the solver. The dispersion relation is exact,
+closed form, has no fitted constant, and --- the part that matters --- it is a
+statement about precisely the two conditions a free-surface scheme exists to
+impose: the \emph{kinematic} condition, that the surface moves with the fluid,
+which here is the mass exchange and nothing else; and the \emph{dynamic}
+condition, that the normal stress equals the gas pressure, which here is the
+population reconstruction and nothing else. Get either wrong and the period
+moves.
+
+Two depths, on purpose. At $kh = 3.1$ the $\tanh$ is $0.9963$ and the relation
+is indistinguishable from the deep-water limit $\omega^2 = gk$; at $kh = 0.79$
+it is $0.657$, and a scheme with the surface condition right but the depth
+coupling wrong would pass the first and fail the second. Testing one depth tests
+a number; testing two tests the relation.
+
+The two residual errors are separate, and each was identified by making it move
+without moving the other. \emph{Deep} is limited by the free surface's own
+discretisation: the surface is resolved to about a cell, so a wave of amplitude
+$A$ carries a relative position error of order $1/A$, and refining at fixed $kh$
+took it from $6.15\%$ at $L_x = 64$, $A = 1.5$ to $1.77\%$ at $L_x = 128$,
+$A = 3$. \emph{Shallow} is limited by the viscous boundary layer on the floor:
+at $h = 16$ cells the layer is $\sqrt{\nu T} \approx 4$ cells, a quarter of the
+depth, against a relation with no viscosity in it at all, and dropping $\nu$
+fivefold took it from $8.44\%$ to $4.23\%$, monotonically. Neither knob touches
+the other's number, which is what says these are two effects rather than one
+tolerance being chased.
+
+\subsection{What this does not model}
+
+\begin{itemize}[leftmargin=1.4em,itemsep=3pt]
+\item \textbf{No surface tension.} $\rho_G$ is uniform, so the gas pressure
+  carries no curvature term. Adding it means $p_G = p_{\rm atm} - \sigma\kappa$
+  with $\kappa$ from the fill-level field, and the machinery for a curvature is
+  not here. Everything at a Bond number where surface tension competes with
+  gravity is out of scope --- which includes most droplet problems and none of
+  the dam-break family.
+\item \textbf{No gas dynamics}, and this is the method rather than an omission.
+  An enclosed bubble does not compress, because its pressure is prescribed
+  rather than solved. Modelling that needs a volume-of-gas tracker with a
+  bubble-merging graph.
+\item \textbf{The reconstruction is applied to gas-facing directions only.} The
+  literature also reconstructs directions with $\ci \cdot \nn > 0$, which
+  stabilises interfaces nearly tangential to the lattice. If a case shows
+  interface roughening along a diagonal, this is the first thing to add.
+\item \textbf{Excess mass is redistributed uniformly} among eligible neighbours
+  rather than weighted by the interface normal. Uniform redistribution conserves
+  mass exactly --- which matters most --- but is more diffusive at a sharply
+  curved interface.
+\item \textbf{No subgrid interface.} A film thinner than a cell either survives
+  as a one-cell layer or vanishes.
+\item \textbf{A moving obstacle is not yet reliable}, and the reason is in the
+  solver rather than in the caller. \code{mass\_exchange()} conserves mass by
+  the antisymmetry of \eqref{eq:fsmass}, which assumes both cells agree on the
+  mask for the whole pass. \code{move\_obstacle()} changes the mask between
+  passes, so every cell the body sweeps breaks the assumption.
+  \code{transfer\_covered\_mass()} keeps the total right but does not restore
+  the per-face antisymmetry, and the difference shows up wherever many mask
+  cells change at once: a flat face landing on a flat surface, a corner
+  entering, a rotated rectangle's staircase flipping cells as it turns. The fix
+  is to make the mass exchange itself aware of the moving boundary; bounce-back,
+  momentum exchange and refill are all in place and are not the problem.
+\end{itemize}
 
 %==============================================================================
 \section{Validation}
