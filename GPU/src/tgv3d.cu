@@ -41,9 +41,14 @@ struct TaylorGreenInit {
     const Real X = k * Real(x), Y = k * Real(y), Z = k * Real(z);
     Macro m;
     m.rho = Real(1);
-    m.ux  =  u0 * cosf(X) * sinf(Y) * sinf(Z);
-    m.uy  = -Real(0.5) * u0 * sinf(X) * cosf(Y) * sinf(Z);
-    m.uz  = -Real(0.5) * u0 * sinf(X) * sinf(Y) * cosf(Z);
+    // cos/sin, NOT cosf/sinf. This runs once per cell at start-up, so the
+    // double-precision promotion in an FP32 build costs nothing measurable,
+    // while cosf in an -DLBM_DOUBLE build would seed the whole velocity field
+    // to FLOAT accuracy and quietly cap what the FP64 run can resolve.
+    // src/tgv3d_bench.cu had this right and named this file; this file did not.
+    m.ux  =  u0 * cos(X) * sin(Y) * sin(Z);
+    m.uy  = -Real(0.5) * u0 * sin(X) * cos(Y) * sin(Z);
+    m.uz  = -Real(0.5) * u0 * sin(X) * sin(Y) * cos(Z);
     return m;
   }
 };
