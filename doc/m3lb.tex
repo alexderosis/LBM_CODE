@@ -6652,6 +6652,150 @@ This is recorded as open, and \code{ncu --set full} is the next step rather than
 another guess --- the same conclusion, and for the same reason, as
 \S\ref{sec:cmcollapse}.
 
+\subsection{Both multiphase engines, ported}
+\label{sec:cudamp}
+
+The colour gradient of \S\ref{sec:colour} and the phase field of
+\S\ref{sec:ace} are both in \code{GPU/}, as \code{colour.cuh} and
+\code{phasefield.cuh}, with \code{src/droplet.cu} and \code{src/bubble.cu}
+driving a static droplet against Laplace's law. The free surface of
+\S\ref{sec:freesurface} is not, and \S\ref{sec:fstwolattice} is the reason:
+it \code{static\_assert}s against Esoteric Pull, so porting it means adding a
+two-lattice storage path plus five kernel launches with a fence between each.
+
+\paragraph{The equilibrium that would not fit in registers.} The colour gradient
+arrived at \textbf{20.2}~MLUPS at $64^3$ in FP32 against the single-phase core's
+$950$. A factor of $47$ is far more than the extra arithmetic explains, and the
+\code{-DLBM\_PTXAS\_VERBOSE=ON} build --- which exists for exactly this suspicion
+--- said why: zero spills, but a \textbf{216-byte stack frame}. Two 27-element
+arrays did not fit in registers and lived in local memory, read and written at
+every node.
+
+The cause was written in the operator's own banner, as a deferred decision:
+Eq.~(18) is not the product-form equilibrium, so its moments have no factorised
+closed form, and the implementation built the equilibrium \emph{populations} and
+transformed them --- ``a closed form could be derived; until it is measured to
+matter, it would be a second thing to keep correct.'' That was the measurement.
+
+The closed form is separable in a way the raw equilibrium is not. Writing the
+order-$\ge 3$ central moment of index $(p,q,r)$ as
+\begin{equation}
+  k_{pqr} = c_N(P_3,\rho)\, u_x^{p} u_y^{q} u_z^{r}
+          - 3S\, D_p(u_x) D_q(u_y) D_r(u_z)
+          + H_{pqr}(\uu),
+\end{equation}
+with $D_0 = 1$, $D_1(u) = -u$, $D_2(u) = u^2 - \cs^2$ and $H$ collecting the
+thirteen source terms of orders 2, 4 and 6, every moment becomes a product of
+three one-dimensional factors and a small fixed table. Nothing is an array. One
+transform in, one out.
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+ & before & after \\
+\midrule
+stack frame & 216 bytes & \textbf{0 bytes} \\
+spill stores / loads & 0 / 0 & 0 / 0 \\
+registers & 119 & 124 \\
+\textbf{throughput, $64^3$ FP32} & \textbf{20.2 MLUPS} & \textbf{252.5 MLUPS} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+That is $12.5\times$, and $252.5$ against $950$ means the colour gradient costs
+$3.8\times$ a single-phase step --- for two distributions, three kernels and a
+heavier collision, which is about what the work implies. FP64 is unchanged to
+every digit printed, on the device and on the host, so this is the same operator
+and not a cheaper approximation of it: \code{test/host\_colour.cpp} keeps the old
+path as \code{reference\_collide()} and asserts the two agree over 60 states to
+$5.9\e{-16}$ in FP64 and $2.1\e{-07}$ in FP32, about one ulp.
+
+The phase field was written afterwards and therefore written already knowing
+this. It runs at \textbf{354.6}~MLUPS with \textbf{0 bytes} of stack frame on
+every one of its six kernels, by construction rather than after a measurement.
+
+\paragraph{A conservation claim FP32 cannot keep.} The conservative
+Allen--Cahn form conserves $\sum_i \phi$ exactly, and in FP64 the port shows it:
+$10^{-13}$ at 150, 600, 2400 and 9600 steps alike. FP32 cannot represent that,
+and the first version of the test asserted it anyway and failed. Rather than
+loosen the tolerance to whatever passed, the drift was measured across those
+four run lengths --- $-2.9\e{-6}$, $-3.4\e{-5}$, $-1.0\e{-4}$, $-1.4\e{-4}$ ---
+fast while the seeded profile relaxes onto the discrete equilibrium, then nearly
+stopping. Not a leak. The test now bounds drift \emph{per step} against one ulp,
+which round-off cannot beat and a real bug would exceed by orders of magnitude.
+
+\paragraph{An instability that was the viscosity, not the model.} At a density
+ratio of $100$ the phase-field droplet diverged, and it was nearly written up as
+a capability limit. Matching the \emph{dynamic} viscosity across the ratio
+leaves the heavy phase with a hundredfold smaller kinematic viscosity, so
+$\omega = [\mu/(\rho\cs^2) + 1/2]^{-1} = 1.994$ against a limit of $2$; matching
+the \emph{kinematic} viscosity runs the same case to $-3.77\%$ with a spurious
+current twenty times smaller. The driver now prints $\nu$ and $\omega$ per phase
+before the run and flags $\omega > 1.9$, because that number was reconstructed
+in a post-mortem when it could have been on screen beforehand.
+
+\subsection{The two models on one case}
+\label{sec:cgvspf}
+
+Both engines on one measurement, at settings matched rather than defaulted:
+Tesla T4, FP32, $64^3$, $R = 16$, $W = 4$, $\sigma$ asked $10^{-3}$,
+$\nu = 0.1$ in \emph{both phases of both models}, the same $3W$ averaging gap,
+60000 steps.
+
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+ & \multicolumn{2}{c}{colour gradient} & \multicolumn{2}{c}{phase field} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+$\gamma$ & error & spurious $|\uu|$ & error & spurious $|\uu|$ \\
+\midrule
+$1$   & $+0.94\%$ & $1.98\e{-5}$ & $-6.17\%$ & $6.65\e{-6}$ \\
+$10$  & $+0.67\%$ & $1.22\e{-5}$ & $-4.32\%$ & $1.11\e{-6}$ \\
+$100$ & $-3.36\%$ & $3.51\e{-5}$ & $-3.77\%$ & $2.99\e{-7}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The colour gradient is the more accurate on Laplace's law at every ratio tested;
+the phase field carries the smaller spurious current at every ratio, by a factor
+of $3$ at $\gamma = 1$ and of $118$ at $\gamma = 100$, where its current
+\emph{falls} with the ratio while the colour gradient's does not. The accuracy
+gap closes as the ratio rises, and at $\gamma = 100$ the two are within half a
+percentage point.
+
+\paragraph{What building the table found.} Both engines had already been
+measured, both agreed with their host references, and neither had anything
+visibly wrong. Putting them side by side produced a number that could not be
+right: two effective radii, $16.78$ and $16.20$, for one seeded $R = 16$. The
+cause was in the driver rather than in either model --- \code{droplet.cu} seeded
+$\tanh[(r-R)/W]$ where the paper's Eqs.~(41)--(42), the parent's
+\code{validation/static\_droplet.cpp} and \code{bubble.cu} all seed
+$\tanh[2(r-R)/W]$, so every colour-gradient case on the GPU had run at twice the
+intended interface width.
+
+It hid because a wrong interface width is still a \emph{consistent} simulation.
+The device matched the host to every digit, all 51 algebraic identities in
+\code{host\_colour.cpp} held, and $\sigma$ converged and stayed. Nothing was
+inconsistent; only wrong. The first version of this table, run before the fix,
+read $-2.50\%$, $-3.54\%$, $-13.61\%$ --- a model apparently collapsing under
+density ratio and losing to the phase field at $\gamma = 100$. Ten percentage
+points at $\gamma = 100$ were the seed.
+
+Two consequences beyond the table. The port now agrees with the parent to about
+a tenth of a point at both ratios the parent measures ($0.87\%$ and $0.77\%$),
+having been threefold worse, with that gap recorded as an open question about
+the model. And a claim in \S\ref{sec:cudamp}'s README --- that the sign of the
+error is geometry, $+2.5\%$ at $R = 10, W = 2$ against $-2.6\%$ at
+$R = 16, W = 4$, the two constituent errors ``evidently crossing'' between those
+resolutions --- was itself the artefact. At the corrected seed and fixed
+$\gamma = 10$ the error is $+4.71\%$ at $R = 10, W = 2$ and $+0.67\%$ at
+$R = 16, W = 4$: same sign, monotonically smaller as the interface resolves.
+
+What is still not controlled: the colour gradient has no mobility and the phase
+field has no recolouring, so the mechanism maintaining the interface differs by
+construction. That is a difference between the models, not a parameter left
+unmatched.
+
 \subsection{What this implementation does not do}
 
 Absent, not merely untested:
@@ -6667,6 +6811,14 @@ Absent, not merely untested:
   which on this storage is bounce-back on the induction distribution --- neither
   the perfectly conducting nor the insulating condition. Every MHD case here is
   periodic, and no wall-bounded MHD result should be read off this code.
+\item \textbf{No free surface}, and the reason is streaming rather than effort:
+  \S\ref{sec:fstwolattice}. Porting it means a two-lattice storage path plus
+  five kernel launches with a fence between each.
+\item \textbf{No central moments for the phase field's fluid operator.} The
+  parent has \code{MultiphaseCentralMoments.hpp}; what is on the GPU is the BGK
+  potential form. The colour gradient \emph{is} in central moments.
+\item \textbf{No wetting, no contact angle, no external force field, and no
+  open boundary for $\phi$.}
 \item \textbf{D3Q27 only}, no D3Q19, no TRT or raw MRT, no regularised walls, no
   height-field input, and therefore no aorta and no city.
 \end{itemize}
