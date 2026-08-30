@@ -6959,8 +6959,10 @@ Stated plainly, because each has been measured.
   this one.} D3Q27 only; no shifted storage; no open boundary for the scalar; no
   physical magnetic wall, so every MHD case there is periodic; no D3Q19, TRT, raw
   MRT, regularised walls or height-field input. It cannot run the aorta or a city.
-  It exists to answer one question and to carry the multiphysics forward on a
-  device, not to replace this code.
+  Both immiscible models of \S\ref{sec:multiphase} are there
+  (\S\ref{sec:cudamp}); the free surface is not, and cannot be without a
+  two-lattice path. It exists to answer one question and to carry the
+  multiphysics forward on a device, not to replace this code.
 
 \item \textbf{No MPI.} The code is single-rank. \code{Domain} carries an
   \code{mpi\_halo} hook and the halo machinery exists, but domain decomposition
@@ -7160,6 +7162,34 @@ the fitted rate is blamed on the scheme.
   \code{MultiphaseCentralMoments} therefore declares \code{RawPopulations}, and
   the FP32 accuracy argument that shifted storage exists for does not apply to
   these cases.
+
+\item \textbf{The free surface has no surface tension} (\S\ref{sec:freesurface}).
+  $\rho_G$ is uniform, so the gas pressure carries no curvature term, and every
+  case at a Bond number where surface tension competes with gravity is out of
+  scope. That excludes most droplet problems; it excludes none of the dam-break
+  family, which is what the module is for.
+
+\item \textbf{The free surface's moving obstacle is not reliable}, and the
+  cause is located rather than suspected. \code{mass\_exchange()} conserves mass
+  by antisymmetry across a face, which assumes both cells agree on the mask for
+  the whole pass; \code{move\_obstacle()} changes the mask between passes, so
+  every cell the body sweeps breaks the assumption.
+  \code{transfer\_covered\_mass()} keeps the total right without restoring the
+  per-face antisymmetry. Bounce-back, momentum exchange and refill are all in
+  place and are not the problem. The fix is to make the mass exchange itself
+  aware of the moving boundary, and it has not been attempted.
+
+\item \textbf{The free surface cannot use Esoteric Pull}, and therefore cannot
+  be ported to the CUDA implementation without a two-lattice storage path and
+  five kernel launches with a fence between each (\S\ref{sec:fstwolattice}).
+  It \code{static\_assert}s against it rather than failing at run time.
+
+\item \textbf{Neither immiscible model dominates the other}
+  (\S\ref{sec:cgvspf}). On one matched static-droplet case the colour gradient
+  is more accurate on Laplace's law at every density ratio measured and the
+  phase field carries the smaller spurious current at every ratio, by up to two
+  orders of magnitude. The choice is a trade, and the measurement covers one
+  case --- a static droplet --- not a flow.
 
 \item \textbf{The rigid body is two-dimensional.} \code{PenalisedBody} carries
   one angle and one angular velocity about $z$, and says so in the compiler's
