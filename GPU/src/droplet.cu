@@ -29,25 +29,26 @@
 //  models are compared: bubble.cu justifies 2 on its own error structure, and
 //  a comparison run must not let the measurement differ along with the model.
 //
-//  -w DOES NOT MEAN THE SAME THING HERE AS IN bubble.cu, AND A COMPARISON THAT
-//  ASSUMES IT DOES IS WRONG. This driver seeds
+//  THE SEEDED INTERFACE WAS TWICE TOO WIDE UNTIL THIS COMMIT, and it is worth
+//  recording because everything else about the driver was right. The paper's
+//  Eqs. (41)-(42) seed tanh[2(r - R)/W]; this file had tanh[(r - R)/W]. The
+//  parent's validation/static_droplet.cpp has the 2, and so does bubble.cu next
+//  door, so -w 4 here bought an interface no other part of the tree agreed with.
 //
-//      tanh[ (r - R) / W ],        bubble.cu seeds  tanh[ 2(r - R) / W ],
+//  It hid because a wrong interface width is still a CONSISTENT simulation. The
+//  device reproduced the host to every digit, the equilibrium and perturbation
+//  identities all held, sigma converged to a steady value -- nothing was
+//  inconsistent, only wrong, and the one number that could have shown it was
+//  read as a property of the model:
 //
-//  so -w 4 here is TWICE the interface of -w 4 there. The conventions are not
-//  reconciled because W is not the same kind of quantity in the two models: in
-//  the phase field it is a model parameter that also sets beta and kappa, while
-//  here the interface width is an OUTCOME of recolouring and W only seeds it.
+//      gamma     parent      this file, 2x wide     this file, fixed
+//        1       0.87%           -2.48%                 +0.94%
+//       10       0.77%           -3.02%                 +0.67%
+//      100         --           -13.61%                 -3.36%
 //
-//  Measured, and it is not a small effect. At 64^3, R = 16, nu = 0.1, gamma =
-//  100, against bubble.cu at -w 4:
-//
-//      -w 4 -window 3   sigma error -13.61%     (a 2x wider interface)
-//      -w 2 -window 6    sigma error  -3.36%     (matched; same gap, 12 cells)
-//
-//  A run meant to be compared with bubble.cu -w 4 -window 3 is therefore
-//  -w 2 -window 6. Confirmed matched by the diagnostic: r_eff at step 0 is
-//  16.203 from both drivers, to five digits.
+//  The GPU port was quietly 3x worse than the code it was ported from at
+//  gamma = 1, and that gap sat in the README as an open question about the
+//  model rather than being chased. It was the seed.
 //
 //  WHAT THE PARENT MEASURED, and what this is expected to reproduce: gamma = 1
 //  within 0.87% and gamma = 10 within 0.77%. AT gamma = 100 AND 1000 THE PARENT
@@ -81,7 +82,12 @@ struct DropletInit {
     const double c = 0.5 * double(n);
     const double dx = double(x) - c, dy = double(y) - c, dz = double(z) - c;
     const double r = sqrt(dx * dx + dy * dy + dz * dz);
-    const double t = 0.5 * (1.0 - tanh((r - double(R)) / double(W)));
+    // Eq. (41)-(42). THE FACTOR OF 2 IS THE PAPER-S, and it was missing here
+    // until it was caught by comparing against bubble.cu: without it -w is a
+    // twice-wider interface than the same flag buys in every other place this
+    // profile is seeded -- validation/static_droplet.cpp in the parent, and
+    // src/bubble.cu next door. See the header for what that cost.
+    const double t = 0.5 * (1.0 - tanh(2.0 * (r - double(R)) / double(W)));
     rr = Real(double(rho_r0) * t);
     rb = Real(double(rho_b0) * (1.0 - t));
   }
