@@ -106,6 +106,23 @@
 //  MEMORY. f at 27 Real, h at 7, plus phi, grad phi (3), lap, u (3) and, when
 //  used, the viscous force (3) and grad p~ (3). At FP32 that is 108 + 28 + 32 =
 //  168 bytes per node in the common case, 192 with both optional fields.
+//
+//  MEASURED ON A T4, FP32, 64^3: 354.6 MLUPS, against the colour gradient's
+//  252.5 and the single-phase core's 950 -- six passes and two distributions for
+//  37% of a single-phase step. -DLBM_PTXAS_VERBOSE=ON reports 0 bytes of stack
+//  frame and no spills on every kernel here (43, 64 and 72 registers for the
+//  phase, fluid and derivative passes). That is colour.cuh's lesson applied by
+//  construction: nothing above is materialised as an array beyond the one f[27]
+//  the collision needs.
+//
+//  ONE PARAMETER TRAP, MEASURED. A static droplet at a density ratio of 100
+//  DIVERGES with the dynamic viscosity matched across the phases, and that is
+//  arithmetic rather than the model: matched mu leaves the heavy phase with a
+//  hundred-fold smaller kinematic viscosity, so
+//  omega = 1/(mu/(rho cs2) + 1/2) = 1.994 against a limit of 2. Matching the
+//  KINEMATIC viscosity instead runs the same case to -3.75% of the asked surface
+//  tension with a spurious current twenty times smaller. When one of these
+//  diverges at a ratio, omega is the first thing to print.
 //==============================================================================
 #include "streaming.cuh"
 

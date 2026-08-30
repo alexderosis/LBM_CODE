@@ -465,9 +465,9 @@ every driver alongside the device ones.
 | forcing | Guo: uniform and Boussinesq | Guo, high-order Hermite |
 | thermal | advection–diffusion + Boussinesq | same |
 | MHD | Dellar induction + Maxwell stress, BGK and central moments | + the published D2Q9 scheme |
-| multiphase | colour gradient (Saito et al.), central moments | + conservative Allen–Cahn phase field, free surface |
+| multiphase | colour gradient (central moments) + conservative Allen–Cahn phase field (BGK, pressure form) | + the phase field's central-moment operator, free surface |
 | geometry | arbitrary voxel input | arbitrary voxel input |
-| cases | 7 drivers | ~20 validation cases |
+| cases | 8 drivers | ~20 validation cases |
 
 Still absent, not merely untested:
 
@@ -482,18 +482,14 @@ Still absent, not merely untested:
   the perfectly conducting nor the insulating condition. Dellar's moment-based
   wall is what those need. Every MHD case here is periodic. Do not read a
   wall-bounded MHD result off this code.
-* **the parent's other two multiphase engines**, and the reason is streaming
-  rather than effort. The colour gradient ported because it needs nothing new:
-  D3Q27 only, two distributions on that one lattice — which is what `scalar.cuh`
-  and `magnetic.cuh` already do — and every pass reads populations at a single
-  time level, so Esoteric Pull is undisturbed. The **free-surface** engine
-  static_asserts *against* Esoteric Pull, because its population reconstruction
-  reads a slot the in-place scheme has already overwritten; that is the same
-  class of race as the scalar outflow above, and porting it means adding a
-  two-lattice storage path plus five kernel launches with a fence between each.
-  The **phase field** would port (it is templated on the streaming policy), but
-  its pressure-gauge conditioning is precisely the kind of problem FP32 makes
-  worse, so it wants an FP64 A/B before anyone trusts a card's answer.
+* **the free-surface engine**, and the reason is streaming rather than effort.
+  It static_asserts *against* Esoteric Pull, because its population
+  reconstruction reads a slot the in-place scheme has already overwritten —
+  the same class of race as the scalar outflow above — so porting it means
+  adding a two-lattice storage path plus five kernel launches with a fence
+  between each.
+* **central moments for the phase field's fluid operator.** The parent has
+  `MultiphaseCentralMoments.hpp`; what is here is the BGK potential form.
 * **D3Q19, TRT, raw MRT, regularised walls, the aorta, height-field input.**
 
 ## The colour gradient — confirmed on a T4
@@ -572,10 +568,60 @@ plainly rather than presenting as an improvement: gamma = 1 at 64³ goes
 -2.55% to -2.48%, gamma = 10 goes -3.48% to -3.02%, and 40³ goes +2.46% to
 +2.49%. Different arithmetic order, same operator.
 
+## The phase field — confirmed on a T4
+
+Clean build first try. `host_phasefield` passes on the card's machine. Laplace's
+law at 64³ with R = 16 and W = 4, FP32, run to 40000 steps and converged (the
+last two report rows agree to the digit):
+
+| gamma | viscosity | sigma measured | error | spurious current |
+|---|---|---|---|---|
+| 1 | mu matched | 9.382817e-04 | −6.17% | 1.235e-05 |
+| 10 | mu matched | 9.573443e-04 | −4.27% | 1.162e-05 |
+| 100 | mu matched | — | **diverged** | — |
+| 10 | nu matched | 9.569894e-04 | −4.30% | 2.249e-06 |
+| 100 | nu matched | 9.625386e-04 | −3.75% | 5.685e-07 |
+
+**The divergence at a ratio of 100 was the viscosity choice, not the model.**
+Matching the DYNAMIC viscosity across a ratio of 100 leaves the heavy phase with
+a hundred-fold smaller kinematic viscosity, and
+`omega = 1/(mu/(rho cs^2) + 1/2)` is then 1.994 — against a stability limit of 2.
+Matching the KINEMATIC viscosity instead (`-muh 5.0`) runs the same case to
+−3.75% with a spurious current twenty times smaller. Worth stating as a
+parameter trap rather than a capability: nothing in the model objects to a ratio
+of 100, and `omega` is what to check first when one of these diverges.
+
+**Throughput is 354.6 MLUPS at 64³ in FP32** — faster than the colour gradient's
+252.5, and 37% of the single-phase core's 950, for six passes and two
+distributions. `-DLBM_PTXAS_VERBOSE=ON` reports **0 bytes stack frame and no
+spills** on every kernel (43, 64 and 72 registers for the phase, fluid and
+derivative passes), which is the colour gradient's lesson applied by
+construction rather than after a measurement.
+
+### The two engines on the same measurement
+
+Same lattice, same box, same R and W, same asked sigma, same precision:
+
+| gamma | colour gradient | phase field |
+|---|---|---|
+| 1 | −2.48% | −6.17% |
+| 10 | −3.02% | −4.27% |
+| 100 | not run | −3.75% |
+
+**Read this as two drivers at their own defaults, not as a verdict on two
+models.** The colour-gradient case runs at tau = 0.8 (nu = 0.1) and the
+phase-field one at mu = 0.05, so the viscosities differ — the same
+change-two-things-at-once trap that the R/W confound in the colour-gradient
+section describes. What the table does support is that both reach the same
+measurement to within a few per cent on the same hardware, and that their errors
+move in OPPOSITE directions with the density ratio: the colour gradient degrades
+as the ratio rises, the phase field improves. A controlled comparison would fix
+the kinematic viscosity in both and has not been run.
+
 ## Verification
 
-`host_check` runs 47 checks with no GPU, in either precision, and `host_colour`
-runs 51 more for the colour-gradient module — in both halves of the word. The
+`host_check` runs 47 checks with no GPU, in either precision, `host_phasefield`
+22 more, and `host_colour` 51 more for the colour-gradient module — in both halves of the word. The
 physics half re-derives the model's invariants from the code as written, because
 the failure a port invites is silently reverting one of the three readings that
 had to be worked out rather than copied from the paper: the per-colour rest term,
