@@ -28,6 +28,7 @@
 #if defined(__CUDACC__)
   #include "colour.cuh"
   #include "magnetic.cuh"
+  #include "phasefield.cuh"
   #include "scalar.cuh"
   #include "solver.cuh"
   namespace lbm { namespace backend {
@@ -35,6 +36,7 @@
     using Scalar   = lbm::ScalarSolver;
     using Magnetic = lbm::MagneticSolver;
     using Colour   = lbm::ColourSolver;
+    using PhaseField = lbm::PhaseFieldSolver;
     inline constexpr bool on_device = true;
 
     // Kernel launches are asynchronous. Without this either side of a timed
@@ -83,6 +85,7 @@
     using Scalar   = lbm::host::Scalar;
     using Magnetic = lbm::host::Magnetic;
     using Colour   = lbm::host::Colour;
+    using PhaseField = lbm::host::PhaseField;
     inline constexpr bool on_device = false;
 
     inline void sync() {}                  // the host loop is already ordered

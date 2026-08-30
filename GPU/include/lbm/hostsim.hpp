@@ -25,6 +25,7 @@
 //==============================================================================
 #include "colour.cuh"
 #include "magnetic.cuh"
+#include "phasefield.cuh"
 #include "scalar.cuh"
 #include "solver.cuh"
 
@@ -498,6 +499,145 @@ class Colour {
   std::vector<Real> fr_, fb_, fld_;
   std::vector<std::uint8_t> flags_;
   bool has_geometry_ = false;
+  std::size_t t_ = 0;
+};
+
+
+//==============================================================================
+//  Phase-field two-phase flow at a density ratio.
+//
+//  Six passes in the order the device driver launches them, and the serial loop
+//  supplies for free the fences the CUDA version gets from kernel boundaries.
+//  The ORDER is the point -- see the banner in phasefield.cuh -- so it lives
+//  here, in step(), rather than in a driver.
+//==============================================================================
+class PhaseField {
+ public:
+  PhaseField(int nx, int ny, int nz) : nx_(nx), ny_(ny), nz_(nz) {
+    N_ = long(nx) * ny * nz;
+    f_.assign(std::size_t(27 * N_), Real(0));
+    h_.assign(std::size_t(PhaseLattice::Q * N_), Real(0));
+    fld_.assign(std::size_t(15 * N_), Real(0));
+    pflags_.assign(std::size_t(N_), std::uint8_t(PhaseBulk));
+    fflags_.assign(std::size_t(N_), std::uint8_t(lbm::Fluid));
+  }
+
+  PhaseModel      phase;
+  MultiphaseModel fluid;
+
+  void enable_viscous_force(bool on) { viscous_ = on; }
+
+  void set_geometry(const std::vector<std::uint8_t>& pf,
+                    const std::vector<std::uint8_t>& ff) {
+    pflags_ = pf;  fflags_ = ff;  has_geometry_ = true;
+  }
+
+  // init(x, y, z, phi&, p_tilde&)
+  template <class Init>
+  void initialise_with(Init init) {
+    for (long n = 0; n < N_; ++n) {
+      int x, y, z;
+      coords(n, nx_, ny_, x, y, z);
+      Real ph = Real(0), pt = Real(0);
+      init(x, y, z, ph, pt);
+      Real g[27];
+      for (int i = 0; i < 27; ++i) g[i] = FluidLattice::w(i) * pt;
+      init_scatter<0, FluidLattice>(f_.data(), N_, x, y, z, nx_, ny_, nz_, g);
+      Real e[PhaseLattice::Q];
+      for (int i = 0; i < PhaseLattice::Q; ++i) e[i] = PhaseLattice::w(i) * ph;
+      init_scatter<0, PhaseLattice>(h_.data(), N_, x, y, z, nx_, ny_, nz_, e);
+      fld_[std::size_t(n)] = ph;                       // phi
+      fld_[std::size_t(8 * N_ + n)] = pt;              // p~
+    }
+    t_ = 0;
+    derivatives();
+  }
+
+  void step() { if (t_ % 2 == 0) run<0>(); else run<1>(); ++t_; }
+
+  void field_to_host(const Real* src, std::vector<Real>& out) {
+    out.assign(src, src + N_);
+  }
+
+  const Real* phi_device() const { return &fld_[0]; }
+  const Real* lap_device() const { return &fld_[std::size_t(4 * N_)]; }
+  const Real* ux_device()  const { return &fld_[std::size_t(5 * N_)]; }
+  const Real* uy_device()  const { return &fld_[std::size_t(6 * N_)]; }
+  const Real* uz_device()  const { return &fld_[std::size_t(7 * N_)]; }
+  const Real* pt_device()  const { return &fld_[std::size_t(8 * N_)]; }
+  std::size_t timestep() const { return t_; }
+  long nodes() const { return N_; }
+
+  // Every phase population, wall slots included -- the conserved quantity, and
+  // a sharp check: the Allen-Cahn form conserves phi EXACTLY, since
+  // sum_i S_i = 0 and both streaming and collision are conservative. This is not
+  // the same number as summing phi over the bulk, and the difference is not a
+  // leak: under an in-place scheme a population in flight toward a wall spends a
+  // step in a slot the wall owns.
+  double total_phase() const {
+    double s = 0;
+    for (Real v : h_) s += double(v);
+    return s;
+  }
+
+ private:
+  void derivatives() {
+    const PfParams p = params();
+    if (has_geometry_) for (long n = 0; n < N_; ++n) pf_derivatives_node<true>(p, n);
+    else               for (long n = 0; n < N_; ++n) pf_derivatives_node<false>(p, n);
+  }
+
+  template <int P> void run() {
+    const PfParams p = params();
+    if (has_geometry_) for (long n = 0; n < N_; ++n) pf_field_node<P, true>(p, N_, n);
+    else               for (long n = 0; n < N_; ++n) pf_field_node<P, false>(p, N_, n);
+    derivatives();
+    if (viscous_) {
+      if (has_geometry_) for (long n = 0; n < N_; ++n) pf_viscous_node<true>(p, n);
+      else               for (long n = 0; n < N_; ++n) pf_viscous_node<false>(p, n);
+    }
+    if (fluid.constant_reference())
+      for (long n = 0; n < N_; ++n) pf_pgrad_node(p, n);
+    if (has_geometry_) for (long n = 0; n < N_; ++n) pf_fluid_node<P, true>(p, N_, n);
+    else               for (long n = 0; n < N_; ++n) pf_fluid_node<P, false>(p, N_, n);
+    if (has_geometry_) for (long n = 0; n < N_; ++n) pf_phase_node<P, true>(p, N_, n);
+    else               for (long n = 0; n < N_; ++n) pf_phase_node<P, false>(p, N_, n);
+  }
+
+  PfParams params() {
+    PfParams p;
+    p.f = f_.data();  p.h = h_.data();
+    p.phi = &fld_[0];
+    p.gx = &fld_[std::size_t(N_)];
+    p.gy = &fld_[std::size_t(2 * N_)];
+    p.gz = &fld_[std::size_t(3 * N_)];
+    p.lap = &fld_[std::size_t(4 * N_)];
+    p.ux = &fld_[std::size_t(5 * N_)];
+    p.uy = &fld_[std::size_t(6 * N_)];
+    p.uz = &fld_[std::size_t(7 * N_)];
+    p.pt = &fld_[std::size_t(8 * N_)];
+    if (viscous_) {
+      p.vx = &fld_[std::size_t(9 * N_)];
+      p.vy = &fld_[std::size_t(10 * N_)];
+      p.vz = &fld_[std::size_t(11 * N_)];
+    }
+    if (fluid.constant_reference()) {
+      p.px = &fld_[std::size_t(12 * N_)];
+      p.py = &fld_[std::size_t(13 * N_)];
+      p.pz = &fld_[std::size_t(14 * N_)];
+    }
+    p.pflags = pflags_.data();  p.fflags = fflags_.data();
+    p.nx = nx_; p.ny = ny_; p.nz = nz_;
+    p.pm = phase;  p.fm = fluid;
+    return p;
+  }
+
+  int nx_, ny_, nz_;
+  long N_;
+  std::vector<Real> f_, h_, fld_;
+  std::vector<std::uint8_t> pflags_, fflags_;
+  bool has_geometry_ = false;
+  bool viscous_ = false;
   std::size_t t_ = 0;
 };
 
