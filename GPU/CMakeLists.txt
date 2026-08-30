@@ -60,7 +60,7 @@ if(LBM_PTXAS_VERBOSE)
     $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-v>)
 endif()
 
-set(LBM_APPS tgv3d tgv3d_bench bench box channel rayleigh_benard alfven orszag_tang)
+set(LBM_APPS tgv3d tgv3d_bench bench box channel rayleigh_benard alfven orszag_tang droplet)
 if(NOT LBM_HOST_ONLY)
   foreach(app ${LBM_APPS})
     add_executable(${app} src/${app}.cu)
@@ -105,10 +105,14 @@ endif()
 #   host_physics  whole simulations against closed-form solutions -- Poiseuille,
 #                 conduction, diffusion, advection, buoyancy, resistive decay,
 #                 the shear Alfven wave. Under ten seconds.
+#   host_colour   the colour-gradient model: phi_i as a weight set, the
+#                 equilibrium's moments, sigma = 4 A tau / 9, recolouring as an
+#                 exact partition -- and then a real droplet driven through all
+#                 three passes, which is what actually exercises Esoteric Pull.
 #
 # Run both before trusting anything the device produces.
 #-------------------------------------------------------------------------------
-foreach(t host_check host_physics)
+foreach(t host_check host_physics host_colour)
   add_executable(${t} test/${t}.cpp)
   target_link_libraries(${t} PRIVATE lbm_cuda_core)
   set_source_files_properties(test/${t}.cpp PROPERTIES LANGUAGE CXX)
@@ -117,3 +121,4 @@ endforeach()
 enable_testing()
 add_test(NAME host_check   COMMAND host_check)
 add_test(NAME host_physics COMMAND host_physics)
+add_test(NAME host_colour  COMMAND host_colour)

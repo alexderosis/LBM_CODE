@@ -23,6 +23,7 @@
 //
 //  Slow, and meant to be. Grids of 32^3 in seconds, not 512^3.
 //==============================================================================
+#include "colour.cuh"
 #include "magnetic.cuh"
 #include "scalar.cuh"
 #include "solver.cuh"
@@ -379,6 +380,127 @@ class Magnetic {
   bool has_geometry_ = false;
   std::size_t t_ = 0;
 };
+
+//==============================================================================
+//  Colour-gradient two-component flow.
+//
+//  Three passes in the same order the device driver launches them, and the
+//  serial loop supplies for free the fences the CUDA version gets from kernel
+//  boundaries. refresh() must precede step(): the collision reads fields the
+//  step cannot compute for itself, because the value it would compute is
+//  consumed and overwritten in the same pass.
+//==============================================================================
+class Colour {
+ public:
+  Colour(int nx, int ny, int nz) : nx_(nx), ny_(ny), nz_(nz) {
+    N_ = long(nx) * ny * nz;
+    fr_.assign(std::size_t(27 * N_), Real(0));
+    fb_.assign(std::size_t(27 * N_), Real(0));
+    fld_.assign(std::size_t(12 * N_), Real(0));
+    // lbm::Fluid, not Fluid: inside namespace host the unqualified name binds to
+    // the host::Fluid class above rather than to the CellType enumerator.
+    flags_.assign(std::size_t(N_), std::uint8_t(lbm::Fluid));
+  }
+
+  ColourModel model;
+
+  void set_geometry(const std::vector<std::uint8_t>& fl) {
+    flags_ = fl; has_geometry_ = true;
+  }
+
+  // init(x, y, z, rho_r&, rho_b&)
+  template <class Init>
+  void initialise_with(Init init) {
+    for (long n = 0; n < N_; ++n) {
+      int x, y, z;
+      coords(n, nx_, ny_, x, y, z);
+      Real rr = Real(1), rb = Real(0);
+      init(x, y, z, rr, rb);
+      Real gr[27], gb[27];
+      for (int i = 0; i < 27; ++i) {
+        gr[i] = rr * ColourModel::phi_i(i, model.alpha_r);
+        gb[i] = rb * ColourModel::phi_i(i, model.alpha_b);
+      }
+      init_scatter<0, ColourLattice>(fr_.data(), N_, x, y, z, nx_, ny_, nz_, gr);
+      init_scatter<0, ColourLattice>(fb_.data(), N_, x, y, z, nx_, ny_, nz_, gb);
+    }
+    t_ = 0;
+    refresh();
+  }
+
+  void refresh() {
+    const ColourParams p = params();
+    if (t_ % 2 == 0) {
+      if (has_geometry_) for (long n = 0; n < N_; ++n) colour_fields_node<0, true>(p, N_, n);
+      else               for (long n = 0; n < N_; ++n) colour_fields_node<0, false>(p, N_, n);
+    } else {
+      if (has_geometry_) for (long n = 0; n < N_; ++n) colour_fields_node<1, true>(p, N_, n);
+      else               for (long n = 0; n < N_; ++n) colour_fields_node<1, false>(p, N_, n);
+    }
+    if (has_geometry_) for (long n = 0; n < N_; ++n) colour_gradient_node<true>(p, n);
+    else               for (long n = 0; n < N_; ++n) colour_gradient_node<false>(p, n);
+  }
+
+  void step() {
+    const ColourParams p = params();
+    if (t_ % 2 == 0) {
+      if (has_geometry_) for (long n = 0; n < N_; ++n) colour_node_update<0, true>(p, N_, n);
+      else               for (long n = 0; n < N_; ++n) colour_node_update<0, false>(p, N_, n);
+    } else {
+      if (has_geometry_) for (long n = 0; n < N_; ++n) colour_node_update<1, true>(p, N_, n);
+      else               for (long n = 0; n < N_; ++n) colour_node_update<1, false>(p, N_, n);
+    }
+    ++t_;
+  }
+
+  void field_to_host(const Real* src, std::vector<Real>& out) {
+    out.assign(src, src + N_);
+  }
+
+  const Real* rho_red_device()  const { return &fld_[0]; }
+  const Real* rho_blue_device() const { return &fld_[std::size_t(N_)]; }
+  const Real* phi_device()      const { return &fld_[std::size_t(2 * N_)]; }
+  const Real* ux_device()       const { return &fld_[std::size_t(3 * N_)]; }
+  const Real* uy_device()       const { return &fld_[std::size_t(4 * N_)]; }
+  const Real* uz_device()       const { return &fld_[std::size_t(5 * N_)]; }
+  std::size_t timestep() const { return t_; }
+  long nodes() const { return N_; }
+
+  // Each colour over every slot, walls included -- the same argument
+  // Scalar::total_population carries about populations in flight.
+  double total_red()  const { double s = 0; for (Real v : fr_) s += double(v); return s; }
+  double total_blue() const { double s = 0; for (Real v : fb_) s += double(v); return s; }
+
+ private:
+  ColourParams params() {
+    ColourParams p;
+    p.fr = fr_.data(); p.fb = fb_.data();
+    p.rho_r = &fld_[0];
+    p.rho_b = &fld_[std::size_t(N_)];
+    p.phi   = &fld_[std::size_t(2 * N_)];
+    p.ux    = &fld_[std::size_t(3 * N_)];
+    p.uy    = &fld_[std::size_t(4 * N_)];
+    p.uz    = &fld_[std::size_t(5 * N_)];
+    p.gx    = &fld_[std::size_t(6 * N_)];
+    p.gy    = &fld_[std::size_t(7 * N_)];
+    p.gz    = &fld_[std::size_t(8 * N_)];
+    p.rx    = &fld_[std::size_t(9 * N_)];
+    p.ry    = &fld_[std::size_t(10 * N_)];
+    p.rz    = &fld_[std::size_t(11 * N_)];
+    p.flags = flags_.data();
+    p.nx = nx_; p.ny = ny_; p.nz = nz_;
+    p.m = model;
+    return p;
+  }
+
+  int nx_, ny_, nz_;
+  long N_;
+  std::vector<Real> fr_, fb_, fld_;
+  std::vector<std::uint8_t> flags_;
+  bool has_geometry_ = false;
+  std::size_t t_ = 0;
+};
+
 
 //------------------------------------------------------------------------------
 // One step of a fully coupled system, in the order the coupling requires.

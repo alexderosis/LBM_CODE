@@ -26,6 +26,7 @@
 //==============================================================================
 #include <string>
 #if defined(__CUDACC__)
+  #include "colour.cuh"
   #include "magnetic.cuh"
   #include "scalar.cuh"
   #include "solver.cuh"
@@ -33,6 +34,7 @@
     using Fluid    = lbm::Solver;
     using Scalar   = lbm::ScalarSolver;
     using Magnetic = lbm::MagneticSolver;
+    using Colour   = lbm::ColourSolver;
     inline constexpr bool on_device = true;
 
     // Kernel launches are asynchronous. Without this either side of a timed
@@ -80,6 +82,7 @@
     using Fluid    = lbm::host::Fluid;
     using Scalar   = lbm::host::Scalar;
     using Magnetic = lbm::host::Magnetic;
+    using Colour   = lbm::host::Colour;
     inline constexpr bool on_device = false;
 
     inline void sync() {}                  // the host loop is already ordered

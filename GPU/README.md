@@ -465,8 +465,9 @@ every driver alongside the device ones.
 | forcing | Guo: uniform and Boussinesq | Guo, high-order Hermite |
 | thermal | advection–diffusion + Boussinesq | same |
 | MHD | Dellar induction + Maxwell stress, BGK and central moments | + the published D2Q9 scheme |
+| multiphase | colour gradient (Saito et al.), central moments | + conservative Allen–Cahn phase field, free surface |
 | geometry | arbitrary voxel input | arbitrary voxel input |
-| cases | 6 drivers | ~20 validation cases |
+| cases | 7 drivers | ~20 validation cases |
 
 Still absent, not merely untested:
 
@@ -481,9 +482,33 @@ Still absent, not merely untested:
   the perfectly conducting nor the insulating condition. Dellar's moment-based
   wall is what those need. Every MHD case here is periodic. Do not read a
   wall-bounded MHD result off this code.
+* **the parent's other two multiphase engines**, and the reason is streaming
+  rather than effort. The colour gradient ported because it needs nothing new:
+  D3Q27 only, two distributions on that one lattice — which is what `scalar.cuh`
+  and `magnetic.cuh` already do — and every pass reads populations at a single
+  time level, so Esoteric Pull is undisturbed. The **free-surface** engine
+  static_asserts *against* Esoteric Pull, because its population reconstruction
+  reads a slot the in-place scheme has already overwritten; that is the same
+  class of race as the scalar outflow above, and porting it means adding a
+  two-lattice storage path plus five kernel launches with a fence between each.
+  The **phase field** would port (it is templated on the streaming policy), but
+  its pressure-gauge conditioning is precisely the kind of problem FP32 makes
+  worse, so it wants an FP64 A/B before anyone trusts a card's answer.
 * **D3Q19, TRT, raw MRT, regularised walls, the aorta, height-field input.**
 
 ## Verification
+
+`host_check` runs 47 checks with no GPU, in either precision, and `host_colour`
+runs 51 more for the colour-gradient module — in both halves of the word. The
+physics half re-derives the model's invariants from the code as written, because
+the failure a port invites is silently reverting one of the three readings that
+had to be worked out rather than copied from the paper: the per-colour rest term,
+the perturbation coefficient A rather than A/2, and the fact that cs² means two
+different numbers in the same operator. The integration half runs a real droplet
+through all three passes, which is what actually exercises the Esoteric Pull
+parity, the neighbour wrap and the gather/scatter pairing — where a port fails if
+it fails at all. Both colours are conserved to machine precision over fifty
+steps.
 
 `host_check` runs 47 checks with no GPU, in either precision. The original
 twenty: the velocity set and its moments, the `opp(i) == i+1` pairing that
