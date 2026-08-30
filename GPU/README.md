@@ -532,25 +532,45 @@ discrete capillary stress and the discrete pressure balance — evidently cross
 somewhere between those two interface resolutions. Worth knowing before reading
 a single droplet's number as a verdict on the model.
 
-**Throughput is 20.2 MLUPS at 64³ in FP32** (5000 steps in 64.88 s), against the
-single-phase core's 950. A factor of 47 is far more than the extra arithmetic
-explains, and `-DLBM_PTXAS_VERBOSE=ON` says why:
+### The 47x, found and fixed
 
-    colour_kernel   119 registers, 216 bytes stack frame, 0 bytes spilled
-    fluid_kernel    0 bytes stack frame
+The first version ran at **20.2 MLUPS** at 64³ in FP32 (5000 steps in 64.88 s)
+against the single-phase core's 950. A factor of 47 is far more than the extra
+arithmetic explains, and `-DLBM_PTXAS_VERBOSE=ON` — which exists for exactly this
+suspicion — said why: zero spills, but a **216-byte stack frame**, two 27-element
+arrays that did not fit in registers and lived in local memory, read and written
+at every node. The fluid kernel has none.
 
-Zero spills, but a **216-byte stack frame** — two 27-element arrays that did not
-fit in registers and live in local memory, read and written on every node. The
-fluid kernel has none. The cause is in `colour.cuh`'s own banner, which says the
-equilibrium is built as POPULATIONS and then transformed, costing one extra
-forward transform per node, and that "a closed form could be derived; until it is
-measured to matter, it would be a second thing to keep correct." It has now been
-measured to matter. Deriving the equilibrium's central moments in closed form
-would remove `fe` and `pert` as materialised arrays and with them, most of that
-stack frame. Not attempted.
+The cause was in `colour.cuh`'s own banner: the equilibrium was built as
+POPULATIONS and then transformed, and "a closed form could be derived; until it
+is measured to matter, it would be a second thing to keep correct." That was the
+measurement, so the closed form was derived — see the banner in `colour.cuh` for
+the three pieces and why none of them may be lifted from `core.cuh`'s
+`eq_moment()`. One transform in, one out; `ke` and `kp` are never arrays.
 
-At 119 registers, occupancy is also capped near half on sm_75, which the same
-change would relieve.
+| | before | after |
+|---|---|---|
+| stack frame | 216 bytes | **0 bytes** |
+| spill stores / loads | 0 / 0 | 0 / 0 |
+| registers | 119 | 124 |
+| **throughput, 64³ FP32** | **20.2 MLUPS** | **252.5 MLUPS** |
+
+**12.5x**, and 252.5 against the single-phase core's 950 means the colour
+gradient now costs 3.8x a single-phase step — for two distributions, three
+kernels and a heavier collision, which is about what the work implies.
+
+**FP64 is unchanged to every digit printed**, on the device and on the host:
+sigma 1.025048e-03, +2.50%, R_eff 10.319, spurious current 1.835e-05, mean core
+blue 1.684e-04. So this is the same operator, not a cheaper approximation of it.
+`test/host_colour.cpp` keeps the old path as `reference_collide()` and asserts
+the two agree over 60 states — density ratios 1, 10 and 100, a viscosity ratio,
+five colour-gradient orientations including zero, four velocities, a body force
+and a non-zero `rho_ref` — to 5.9e-16 in FP64 and 2.1e-07 in FP32, about one ulp.
+
+In FP32 the *results* move within their own noise, which is worth stating
+plainly rather than presenting as an improvement: gamma = 1 at 64³ goes
+-2.55% to -2.48%, gamma = 10 goes -3.48% to -3.02%, and 40³ goes +2.46% to
++2.49%. Different arithmetic order, same operator.
 
 ## Verification
 

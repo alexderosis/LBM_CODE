@@ -54,26 +54,19 @@
 //  108 + 16. A 256^3 run therefore needs about 2.6 GB, which fits a T4; 384^3
 //  does not.
 //
-//  IT IS SLOW, AND THE REASON IS MEASURED RATHER THAN GUESSED. On a T4 in FP32
-//  this runs at 20.2 MLUPS against the single-phase core's 950 -- a factor of
-//  47, which is far more than three kernels and four transforms per node
-//  explain. -DLBM_PTXAS_VERBOSE=ON says where it goes:
+//  IT WAS 47x SLOWER THAN THE SINGLE-PHASE CORE, AND IS NOW 3.8x. The first
+//  version built the equilibrium and the perturbation as populations and
+//  transformed both: 20.2 MLUPS on a T4 at 64^3 in FP32 against the core's 950,
+//  with ptxas reporting a 216-byte stack frame -- two 27-arrays in local memory,
+//  touched at every node. The closed forms below removed it:
 //
-//      colour_kernel   119 registers, 216 bytes stack frame, 0 bytes spilled
-//      fluid_kernel    0 bytes stack frame
+//      before   119 registers, 216 bytes stack frame,  20.2 MLUPS
+//      after    124 registers,   0 bytes stack frame, 252.5 MLUPS
 //
-//  Zero spills, but a 216-byte STACK FRAME: two of the 27-element arrays below
-//  did not fit in registers and live in local memory, read and written at every
-//  node. 119 registers also caps occupancy near half on sm_75.
-//
-//  The fix is named in the equilibrium's own note further down -- build the
-//  equilibrium's central moments in CLOSED FORM instead of building fe and pert
-//  as populations and transforming them. That note says a closed form "could be
-//  derived; until it is measured to matter, it would be a second thing to keep
-//  correct." This is the measurement. It removes two materialised 27-arrays and
-//  one of the four transforms. Not attempted here, because correctness came
-//  first and the closed form has to be derived against Eq. (18) rather than
-//  assumed from the product-form equilibrium, which Eq. (18) is not.
+//  FP64 results are unchanged to every digit printed, so this is the same
+//  operator rather than a cheaper approximation of it; test/host_colour.cpp
+//  keeps the old path and asserts the two agree to 5.9e-16 (FP64) over 60
+//  states.
 //==============================================================================
 #include "streaming.cuh"
 
