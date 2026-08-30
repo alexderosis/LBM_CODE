@@ -123,4 +123,48 @@ struct BoussinesqGuo {
   }
 };
 
+//------------------------------------------------------------------------------
+// A uniform force plus an arbitrary per-node one, both through Guo.
+//
+// The uniform part is gravity; the field part is whatever another module wants
+// to push the fluid with -- a penalised rigid body, most obviously. Keeping the
+// two separate rather than making the caller add gravity into the field means
+// the field can be rewritten every step by a module that knows nothing about
+// gravity, which is exactly the arrangement PenalisedBody wants.
+//
+// The three views are optional: a default-constructed View has a null data
+// pointer, and an absent component simply contributes nothing.
+//------------------------------------------------------------------------------
+struct FieldGuo {
+  static constexpr const char* name = "FieldGuo";
+  static constexpr bool active = true;
+
+  View1D<Real> Ex, Ey, Ez;                          // per-node force, optional
+  Real fx = Real(0), fy = Real(0), fz = Real(0);    // uniform part
+
+  KOKKOS_INLINE_FUNCTION
+  void at(Index n, Real F[3]) const {
+    F[0] = fx + (Ex.data() ? Ex(n) : Real(0));
+    F[1] = fy + (Ey.data() ? Ey(n) : Real(0));
+    F[2] = fz + (Ez.data() ? Ez(n) : Real(0));
+  }
+  KOKKOS_INLINE_FUNCTION
+  void shift_velocity(Index n, Real rho, Real& ux, Real& uy, Real& uz) const {
+    Real F[3]; at(n, F);
+    const Real h = Real(0.5) / rho;
+    ux += h * F[0];  uy += h * F[1];  uz += h * F[2];
+  }
+  template <class L>
+  KOKKOS_INLINE_FUNCTION
+  Real source_raw(Index n, int i, Real ux, Real uy, Real uz) const {
+    Real F[3]; at(n, F);
+    return guo_source_raw<L>(i, F, ux, uy, uz);
+  }
+  template <class L>
+  KOKKOS_INLINE_FUNCTION
+  Real source(Index n, int i, Real omega, Real ux, Real uy, Real uz) const {
+    return (Real(1) - Real(0.5) * omega) * source_raw<L>(n, i, ux, uy, uz);
+  }
+};
+
 }  // namespace lbm

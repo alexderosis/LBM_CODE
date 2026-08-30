@@ -32,6 +32,40 @@
 //  where chi = 1. It must run AFTER compute_macroscopic() and BEFORE the fluid
 //  steps.
 //
+//  TWO DENSITIES, AND THEY ARE NOT THE SAME ONE. refresh() takes an optional
+//  second functor, and a free surface is why.
+//
+//    THE LIQUID DENSITY scales the force and everything Newton needs: the
+//      fictitious mass, its moments, the momentum deficit. A cell a tenth full
+//      of liquid holds a tenth of the fluid and must be pushed a tenth as hard,
+//      or a body would feel a full cell's resistance from a nearly empty one --
+//      and would displace a full cell's worth of buoyancy from it.
+//    THE LBM DENSITY is what the fluid solver divides the force BY. The stored
+//      velocity is u = sum_i c_i f_i / rho + F/(2 rho) with rho the zeroth
+//      moment, whatever the cell's fill level, so undoing this body's previous
+//      contribution to u must divide by that same rho and nothing else.
+//
+//  With a phase field the two are identical and the second functor is omitted.
+//  With the free surface of FreeSurfaceSolver.hpp they differ across the whole
+//  interface shell, and conflating them is a 1/epsilon amplification on exactly
+//  the cells a body enters the water through. Measured: a square in free fall
+//  reached the surface at the right speed and then diverged within a step of
+//  touching it, taking the rotation solve with it -- 285000 degrees of tilt.
+//
+//  A CELL WITH NO FLUID IN IT IS NOT FORCED, and the reciprocal is guarded for
+//  it. With a phase field the local density never approaches zero --
+//  the light phase is still a fluid -- and the guard never fires. With the free
+//  surface of FreeSurfaceSolver.hpp it fires constantly: above the waterline
+//  there are no populations at all, so the force written there is never
+//  integrated by anything, and subtracting it from u* on the next step is
+//  subtracting something that did not happen. Dividing by a near-zero density
+//  turns that into a large number: measured with a floor of 1e-3 under the
+//  density, the correction was amplified five hundredfold and settled into a
+//  fixed point where the reaction exactly cancelled gravity -- a body in free
+//  fall that hovered, with nothing in the output to say why. With the guard, an
+//  empty cell contributes no force, no fictitious mass and no momentum deficit,
+//  which is what "there is no fluid here" should mean.
+//
 //  u* IS NOT THE STORED VELOCITY, and this is the one thing that has to be right.
 //  The solver defines u = sum_i c_i f_i + F/(2 rho) with F the TOTAL force, so
 //  the velocity field already contains this body's force from the previous step.
@@ -353,14 +387,20 @@ class PenalisedBody {
     Real righting = 0;
   };
 
+  // One density for both, which is what a two-fluid model wants.
   template <class DensityOf>
   Reaction refresh(DensityOf density_of) {
-    const BodySums q = probe(density_of);
+    return refresh(density_of, density_of);
+  }
+
+  template <class LiquidOf, class LbmOf>
+  Reaction refresh(LiquidOf density_of, LbmOf lbm_of) {
+    const BodySums q = probe(density_of, lbm_of);
     Real dux = 0, duy = 0, dw = 0;
     solve(q, dux, duy, dw);
     if (free_translation) { vx += dux; vy += duy; }
     if (free_rotation)    { omega += dw; }
-    apply(density_of);
+    apply(density_of, lbm_of);
 
     // R and T in closed form; see the header. Exact against -sum F, and free.
     const Real Zx = -q.Sy, Zy = q.Sx;              // z x S
@@ -385,13 +425,17 @@ class PenalisedBody {
   // will not accept from a private member.
   //----------------------------------------------------------------------------
   template <class DensityOf>
-  BodySums probe(DensityOf density_of) const {
+  BodySums probe(DensityOf density_of) const { return probe(density_of, density_of); }
+
+  template <class LiquidOf, class LbmOf>
+  BodySums probe(LiquidOf density_of, LbmOf lbm_of) const {
     const Domain d = dom_;
     const Rect b = shape;
     const Real bvx = vx, bvy = vy, bw = omega;
     auto ux = ux_, uy = uy_;
     auto fx = fx_, fy = fy_;
     const auto dens = density_of;
+    const auto ldens = lbm_of;
     const Index hx = dom_.hx, hy = dom_.hy;
     const Real reach2 = shape.reach() * shape.reach();
 
@@ -403,10 +447,13 @@ class PenalisedBody {
         if (rx * rx + ry * ry > reach2) return;
         const Real c = b.chi(Real(px - hx), Real(py - hy));
         if (c < Real(1e-6)) return;
-        const Real r = dens(n);
+        const Real r = dens(n);              // liquid: force and Newton
+        const Real rl = ldens(n);            // LBM: what the fluid divides by
         const Real cr = c * r;
-        // Undo this body's own previous contribution to the stored velocity.
-        const Real inv = Real(0.5) / r;
+        // Undo this body's own previous contribution to the stored velocity --
+        // against the density the fluid actually used, and only where there was
+        // a fluid at all. See the note above.
+        const Real inv = (rl > Real(1e-12)) ? Real(0.5) / rl : Real(0);
         const Real usx = ux(n) - fx(n) * inv;
         const Real usy = uy(n) - fy(n) * inv;
         // ... and measure what is left against the rigid field it should match.
@@ -426,13 +473,17 @@ class PenalisedBody {
   // it everywhere else -- the body moves, and a force left behind where it used
   // to be would keep pushing.
   template <class DensityOf>
-  void apply(DensityOf density_of) {
+  void apply(DensityOf density_of) { apply(density_of, density_of); }
+
+  template <class LiquidOf, class LbmOf>
+  void apply(LiquidOf density_of, LbmOf lbm_of) {
     const Domain d = dom_;
     const Rect b = shape;
     const Real bvx = vx, bvy = vy, bw = omega;
     auto ux = ux_, uy = uy_;
     auto fx = fx_, fy = fy_, fz = fz_;
     const auto dens = density_of;
+    const auto ldens = lbm_of;
     const Index hx = dom_.hx, hy = dom_.hy;
     const Real reach2 = shape.reach() * shape.reach();
 
@@ -445,7 +496,8 @@ class PenalisedBody {
         const Real c = b.chi(Real(px - hx), Real(py - hy));
         if (c < Real(1e-6)) { fx(n) = Real(0); fy(n) = Real(0); return; }
         const Real r = dens(n);
-        const Real inv = Real(0.5) / r;
+        const Real rl = ldens(n);
+        const Real inv = (rl > Real(1e-12)) ? Real(0.5) / rl : Real(0);
         const Real usx = ux(n) - fx(n) * inv;
         const Real usy = uy(n) - fy(n) * inv;
         fx(n) = c * Real(2) * r * ((bvx - bw * ry) - usx);
