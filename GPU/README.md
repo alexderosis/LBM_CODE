@@ -496,6 +496,62 @@ Still absent, not merely untested:
   worse, so it wants an FP64 A/B before anyone trusts a card's answer.
 * **D3Q19, TRT, raw MRT, regularised walls, the aorta, height-field input.**
 
+## The colour gradient — confirmed on a T4
+
+Written and debugged with no GPU, then run on one. Tesla T4, sm_75, CUDA 12.8.
+The build was clean first try, nine targets, 6m38s, and the FP64 build of the
+same driver is clean too.
+
+**The device reproduced the host reference to every digit printed.** Same case,
+40³ with R = 10 and W = 2, 3000 steps, both in FP64 — one on a laptop through the
+serial driver in `hostsim.hpp`, one in CUDA kernels on the card:
+
+| | sigma | error | R_eff | spurious current | blue in the core |
+|---|---|---|---|---|---|
+| host reference, FP64 | 1.025048e-03 | +2.50% | 10.319 | 1.835e-05 | 1.684e-04 |
+| T4, FP64 | 1.025048e-03 | +2.50% | 10.319 | 1.835e-05 | 1.684e-04 |
+| T4, FP32 | 1.024569e-03 | +2.46% | 10.319 | 1.842e-05 | 1.685e-04 |
+
+That is the whole return on writing the numerical core as `LBM_HD`: the kernels
+and the reference driver are not similar, they are the same arithmetic, and FP32
+costs four hundredths of a percentage point on this measurement.
+
+**Laplace's law at the resolution the parent uses**, 64³ with R = 16 and W = 4,
+20000 steps:
+
+| gamma | precision | sigma measured | asked | error | spurious current |
+|---|---|---|---|---|---|
+| 1 | FP32 | 9.744986e-04 | 1e-03 | −2.55% | 2.029e-05 |
+| 1 | FP64 | 9.726696e-04 | 1e-03 | −2.73% | 2.017e-05 |
+| 10 | FP32 | 9.652156e-04 | 1e-03 | −3.48% | 1.125e-05 |
+
+**The sign of the error is geometry, not precision and not the port.** At
+R = 10, W = 2 the measured tension is 2.5% HIGH; at R = 16, W = 4 it is 2.6% LOW,
+and FP64 moves it by 0.2 points either way. The two errors that make it up — the
+discrete capillary stress and the discrete pressure balance — evidently cross
+somewhere between those two interface resolutions. Worth knowing before reading
+a single droplet's number as a verdict on the model.
+
+**Throughput is 20.2 MLUPS at 64³ in FP32** (5000 steps in 64.88 s), against the
+single-phase core's 950. A factor of 47 is far more than the extra arithmetic
+explains, and `-DLBM_PTXAS_VERBOSE=ON` says why:
+
+    colour_kernel   119 registers, 216 bytes stack frame, 0 bytes spilled
+    fluid_kernel    0 bytes stack frame
+
+Zero spills, but a **216-byte stack frame** — two 27-element arrays that did not
+fit in registers and live in local memory, read and written on every node. The
+fluid kernel has none. The cause is in `colour.cuh`'s own banner, which says the
+equilibrium is built as POPULATIONS and then transformed, costing one extra
+forward transform per node, and that "a closed form could be derived; until it is
+measured to matter, it would be a second thing to keep correct." It has now been
+measured to matter. Deriving the equilibrium's central moments in closed form
+would remove `fe` and `pert` as materialised arrays and with them, most of that
+stack frame. Not attempted.
+
+At 119 registers, occupancy is also capped near half on sm_75, which the same
+change would relieve.
+
 ## Verification
 
 `host_check` runs 47 checks with no GPU, in either precision, and `host_colour`
