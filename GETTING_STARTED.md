@@ -407,6 +407,12 @@ for analysis runs too slow to be tests.
 conventions, the invariants that break silently, what is out of scope, and the
 measurement traps. You should not need to paste any of it.
 
+**You do not need a terminal for this.** Claude Code runs as a VS Code or
+JetBrains extension, as a desktop app on Mac and Windows, and in the browser at
+`claude.ai/code`, as well as from the command line. `CLAUDE.md` is read from the
+project directory, so it behaves the same in all of them — if you already have
+the repository open in an editor, the extension is the shortest path.
+
 ---
 
 ## 6. Where to read next
