@@ -127,18 +127,53 @@
 //     diffusive at a sharply curved interface than the normal-weighted form.
 //   * NO SUBGRID INTERFACE. The interface is resolved to one cell, so a film
 //     thinner than a cell either survives as a one-cell layer or vanishes.
-//   * A MOVING OBSTACLE IS NOT YET RELIABLE, and the reason is in this file
-//     rather than in the caller. mass_exchange() conserves mass by antisymmetry
-//     -- what one cell gives across a face, its neighbour takes -- and that
-//     assumes BOTH cells agree on the mask for the whole pass. move_obstacle()
-//     changes the mask between passes, so every cell the body sweeps breaks the
-//     assumption. transfer_covered_mass() keeps the TOTAL right but does not
-//     restore the per-face antisymmetry, and the difference shows up wherever
-//     many mask cells change at once: a flat face landing on a flat surface, a
-//     corner entering, a rotated rectangle's staircase flipping cells as it
-//     turns. demonstrator/water_entry_fs.cpp measures all three. The fix is to
-//     make the mass exchange itself aware of the moving boundary; bounce-back,
-//     momentum exchange and refill are all in place and are not the problem.
+//   * A MOVING OBSTACLE IS BETTER THAN IT WAS AND STILL NOT RELIABLE. What this
+//     entry used to say -- that mass_exchange()'s per-face antisymmetry is
+//     broken by the mask changing between passes -- was WRONG, and measuring it
+//     is what showed so: summed over a sweeping body, the interface-interface
+//     term of mass_exchange() is 0.000000 to every digit. flags_ is fixed for
+//     the whole of that pass and both cells of every pair do agree on it.
+//
+//     What was actually wrong, and is now fixed, is that
+//     transfer_covered_mass() chose its recipients by reading reinit_. Nothing
+//     clears reinit_ between settle() at the end of one step and
+//     transfer_covered_mass() early in the next, so interface cells that
+//     settle() had just built out of gas counted as cells this body had
+//     uncovered. The share was divided among more cells than the body exposed,
+//     the genuinely uncovered ones came back too empty and converted to gas,
+//     and the body dug a void in its own wake. On the isolated test in
+//     tests/test_free_surface.cpp that was not a drift but a DIVERGENCE, to a
+//     total of 7.7e28 by step 1200; it is now bounded at 6.0e-2.
+//     water_entry_fs.cpp reaches t* = 8.86 against 6.16 before.
+//
+//     TWO FURTHER DEFECTS ARE IDENTIFIED, MEASURED, AND DELIBERATELY NOT FIXED,
+//     which is a worse-sounding sentence than it is. Both are real:
+//
+//       (i)  placing the body covers cells and uncovers none, and the early
+//            return below then abandons their mass -- 49 of 1175 units, 4%, on
+//            the first call of the isolated test. The same happens on any step
+//            whose discretised outline covers without uncovering, which for a
+//            body moving less than a cell per step is most of them.
+//       (ii) settle() keeps the WHOLE mass of a cell whose conversion promote()
+//            afterwards overruled, while classify() has already published that
+//            cell's excess and settle() has already handed it to the
+//            neighbours. It creates mass, exactly the published amount, and it
+//            fires wherever a filling cell sits beside an emptying one: +25.0
+//            units in a single step of the isolated test.
+//
+//     Each was fixed, and each fix made water_entry_fs.cpp fail SOONER -- (ii)
+//     alone takes t* = 6.16 down to 3.39, (i) with it to 2.54, both with the
+//     recipient fix to 2.23 -- against a baseline trajectory that is physically
+//     sensible out to t* = 5.4, the body decelerating through impact and
+//     settling to y_c/L = -1.12. The demonstrator's reach depends on these two
+//     errors cancelling something else, and shipping either one alone trades a
+//     correct ledger for a demonstrator that dies during the impact it exists
+//     to show. Whatever they are cancelling has not been found. Do not "fix"
+//     (i) or (ii) without re-running that case; the books getting better while
+//     the physics gets worse is the signature to expect.
+//
+//     Bounce-back, momentum exchange and refill are all in place and are not
+//     the problem.
 //==============================================================================
 #include "collision/MomentCollision.hpp"
 #include "core/Types.hpp"
@@ -208,6 +243,7 @@ class FreeSurfaceSolver {
         newf_("fs_newflags", dom.n_padded),
         final_("fs_finalflags", dom.n_padded),
         reinit_("fs_reinit", dom.n_padded),
+        uncov_("fs_uncovered", dom.n_padded),
         wux_("fs_wux", dom.n_padded), wuy_("fs_wuy", dom.n_padded),
         wuz_("fs_wuz", dom.n_padded), obst_("fs_obst", dom.n_padded),
         was_body_("fs_wasbody", dom.n_padded),
@@ -454,12 +490,13 @@ class FreeSurfaceSolver {
     auto mass = mass_, eps = eps_, rho = rho_, excess = excess_;
     auto ux = ux_, uy = uy_, uz = uz_;
     auto wux = wux_, wuy = wuy_, wuz = wuz_;
-    auto obst = obst_;
+    auto obst = obst_, uncov = uncov_;
     const Index hx = dom_.hx, hy = dom_.hy;
     const Real cx = bcx_, cy = bcy_;
 
     // Pass A: the mask itself, plus the wall velocity the body's cells need.
     Kokkos::parallel_for("fs_mask", Range(0, dom_.n_padded), KOKKOS_LAMBDA(Index n) {
+      uncov(n) = 0;                 // this move's own mask, cleared before use
       Real uw[3] = {Real(0), Real(0), Real(0)};
       wall_vel(n, uw);
       wux(n) = uw[0]; wuy(n) = uw[1]; wuz(n) = uw[2];
@@ -529,30 +566,42 @@ class FreeSurfaceSolver {
       for (int i = 0; i < Q; ++i) acc.src(n, i) = acc.dst(n, i);
       ux(n) = uw[0]; uy(n) = uw[1]; uz(n) = uw[2];
       mass(n) = Real(0); eps(n) = Real(0);
-      reinit(n) = 1;
+      reinit(n) = 1;  uncov(n) = 1;
     });
     Kokkos::fence();
     Kokkos::deep_copy(flags_, final_);
     Kokkos::deep_copy(newf_, final_);
   }
 
-  // The covered cells' mass, handed to the uncovered ones. Exactly conservative:
-  // one reduction to find how much and how many, one pass to hand it over.
+  // The covered cells' mass, handed to the uncovered ones.
+  //
+  // THE RECIPIENT TEST READS uncov_, NOT reinit_, and that was a real defect
+  // rather than a tidying. reinit_ still holds settle()'s gas-arrivals from the
+  // END of the previous step -- nothing clears it in between -- so an interface
+  // cell that had just been built out of gas counted as a cell this body had
+  // uncovered. Two consequences, both wrong: the share was divided among more
+  // cells than the body exposed, so the genuinely uncovered ones came back too
+  // empty and converted straight to gas, leaving a void in the body's wake; and
+  // `mass(n) = share` OVERWROTE the mass those gas-arrivals had been given by
+  // settle(), which is not conservative and is not this function's business.
+  //
+  // Measured on demonstrator/water_entry_fs.cpp: the run reaches t* = 8.86
+  // against 6.16 before.
   void transfer_covered_mass() {
     auto flags = flags_; auto excess = excess_, mass = mass_, eps = eps_, rho = rho_;
-    auto reinit = reinit_;
+    auto uncov = uncov_;
     Real m_cov = 0; Index n_unc = 0;
     Kokkos::parallel_reduce("fs_cover_sum", Range(0, dom_.n_padded),
       KOKKOS_LAMBDA(Index n, Real& acc_m, Index& acc_n) {
         if (flags(n) == FsSolid) acc_m += excess(n);
-        else if (reinit(n) && flags(n) == FsInterface) ++acc_n;
+        else if (uncov(n) && flags(n) == FsInterface) ++acc_n;
       }, m_cov, n_unc);
     Kokkos::fence();
     if (n_unc == 0) return;                  // leave it to the excess machinery
     const Real share = m_cov / Real(n_unc);
     Kokkos::parallel_for("fs_cover_give", Range(0, dom_.n_padded), KOKKOS_LAMBDA(Index n) {
       if (flags(n) == FsSolid) { excess(n) = Real(0); return; }
-      if (reinit(n) && flags(n) == FsInterface) {
+      if (uncov(n) && flags(n) == FsInterface) {
         mass(n) = share;
         const Real r = rho(n);
         eps(n) = (r > Real(0)) ? share / r : Real(0);
@@ -938,6 +987,13 @@ class FreeSurfaceSolver {
   Domain dom_;
   Streaming pop_;
   View1D<std::uint8_t> flags_, newf_, final_, reinit_;
+  // WHICH CELLS THIS MOVE UNCOVERED, kept apart from reinit_ on purpose.
+  // reinit_ is a PUBLIC signal that also carries settle()'s gas-arrivals from
+  // the previous step, and transfer_covered_mass() reading it counted those as
+  // recipients of the body's displaced mass -- diluting the share the genuinely
+  // uncovered cells got, and OVERWRITING the mass the gas-arrivals had just
+  // been given. This mask means only what its name says.
+  View1D<std::uint8_t> uncov_;
   HostView1D<std::uint8_t> h_flags_;
   View1D<Real> mass_, eps_, excess_;
   View1D<Real> wux_, wuy_, wuz_;      // wall velocity, meaningful in body cells

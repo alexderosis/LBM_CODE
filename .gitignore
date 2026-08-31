@@ -24,3 +24,12 @@ doc/fig/*.bin
 # redistributing them is not ours to do.
 SomeRefs/
 .DS_Store
+
+# Field dumps and animation frames under results/. These are regenerable by
+# re-running the case (-field for tgv2d, -fevery for channel3d) and they are
+# large: the channel's mid-plane contour dumps alone came to 59 MB against 24 kB
+# for the profile tables beside them. The SUMMARY tables in results/ are tracked
+# reference data; per-node field data is not.
+results/*/field_*.dat
+results/*/anim_*
+results/I_channel/*_contour.dat

@@ -40,9 +40,66 @@
 //
 //  The value is therefore left in the table -- it is what the paper prints, and
 //  silently substituting a number nobody published would be worse -- but it is
-//  scored separately. The run reports max |diff| both including and excluding
-//  it. It could not be checked against the original paper, which is not in
-//  SomeRefs; if it is added, this is the entry to look at.
+//  scored separately. The run reports max |diff| both including and excluding it.
+//
+//  UPDATE 2026-08-31: the paper's own Table I was supplied directly, and all
+//  three u-columns here (Re = 100, 400, 1000) plus the 17 y-stations match it
+//  ENTRY FOR ENTRY. The transcription is confirmed against the primary source,
+//  not merely against a second digitisation.
+//
+//  That table also carries a SECOND published anomaly, in a column this file
+//  does not yet use:
+//
+//      u at Re = 3200, y = 0.4531  reads  -0.86636.
+//
+//  It cannot be right. The same station reads -0.10648 at Re = 1000 and
+//  -0.07404 at Re = 5000, and every u entry in the whole table lies in
+//  [-0.44, 1.0]. It is almost certainly -0.08636 with a shifted digit. If a
+//  Re = 3200 column is ever added here, that is the entry to handle.
+//
+//  CONVERGENCE -- MEASURED, three criteria at Re = 100, N = 129, D3Q27/CM:
+//
+//    criterion                              steps    t/tau_d   max|du|  max|dv|
+//    single node (centre), 1e-11           262,000    0.410     0.0049   0.0067
+//    whole field, per STEP, 1e-5            20,391    0.032     0.0485   0.0414
+//    whole field, per 500 steps, 1e-5       93,500    0.146     0.0048   0.0066
+//
+//  Two lessons, and they point in opposite directions.
+//
+//  A PER-STEP tolerance is not a convergence test. For a field relaxing as
+//  u_inf + A exp(-t/T) the change per step is (remaining error)/T, so bounding
+//  the per-step change by eps bounds the remaining error only by eps*T. Here
+//  T = L^2/nu = 6.4e5 steps, so eps = 1e-5 permits a remaining error of 633% of
+//  the velocity scale -- and the run duly stops at 3% of a diffusive time with
+//  an error against Ghia ten times the converged one. It gets LOOSER as Re
+//  rises, which is backwards. The run therefore reports the residual and the
+//  implied remaining error e_hat = (r/probe)*T side by side; e_hat is the number
+//  that means something.
+//
+//  But the WHOLE-FIELD measure is strictly better than the single node, and with
+//  the same 1e-5 threshold taken over a 500-step interval it reproduces the
+//  converged answer to the last digit in 2.8x FEWER steps than the single-node
+//  test needed. A single node can sit still while boundary layers are still
+//  growing (validation/poiseuille_inlet.cpp records that failure costing a
+//  factor of 400 in error); the field cannot.
+//
+//  Recommended: -restol 1e-5 -probe 500. -minsteps forces a longer run.
+//
+//  IS 1e-5 TIGHT ENOUGH AT HIGHER Re? Checked, at Re = 1000, N = 129:
+//
+//    restol   steps     t/tau_d   e_hat     max|du|   max|dv|
+//    1e-5     321,000   0.050     1.28e-1   0.0097    0.0104
+//    1e-6     528,500   0.083     1.28e-2   0.0094    0.0100
+//
+//  A 10x tighter tolerance and a 1.65x longer run move the comparison by 0.0003
+//  and 0.0004 -- about 4% of the discrepancy itself, and 0.04% of the lid speed.
+//  So the remaining transient is NOT what separates this from Ghia at 129^2; the
+//  grid is.
+//
+//  Note also that e_hat is a CONSERVATIVE bound, not an estimate. It uses the
+//  diffusive time L^2/nu as the relaxation scale, and the cavity equilibrates
+//  convectively rather than diffusively, so e_hat = 0.13 corresponded to an
+//  actual movement of 0.0003. Read it as "no worse than", not "is".
 //==============================================================================
 #include "Campaign.hpp"
 #include "FieldDump.hpp"
@@ -104,6 +161,10 @@ int main(int argc, char** argv) {
     double Re = 100.0;
     Real U = Real(0.02);
     std::string lat = "d2q9", op = "cm";
+    std::size_t minsteps = 0;   // force at least this many steps before stopping
+    std::size_t probe_n = 500;  // steps between residual probes
+    double restol = 0.0;        // >0: use the WHOLE-FIELD residual instead of
+                                // the single-node test
     for (int i = 1; i < argc; ++i) {
       const std::string a = argv[i];
       if (a == "-n"   && i + 1 < argc) N  = std::atoi(argv[++i]);
@@ -111,6 +172,9 @@ int main(int argc, char** argv) {
       if (a == "-u0"  && i + 1 < argc) U  = Real(std::atof(argv[++i]));
       if (a == "-lat" && i + 1 < argc) lat = argv[++i];
       if (a == "-op"  && i + 1 < argc) op  = argv[++i];
+      if (a == "-minsteps" && i + 1 < argc) minsteps = std::strtoull(argv[++i], nullptr, 10);
+      if (a == "-probe"  && i + 1 < argc) probe_n = std::strtoull(argv[++i], nullptr, 10);
+      if (a == "-restol" && i + 1 < argc) restol = std::atof(argv[++i]);
     }
     const Real Lc = Real(N - 1);                 // walls sit ON the boundary nodes
     const Real nu = Real(double(U) * double(Lc) / Re);
@@ -140,19 +204,62 @@ int main(int argc, char** argv) {
       s.initialize(Real(1));
 
       // March to steady state on the centreline velocity.
-      const std::size_t probe = 2000, cap = 40000000;
+      // STOPPING. Two criteria, because they measure different things.
+      //
+      // The default watches ONE node, the cavity centre. -restol switches to the
+      // relative L2 change of the WHOLE velocity field over `probe` steps, which
+      // is strictly better: a single node can sit still while boundary layers
+      // are still growing, and poiseuille_inlet.cpp records that exact failure.
+      //
+      // The tolerance must NOT be read as a per-step change. For a field
+      // relaxing as u_inf + A exp(-t/T), the change per step is (remaining
+      // error)/T, so a per-step bound eps only bounds the remaining error by
+      // eps*T -- and T = L^2/nu is 6.4e5 steps at Re = 100 here, so eps = 1e-5
+      // permits a remaining error of 640% of the velocity scale and fires
+      // immediately. Worse, T grows with Re, so the bound loosens exactly where
+      // the run needs to be longer. The residual is therefore reported over the
+      // probe interval AND converted to an estimated remaining error,
+      //     e_hat = (r / probe) * T,
+      // which is the number that means something.
+      const std::size_t probe = probe_n, cap = 40000000;
+      const double tau_d = double(Lc) * double(Lc) / double(nu);
       Real prev = 0; std::size_t taken = 0;
+      std::vector<double> pu, pv;
+      double res = NAN, ehat = NAN;
       for (std::size_t t = 0; t < cap; t += probe) {
         for (std::size_t k = 0; k < probe; ++k) s.step();
         taken += probe;
         s.compute_macroscopic();
-        auto h = Kokkos::create_mirror_view_and_copy(HostSpace{}, s.ux());
+        auto h  = Kokkos::create_mirror_view_and_copy(HostSpace{}, s.ux());
+        auto h2 = Kokkos::create_mirror_view_and_copy(HostSpace{}, s.uy());
         const Real cur = h(d.id(N / 2, N / 2));
         if (!std::isfinite(double(cur))) { std::printf("  DIVERGED at step %zu\n", taken); return; }
-        if (t > 0 && std::abs(double(cur - prev)) < 1e-11 * (std::abs(double(cur)) + 1e-12)) break;
+        if (restol > 0.0) {
+          const std::size_t np = std::size_t(N) * std::size_t(N);
+          if (pu.empty()) { pu.assign(np, 0.0); pv.assign(np, 0.0); }
+          double num = 0, den = 0;
+          for (Index y = 0; y < N; ++y)
+            for (Index x = 0; x < N; ++x) {
+              const std::size_t k = std::size_t(y) * std::size_t(N) + std::size_t(x);
+              const double a = double(h(d.id(x, y))), b = double(h2(d.id(x, y)));
+              num += (a - pu[k]) * (a - pu[k]) + (b - pv[k]) * (b - pv[k]);
+              den += a * a + b * b;
+              pu[k] = a; pv[k] = b;
+            }
+          res  = std::sqrt(num / std::max(den, 1e-300));
+          ehat = res / double(probe) * tau_d;
+          if (t > 0 && taken >= minsteps && res < restol) break;
+        } else {
+          if (t > 0 && taken >= minsteps &&
+              std::abs(double(cur - prev)) < 1e-11 * (std::abs(double(cur)) + 1e-12)) break;
+        }
         prev = cur;
       }
-      std::printf("  steady after %zu steps\n", taken);
+      std::printf("  steady after %zu steps   (t/tau_d = %.3f)\n",
+                  taken, double(taken) / tau_d);
+      if (restol > 0.0)
+        std::printf("  whole-field residual %.3e over %zu steps"
+                    "   -> estimated remaining error %.2e\n", res, probe, ehat);
 
       s.compute_macroscopic();
       auto hux = Kokkos::create_mirror_view_and_copy(HostSpace{}, s.ux());
@@ -171,6 +278,24 @@ int main(int argc, char** argv) {
       std::vector<double> uc(N), vc(N);
       for (Index j = 0; j < N; ++j) uc[j] = double(hux(d.id(N / 2, j))) / double(U);
       for (Index i = 0; i < N; ++i) vc[i] = double(huy(d.id(i, N / 2))) / double(U);
+
+      // The comparison table below holds only Ghia's 17 stations, which is the
+      // right thing to SCORE against but makes a plotted profile look
+      // piecewise-linear. Dump the full centrelines as well, so a figure can
+      // show a smooth curve with Ghia's points on top of it.
+      {
+        const std::string fp = "results/C_cavity/cavity_re" + std::to_string(int(Re))
+                             + "_" + lat + "_" + op + "_full.dat";
+        if (std::FILE* g = std::fopen(fp.c_str(), "w")) {
+          std::fprintf(g, "# s  u/U(x=0.5, y=s)  v/U(x=s, y=0.5)   N=%d Re=%.0f\n",
+                       int(N), Re);
+          for (Index k = 0; k < N; ++k)
+            std::fprintf(g, "%.6f %.8f %.8f\n",
+                         double(k) / double(N - 1), uc[k], vc[k]);
+          std::fclose(g);
+          std::printf("  -> %s\n", fp.c_str());
+        }
+      }
 
       const bool is400 = std::abs(Re - 400.0) < 1e-9;
       const bool have = (std::abs(Re - 100.0) < 1e-9) || is400 ||
