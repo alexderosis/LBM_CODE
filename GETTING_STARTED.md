@@ -317,7 +317,99 @@ Forgetting this is the single most common way to conclude the code is slow.
 
 ---
 
-## 5. Where to read next
+## 5. Writing your own case
+
+Everything above runs cases that are already here. This section is about your
+problem.
+
+Start from **`examples/flow_past_square.cpp`** — flow past a square cylinder in a
+channel. It is a template rather than a result: heavily commented, split into
+four blocks you change, and it exercises every piece a real case needs.
+
+```bash
+cmake --build build -j4 --target flow_past_square
+./build/examples/flow_past_square --kokkos-num-threads=4
+```
+
+Converged output, about 15,000 steps:
+
+```
+  384x96   side = 16   Re = 40   u0 = 0.040 (Ma = 0.069)
+  nu = 0.016000   tau = 0.5480
+
+  step      max|u|       mean u       Re_eff     mass drift
+  16000     7.0882e-02   4.0170e-02   40.2       +4.077e-07
+```
+
+and a `profile.csv` of the wake, which shows *negative* streamwise velocity on
+the centreline — the recirculation bubble behind the body.
+
+### The four blocks
+
+1. **The discretisation.** Three type aliases fix the lattice, the collision
+   operator and the streaming scheme. D2Q9 in 2D, D3Q27 in 3D. BGK is the right
+   default; swap the alias for a central-moment operator and nothing else in the
+   file changes.
+2. **The domain and the geometry.** `set_geometry`'s callback runs **on the
+   host**, once, and returns a `CellType` per cell — `Fluid`, `Solid` (halfway
+   bounce-back), `RegWall`, `Excluded`. Being on the host is the point: you can
+   read a mesh, an image or a height field here with no device-side machinery.
+   A circle, an aerofoil, a city — anything you can answer per cell.
+3. **The initial condition.** This callback runs **on the device**
+   (`KOKKOS_LAMBDA`) and returns a `FlowState{rho, ux, uy, uz}`. Solid cells are
+   skipped for you.
+4. **The time loop and your diagnostic.** `s.step()` advances one step. The
+   macroscopic fields are computed only when you ask — `compute_macroscopic()`
+   or `step(true)` — because on a GPU that is a separate pass over memory.
+
+### The two things that catch people
+
+**Lattice units, and the Reynolds trade.** Everything is dimensionless: `dx = dt
+= 1`. You pick `u0` and a length, and the viscosity follows from the Reynolds
+number you want, `nu = u0 * L / Re`. Two constraints then squeeze you from both
+sides:
+
+* `u0` is a Mach number in disguise — `Ma = u0*sqrt(3)`, and compressibility
+  error grows as `Ma^2`. Keep `u0 <= 0.05`.
+* `tau = 3*nu + 0.5` must stay clear of `1/2`, or the scheme rings and diverges.
+
+So a higher Reynolds number is bought with a bigger grid or a smaller `u0`, never
+for free. The template prints `tau` before the run and warns below `0.51`,
+because "it diverged" almost always means `tau` came out too small.
+
+**A fixed body force does not give you the Reynolds number you asked for.** Held
+constant, the force drives the flow until it balances the *total* drag — walls
+plus your obstacle — and reaching that balance takes the momentum-diffusion time
+`H^2/nu`, which for the template's defaults is 576,000 steps. Measured, with the
+force held fixed: `Re_eff` fell from 49 to 26 over 30,000 steps and was still
+falling. The template therefore adjusts the force to hold the mean velocity, in
+about ten lines, which is what makes `-re 40` actually run at 40. If you drive
+your case with a force, do the same.
+
+### Where to put the file
+
+Three directories, and the distinction is worth keeping:
+
+| directory | what belongs there | built | run by `ctest` |
+|---|---|---|---|
+| `validation/` | has a **known answer** — analytic, a published table, a convergence rate — and prints PASS/FAIL | yes | yes, if in the first `foreach` list |
+| `demonstrator/` | produces something to look at; no exact answer | yes | no |
+| `examples/` | templates to read and copy | yes | no |
+
+Add your file's name to the `foreach` list in that directory's
+`CMakeLists.txt`. A validation case goes in the **first** list in
+`validation/CMakeLists.txt` (the one that calls `add_test`); the second list is
+for analysis runs too slow to be tests.
+
+### If you are using Claude Code
+
+`CLAUDE.md` in the repository root is loaded automatically and carries the
+conventions, the invariants that break silently, what is out of scope, and the
+measurement traps. You should not need to paste any of it.
+
+---
+
+## 6. Where to read next
 
 * [`doc/m3lb.pdf`](doc/m3lb.pdf) — 73 pages: every scheme with its
   equations, why each design decision was made, the complete validation record
@@ -328,7 +420,7 @@ Forgetting this is the single most common way to conclude the code is slow.
 * The header comment of any case file. They are written to explain what the case
   tests and how it fails, not just what it computes.
 
-## 6. Things that are absent, not merely untested
+## 7. Things that are absent, not merely untested
 
 So you do not spend a week looking for them.
 
@@ -344,7 +436,7 @@ So you do not spend a week looking for them.
   central moments on a device.
 * D3Q19 is excluded from current validation work.
 
-## 7. If something looks wrong
+## 8. If something looks wrong
 
 Run `host_check` and `host_physics` first. If those pass, the arithmetic is fine
 and the problem is in the setup, the boundary conditions or the run length. If

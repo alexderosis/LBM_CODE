@@ -24,6 +24,21 @@ Serial + Threads locally.
 All three MATLAB generator questions are resolved and the scripts under
 `MATLAB/` are corrected (originals kept in `MATLAB/original/`).
 
+## Writing your own case
+
+`examples/flow_past_square.cpp` is a commented template — flow past a square
+cylinder in a channel — split into four blocks you change: the discretisation,
+the geometry, the initial condition, and the time loop with your diagnostic.
+[`GETTING_STARTED.md`](GETTING_STARTED.md#5-writing-your-own-case) walks through
+it, including the two things that catch people: the Mach/`tau` trade that decides
+what Reynolds number a given grid can reach, and why a *fixed* body force does not
+give you the Reynolds number you asked for.
+
+```bash
+cmake --build build -j4 --target flow_past_square
+./build/examples/flow_past_square --kokkos-num-threads=4
+```
+
 ## Documentation
 
 [`doc/m3lb.pdf`](doc/m3lb.pdf) is the release document: every scheme with

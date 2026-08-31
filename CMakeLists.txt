@@ -154,3 +154,13 @@ endif()
 if(LBM_BUILD_DEMONSTRATOR)
   add_subdirectory(demonstrator)
 endif()
+
+#-------------------------------------------------------------------------------
+# Examples. Templates to copy when writing your own case; see GETTING_STARTED.md.
+# Built by default so that an API change breaks here rather than leaving a
+# newcomer copying something that no longer compiles.
+#-------------------------------------------------------------------------------
+option(LBM_BUILD_EXAMPLES "Build example templates" ON)
+if(LBM_BUILD_EXAMPLES)
+  add_subdirectory(examples)
+endif()
