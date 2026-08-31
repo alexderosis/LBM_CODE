@@ -83,6 +83,99 @@ one static case, not a flow.
 
 ---
 
+## From a physical problem to lattice units
+
+Most cases here are dimensionless and need no conversion at all: they are
+specified by Re, Ra, Pr or Ha and a resolution, and the answer is a
+dimensionless number checked against a table. Conversion only bites when the
+geometry carries a real length — `urban`, `height_field`, `aorta`.
+
+**What the code converts, and what it does not.** Every operator turns a
+transport coefficient into a relaxation rate, and most turn it back:
+
+| operator | forward | inverse |
+|---|---|---|
+| `BGK`, `TRT`, `MomentCollision`, `MultiphaseBGK`, `MhdBGK`, `MhdCentralMoments` | `omega_from_viscosity(nu)` | `viscosity_from_omega(w)` |
+| `ScalarBGK` | `omega_from_diffusivity(d)` | `diffusivity_from_omega(w)` |
+| `MagneticBGK` | `omega_from_resistivity(eta)` | — |
+| `PhaseFieldBGK` | `omega_from_mobility(m)` | — |
+| `ColourGradient` | — | `viscosity_from_tau(tau)` |
+
+They take the coefficient **already in lattice units**, and each reads its own
+lattice's `cs2`, so they are the safe way to get ω. Nothing in `src/` converts
+metres and seconds — that arrow belongs to the case. The only worked example in
+the tree is the local `struct Scaling` at `demonstrator/urban.cpp:123`, and it
+is local on purpose: its banner argues one particular strategy (fix `dt` by
+capping the fastest cell, let ω follow), which is right for an
+advection-dominated problem and not in general.
+
+### The dimensionless recipe
+
+Three choices, and the fourth is not yours. Fixing the resolution, the Reynolds
+number and the lattice velocity fixes the viscosity — you do not also get to
+pick τ.
+
+1. **Resolve the characteristic length**: `N` cells across `L`. Wall-bounded
+   cases size the domain `ny = H + 2`, and the Reynolds length is `H`, not `ny`.
+2. **Choose `u0` in lattice units.** It is a Mach number in disguise:
+   `Ma = u0 / cs` with `cs = 1/sqrt(3) = 0.577`, and the compressibility error
+   grows as `Ma^2`. Keep `u0 <= 0.05` (`Ma <= 0.087`) unless you have measured
+   what a larger one costs.
+3. **Viscosity follows**: `nu = u0 * N / Re`.
+4. **Then** `coll.omega = Coll::omega_from_viscosity(nu)`.
+5. **Read τ = 1/ω back before running.** τ → 1/2 is the stability floor. Since
+   `nu = u0 * N / Re`, a larger Re is bought either with a bigger grid or a
+   smaller `u0` — and a smaller `u0` costs steps (below).
+6. **Pick the timescale deliberately.** One convective time is `N / u0` steps;
+   the momentum-diffusion time is `N^2 / nu`. They differ by a factor of Re, and
+   quoting a result after the wrong one is how a case looks converged when it is
+   not: `examples/flow_past_square.cpp` records `Re_eff` falling from 49 to 26
+   over 30,000 steps against a diffusive time of 576,000.
+
+`examples/flow_past_square.cpp:92-118` is this recipe as running code, with the
+τ floor check and the Mach print.
+
+### When the geometry is physical
+
+Set `dx = L_phys / N` metres per cell. One further choice fixes `dt`, and the
+two strategies are not equivalent:
+
+- **Cap the velocity.** Pick `u_lat_max`, then `dt = u_lat_max * dx / u_phys_max`.
+  Bounds the Courant number; use it when advection dominates
+  (`demonstrator/urban.cpp:256`).
+- **Fix τ.** Pick τ, then `dt = (tau - 0.5) * cs2 * dx * dx / nu_phys`. Bounds
+  the diffusive accuracy; use it when diffusion dominates
+  (`demonstrator/urban.cpp:253`).
+
+With `dx` and `dt` chosen, everything else follows:
+
+```
+u_lat  = u_phys  * dt / dx
+nu_lat = nu_phys * dt / (dx * dx)          # and D_lat, eta_lat, the same way
+a_lat  = a_phys  * dt * dt / dx            # accelerations, e.g. gravity
+t_phys = steps * dt
+```
+
+### Traps
+
+- **`cs2` is not 1/3 on every lattice.** D3Q7 is **1/4**; D2Q5 and the rest are
+  1/3 (`src/lattice/Lattices.hpp`). So `tau = 3*nu + 1/2` is simply wrong on
+  D3Q7. Use `omega_from_*`, which reads the lattice's own `cs2`; keep the closed
+  form only for a printed diagnostic on a `cs2 = 1/3` lattice. The literal
+  `0.25` in `demonstrator/urban.cpp:253` is this, in the open: it is correct
+  only because that case is D3Q7, and copying the line to a D3Q19 or D3Q27
+  scalar would be wrong by 4/3 without failing.
+- **Halving `u0` at fixed Re and N hurts twice**: it doubles the steps to the
+  same convective time *and* halves ν, pushing τ toward 1/2. Raising `N` instead
+  raises ν and moves τ away from the floor; resolution is the expensive knob,
+  not the dangerous one.
+- Two entries under **Measurement discipline** below are units errors wearing
+  another hat, and belong here too: match *kinematic* viscosity across a density
+  ratio, not dynamic; and a wrong constant still gives a consistent simulation,
+  so check the inputs against the source, not only against themselves.
+
+---
+
 ## Invariants that break silently
 
 These produce plausible, converged, wrong answers rather than crashes.
