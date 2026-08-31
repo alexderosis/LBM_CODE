@@ -30,7 +30,31 @@
 //  rho is always near 1, but a temperature scale is whatever the problem says it
 //  is. So T_ref is a runtime parameter, and leaving it at its default of 0
 //  reproduces the unshifted scheme exactly. Set it to the mean temperature.
+//
+//  CONJUGATE HEAT TRANSFER: a per-node relaxation rate.
+//
+//  `omega_of` is an optional field of relaxation rates. Leave it empty (the
+//  default) and every node uses the scalar `omega`; fill it and the diffusivity
+//  becomes a property of the node, which is what a solid inclusion in a fluid
+//  needs. The two are never mixed: omega_of, once set, is authoritative
+//  everywhere, so a partially filled field is a silent zero-diffusivity bug and
+//  not a supported state.
+//
+//  WHAT THIS MODELS, AND WHAT IT DOES NOT. Varying omega alone varies the
+//  diffusivity alpha = lambda / (rho c_p). It therefore reproduces a
+//  conductivity ratio ONLY where rho c_p is uniform, because the scheme
+//  transports sum_i g_i and that sum is the temperature, not the enthalpy. A
+//  jump in volumetric heat capacity needs a different variable and is not
+//  implemented; validation/zhou_thermal.cpp's conduction case is the uniform-
+//  rho-c_p kind, which is also what Zhou et al. (2026) Sec. 3.1 specifies.
+//
+//  The interface condition is not imposed anywhere -- continuity of T and of
+//  alpha dT/dn emerges from the streaming, with the effective interface sitting
+//  midway between the last node of one material and the first of the other.
+//  That is second-order accurate and NOT exact: validation/zhou_thermal.cpp
+//  measures what it costs (0.11% at kappa = 100 and N = 400, falling as N^-2).
 //==============================================================================
+#include "grid/Domain.hpp"
 #include "core/Types.hpp"
 #include "lattice/Lattices.hpp"
 #include "memory/Storage.hpp"
@@ -45,6 +69,7 @@ struct ScalarBGK {
 
   Real omega = Real(1);
   Real T_ref = Real(0);      // storage reference; 0 reproduces raw storage
+  View1D<Real> omega_of;     // optional per-node omega; empty means uniform
 
   static Real omega_from_diffusivity(Real d) {
     return Real(1) / (d * inv_cs2<L, Real>() + Real(0.5));
@@ -75,9 +100,19 @@ struct ScalarBGK {
     return weight<L, Real>(i) * (dT + (T_ref + dT) * ics2 * cu);
   }
 
+  // The rate this node relaxes at. One branch on a pointer that is uniform
+  // across the whole kernel launch, so the uniform-omega path is unaffected.
+  KOKKOS_INLINE_FUNCTION Real omega_at(Index n) const {
+    return omega_of.data() ? omega_of(n) : omega;
+  }
+
+  KOKKOS_INLINE_FUNCTION
+  void collide(Real h[L::Q], Real dT, Real ux, Real uy, Real uz, Real w) const {
+    for (int i = 0; i < L::Q; ++i) h[i] += w * (eq(i, dT, ux, uy, uz) - h[i]);
+  }
   KOKKOS_INLINE_FUNCTION
   void collide(Real h[L::Q], Real dT, Real ux, Real uy, Real uz) const {
-    for (int i = 0; i < L::Q; ++i) h[i] += omega * (eq(i, dT, ux, uy, uz) - h[i]);
+    collide(h, dT, ux, uy, uz, omega);
   }
 };
 

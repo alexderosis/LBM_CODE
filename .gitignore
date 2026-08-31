@@ -33,3 +33,10 @@ SomeRefs/
 results/*/field_*.dat
 results/*/anim_*
 results/I_channel/*_contour.dat
+# Same rule for the Zhou et al. benchmarks: the raw float32 slices behind the
+# contour figures are per-node data. The summary tables (conduction.dat,
+# plate.dat, natural.dat, lid.dat) and the 1-D profile and centreline dumps
+# beside them ARE tracked -- they are what the comparisons are read off.
+results/J_zhou_thermal/*_temp.dat
+results/J_zhou_thermal/*_ux.dat
+results/J_zhou_thermal/*_uy.dat

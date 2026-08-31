@@ -102,7 +102,12 @@ transport coefficient into a relaxation rate, and most turn it back:
 | `ColourGradient` | — | `viscosity_from_tau(tau)` |
 
 They take the coefficient **already in lattice units**, and each reads its own
-lattice's `cs2`, so they are the safe way to get ω. Nothing in `src/` converts
+lattice's `cs2`, so they are the safe way to get ω. `ScalarBGK` also accepts a
+*field* of rates, `omega_of`, for conjugate heat transfer — a solid inclusion in
+a fluid. It reproduces a conductivity ratio only where ρc_p is uniform, since the
+scheme transports the temperature rather than the enthalpy; where it applies, the
+interface is exact rather than second order (`validation/zhou_thermal.cpp`
+measures 1e-9 % at ratios from 0.1 to 100). Nothing in `src/` converts
 metres and seconds — that arrow belongs to the case. The only worked example in
 the tree is the local `struct Scaling` at `demonstrator/urban.cpp:123`, and it
 is local on purpose: its banner argues one particular strategy (fix `dt` by
@@ -199,6 +204,18 @@ These produce plausible, converged, wrong answers rather than crashes.
 - **Coupling order belongs to the solver, not the driver.** For the phase field
   it lives in `step()`; refreshing φ late misplaces the interface rather than
   merely damping it.
+- **`temperature()` is ZERO at an adiabatic scalar node**, because bounce-back
+  puts the insulated plane at 0.5 and the node is a ghost outside the fluid
+  (`ScalarSolver.hpp`'s `field_kernel`). Harmless when that node is `Solid` for
+  the fluid — it never collides. *Not* harmless when it is a `RegWall`, which is
+  a fluid node that does collide and does get forced: `BoussinesqGuo` then reads
+  T = 0 against your `T0` and applies a body force along the whole wall. This is
+  the concrete cost of mixing the two wall families, and it cost a benchmark run
+  in `validation/zhou_thermal.cpp` (case 3.5, whose moving lid forces the fluid
+  side to be on-node). Two defences: keep the temperature gauge symmetric about
+  zero so that `field = 0` means *neutrally buoyant*, and use `ScalarOutflow` —
+  which is on-node, zero-gradient, and reports the real temperature — where an
+  on-node adiabatic wall is what you actually need.
 
 ---
 

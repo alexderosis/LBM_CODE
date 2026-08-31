@@ -329,6 +329,7 @@ with its actual moments will not compile.
 
 %==============================================================================
 \section{Streaming}
+\label{sec:streaming}
 
 \subsection{Two-lattice (reference)}
 
@@ -3310,6 +3311,7 @@ $O(1/\mathrm{Pe}) \approx 0.2\%$ error of neglecting streamwise diffusion in
 \eqref{eq:plume} together with D3Q7's $O(u^2)$ equilibrium defect.
 
 \subsection{Natural convection}
+\label{sec:natconv}
 
 Differentially heated square cavity, hot and cold vertical walls, adiabatic
 horizontal walls, no-slip throughout, against the benchmark of de Vahl Davis
@@ -4909,6 +4911,597 @@ transparent, the local gradient used as a surface normal for a diffuse term so
 the sheets read as surfaces rather than fog, and $2\times$ supersampling.
 Rendered by \code{doc/fig/vol3d.py}, which is self-contained.}
 \label{fig:ot3dfield}
+\end{figure}
+
+%==============================================================================
+\section{Thermal benchmarks of Zhou, De Rosis and Revell (2026)}
+\label{sec:zhou}
+
+The suite of \S\ref{sec:campaign} is a fluid-only campaign. This section works
+through a second published suite, this time a thermal one: Sec.~3 of Zhou, De
+Rosis and Revell~\cite{zhou2026}, five of its seven cases. Sections 3.3 (a
+side-open cavity packed with conductive blocks) and 3.7 (Rayleigh--B\'enard with
+a melting boundary) are out of scope --- the first needs a porous-media drag
+model and the second an enthalpy formulation for phase change, and neither
+exists here.
+
+\paragraph{What can and cannot be reproduced.} That paper is about a
+\emph{coupled} FVM--LBM framework. Its domain is split into an LBM subregion, an
+FVM subregion and an overlap, and most of its tables measure the coupling: the
+width of the overlap, the number of LBM sub-iterations per FVM step, the
+continuity of mass flux across an interface. M3LB has no FVM side, so none of
+that is testable and none of it is attempted. What is testable is the physics
+each case was posed to check, against the same external references the paper
+itself is measured against.
+
+The comparison is therefore three-cornered, and the three corners are not
+equivalent. Where a table below carries a column for the paper's own coupled
+result, it is there for context and not as a target: a monolithic solver pays no
+coupling error, so being closer to the reference than the coupled framework is
+the expected outcome and says nothing on its own. The reference column is the
+one that matters.
+
+\paragraph{Discretisation.} The fluid is D3Q27 with the central-moments
+operator, shifted storage, Esoteric Pull and Guo forcing in the Boussinesq form;
+the temperature is D3Q7 with the BGK scalar operator. The two-dimensional cases
+are three-dimensional runs one cell deep with periodic $z$. For D3Q27 that
+reduction is the familiar one (\S\ref{sec:reduction}). For D3Q7 it is worth
+spelling out, because it is less obvious: with $n_z=1$ the $\pm z$ populations
+stream onto their own node, so they never transport, and since $c_z\!\cdot\!u=0$
+they relax to $w_z\,\delta T$ exactly as the rest population does. The
+seven-speed set collapses to a five-speed one with
+$w_0 = \tfrac14 + 2\cdot\tfrac18 = \tfrac12$ and $w_{x,y}=\tfrac18$, whose
+second moment is still $2\cdot\tfrac18 = \tfrac14 = c_s^2$. A legitimate D2Q5,
+just not the usual one, and with the same diffusivity calibration --- which
+case~3.4 below confirms rather than assumes.
+
+The five cases are taken out of the paper's order and in two groups: 3.1 and 3.4
+first, because both have exact solutions and so measure the scheme rather than a
+comparison, then 3.2, 3.5 and 3.6, where the answer is somebody else's number.
+
+\paragraph{Wall conventions, which are the trap in every coupled case.} There
+are two consistent families, and mixing them puts the viscous and the thermal
+boundary half a spacing apart and corrupts $\mathrm{Ra}$ or $\mathrm{Gr}$ without
+any symptom --- the argument of \S\ref{sec:rb}. \emph{Midway}: halfway
+bounce-back for the fluid and anti-bounce-back for the scalar, both planes at
+$0.5$ and $N-1.5$, cavity $N-2$ wide. \emph{On-node}: the regularised velocity
+condition for the fluid and Dellar's moment condition for the scalar, both
+planes on nodes $0$ and $N-1$, cavity $N-1$ wide. Cases 3.2 and 3.6 use the
+midway family throughout. Case 3.5 has a moving lid, which requires the on-node
+family for the fluid, so it uses the on-node family for the isothermal walls
+too; its two adiabatic flanks are the one unavoidable exception, since the scalar
+module has no on-node zero-flux condition.
+
+%------------------------------------------------------------------------------
+\subsection{A convergence criterion that was wrong by two orders of magnitude}
+\label{sec:zhoudrift}
+
+Every case here declares steady state on the whole-field relative change over a
+probe interval,
+\begin{equation}
+  \mathrm{res} = \frac{\|q(t+\Delta) - q(t)\|_2}{\|q(t+\Delta)\|_2},
+\end{equation}
+taken over $u$ and $T$ together. A per-step
+residual measures the step size as much as the drift and can be made small by
+shrinking the step.
+
+It is not enough, and the shortfall was found rather than anticipated. The
+residual is not the distance to the fixed point. Near steady state the interval
+change decays geometrically, $\mathrm{res}_{k+1} \approx q\,\mathrm{res}_k$, so
+the change still to come is
+\begin{equation}
+  \mathrm{drift} = \mathrm{res}\,q + \mathrm{res}\,q^2 + \cdots
+                 = \frac{\mathrm{res}\,q}{1-q},
+\end{equation}
+and for a diffusive relaxation with a probe interval far shorter than the
+diffusive time, $q$ sits within a percent of unity and $\mathrm{drift}$ is a
+hundred times $\mathrm{res}$. Case 3.1 makes the consequence concrete because its
+exact answer is a straight line: stopping at $\mathrm{res} < 10^{-6}$ left the
+$\kappa=1$ profile wrong by $1.9\times10^{-4}\%$ and called it converged. Every
+case below thresholds $\mathrm{drift}$; the same case then returns
+$1.1\times10^{-9}\%$, which is round-off. Both numbers are printed, and $q\ge1$
+falls back to $\mathrm{drift}=\mathrm{res}$ so that a run still growing can never
+be declared converged.
+
+%------------------------------------------------------------------------------
+\subsection{3.1 Conjugate heat conduction: exact}
+
+A layer of length $L=1$, solid over $0\le x\le 0.2$ and fluid beyond it, held at
+$\theta=1$ and $\theta=0$ at the two ends and periodic elsewhere. With
+$\rho c_p$ uniform --- which is what the paper's Eq.~(36) assumes, writing the
+balance in terms of $\alpha$ --- the conductivity ratio $\kappa=\lambda_s/\lambda_f$
+is also the diffusivity ratio and the steady solution is piecewise linear,
+\begin{equation}
+  \theta = \begin{cases} a_s x + 1, & 0\le x \le L_s,\\
+                         \kappa a_s x + b_f, & L_s < x \le 1,\end{cases}
+  \qquad a_s = \frac{-1}{L_s + (1-L_s)\kappa}.
+\end{equation}
+
+This is the one case that needed a new capability. \verb|ScalarBGK| carried a
+single relaxation rate; it now carries an optional field of them
+(\verb|omega_of|), and \verb|ScalarSolver| asks for the rate per node through
+\verb|Collision::omega_at(n)|. Nothing imposes the interface condition:
+continuity of $\theta$ and of $\alpha\,\partial_n\theta$ emerges from the
+streaming, with the effective interface midway between the last node of one
+material and the first of the other. Whether that is exact or merely
+second-order was the question.
+
+It is exact. Table~\ref{tab:zhoucond} reports the relative error of Eq.~(38),
+the two branch slopes fitted by least squares, and the abscissa at which the two
+fitted lines cross. The slopes reproduce $a_s$ and $\kappa a_s$ to six figures
+and the crossing lands on $0.2000000$ at every ratio from $\kappa=0.1$ to
+$\kappa=100$; driving the tolerance from $10^{-11}$ to $10^{-13}$ takes the error
+from $10^{-9}\%$ to $10^{-10}\%$, so what is being measured is the residual
+tolerance and not a discretisation floor.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lccccccc}
+\toprule
+$\kappa$ & $\tau_s$ & $\tau_f$ & $\epsilon$ [\%] & slope$_s$ & slope$_f$ &
+$x_{\rm int}$ & Ref.~\cite{zhou2026} [\%] \\
+\midrule
+$0.1$ & 0.5632 & 1.1325 & $1.5\times10^{-9}$  & $-3.571429$  & $-0.357143$ & 0.2000000 & 1.23 \\
+$1$   & 0.7000 & 0.7000 & $1.1\times10^{-9}$  & $-1.000000$  & $-1.000000$ & ---       & 0.48 \\
+$10$  & 1.1325 & 0.5632 & $2.4\times10^{-9}$  & $-0.121951$  & $-1.219512$ & 0.2000000 & 0.37 \\
+$100$ & 2.5000 & 0.5200 & $1.5\times10^{-8}$  & $-0.012469$  & $-1.246883$ & 0.2000000 & 0.35 \\
+\bottomrule
+\end{tabular}
+\caption{Conjugate conduction at $L=200$ cells, drift tolerance
+$10^{-11}$. Exact slopes are $a_s=-1/(0.2+0.8\kappa)$ and $\kappa a_s$; the
+crossing point is undefined at $\kappa=1$, where the branches are parallel. The
+last column is the coupled framework's own error at a finer resolution
+($1/500$).\label{tab:zhoucond}}
+\end{table}
+
+\noindent One choice in the table deserves naming because it is a choice and not
+a property of the problem. The ratio is imposed as
+$D_s = D_0\sqrt\kappa$, $D_f = D_0/\sqrt\kappa$, a geometric split about
+$D_0=0.05$. Putting the whole ratio on one side would either drive one $\tau$ to
+the $1/2$ floor --- and with it the run length to $L^2/D_{\min}$, a hundred times
+longer at $\kappa=100$ --- or to tens, where the closures whose error grows as
+$(1/\omega - 1/2)^2$ stop being accurate.
+
+%------------------------------------------------------------------------------
+\subsection{3.4 Normal plate velocity: second order, and a hypothesis that died}
+
+A uniform stream $u_y$ crosses an isothermal layer, injected at the cold bottom
+and withdrawn at the hot top, with periodic flanks. The steady solution is the
+paper's Eq.~(44),
+\begin{equation}
+  \theta(Y) = \frac{e^{\mathrm{Pe}\,Y} - 1}{e^{\mathrm{Pe}} - 1},
+  \qquad \mathrm{Pe} = \mathrm{Re}\,\mathrm{Pr} = \frac{u_y H}{\alpha},
+\end{equation}
+so the three cases the paper labels $\mathrm{Pr}=0.1,1,10$ at $\mathrm{Re}=10$
+are $\mathrm{Pe}=1,10,100$ here: nothing in the scalar module can see
+$\mathrm{Re}$ and $\mathrm{Pr}$ apart from their product. Both wall families are
+run, because anti-bounce-back is derived assuming no normal velocity through the
+wall and this case has exactly that, whereas the moment condition makes no such
+assumption.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lccccc}
+\toprule
+$\mathrm{Pr}$ & $\mathrm{Pe}$ & $u_y$ & $\epsilon$ anti-b.b.\ [\%] &
+$\epsilon$ moment [\%] & Ref.~\cite{zhou2026} [\%] \\
+\midrule
+0.1 & 1   & $3.75\times10^{-4}$ & 0.00060 & 0.000036 & 0.41 \\
+1   & 10  & $3.75\times10^{-3}$ & 0.0233  & 0.0151   & 2.00 \\
+10  & 100 & $3.75\times10^{-2}$ & 2.331   & 1.971    & 3.65 \\
+\bottomrule
+\end{tabular}
+\caption{Normal plate velocity at $H=200$, the paper's resolution,
+$\tau=0.8$ fixed so that $u_y$ follows $\mathrm{Pe}$.\label{tab:zhouplate}}
+\end{table}
+
+\noindent The $\mathrm{Pe}=100$ entry is two per cent, and the obvious suspect
+was wrong. This equilibrium is only first order in $u$
+(\S\ref{sec:eqscalar}), so a defect growing as $u^2$ --- and therefore as
+$\mathrm{Pe}$ --- looked like the explanation. Re-running $\mathrm{Pe}=100$ at
+$\tau = 0.8$, $0.65$ and $0.575$, a factor of four in $u_y$ and in $D$ at fixed
+$u_y/D$, moves the error in no printed digit: $2.3313\%$ three times over. At
+fixed $\mathrm{Pe}$ the steady discrete solution is a function of $u_y/D$ alone,
+so the whole two per cent is grid resolution of the boundary layer --- which at
+$H=200$ and $\mathrm{Pe}=100$ is two cells thick. The refinement ladder confirms
+it:
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lccccc|c}
+\toprule
+$H$ & 100 & 200 & 400 & 800 & 1600 & order \\
+\midrule
+$\epsilon$ anti-b.b.\ [\%] & 9.353 & 2.331 & 0.5824 & 0.1456 & 0.0364 & 2.00 \\
+$\epsilon$ moment [\%]     & 11.267 & 1.971 & 0.4218 & 0.0983 & 0.0238 & 2.12 \\
+\bottomrule
+\end{tabular}
+\caption{Grid convergence at $\mathrm{Pe}=100$. The order is fitted
+over $H\ge200$; at $H=100$ the boundary layer is one cell and neither family is
+in its asymptotic range.\label{tab:zhouplateconv}}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{zhou_analytic.png}
+\caption{\textbf{The two cases with exact solutions.} Left: conjugate
+conduction, four conductivity ratios, against the piecewise linear steady state;
+the kink is the material interface at $x/L=0.2$. Centre: the normal-plate
+profile at $\mathrm{Pe}=1,10,100$ against Eq.~(44), with the top six per cent
+inset because at $\mathrm{Pe}=100$ that is where the entire profile lives.
+Right: the refinement ladder, second order in both wall families, with the
+coupled framework's $3.65\%$ at $H=200$ marked for scale. Rendered by
+\code{doc/fig/zhou\_analytic.py}.}
+\label{fig:zhouanalytic}
+\end{figure}
+
+%------------------------------------------------------------------------------
+\subsection{3.2 Natural convection in a square cavity}
+\label{sec:zhounat2d}
+
+The differentially heated square cavity again, but this time on D3Q27 and D3Q7
+rather than the D2Q9 and D2Q5 of \S\ref{sec:natconv}, and at the two Rayleigh
+numbers the paper runs. The reference is de Vahl Davis~\cite{devahldavis1983}.
+
+Two remarks on the diagnostics before the numbers, because the first version of
+this case got one of them wrong.
+
+\paragraph{The hot/cold Nusselt difference is not a convergence check.} The
+configuration is invariant under $(x,y)\mapsto(L-x,L-y)$ with $T\mapsto-T$ and
+$u\mapsto-u$; the boundary conditions, both lattices, bounce-back and
+anti-bounce-back all respect that map, and the initial state $T=0$, $u=0$ is a
+fixed point of it. The discrete solution is therefore centro-symmetric at every
+step, the two wall Nusselt numbers agree identically --- the measured imbalance
+is $10^{-13}\%$, on a run and on a run that has barely begun alike --- and their
+difference says nothing whatever about convergence. It is still worth printing,
+as a check that the symmetry is intact, but it was originally presented as a
+conservation test and it is not one.
+
+The independent estimator is the volume one. At steady state the horizontal heat
+flux through every vertical plane is equal, and averaging that statement over $x$
+removes the wall gradient entirely:
+\begin{equation}
+  \mathrm{Nu}_{\rm vol} = 1 + \frac{\langle u_x\theta\rangle H}{\alpha},
+\end{equation}
+the average taken over the fluid volume, with $\langle u_x\rangle = 0$ in a
+closed cavity so that the temperature gauge drops out. It shares no arithmetic
+with the wall stencil. The runs report $\langle u_x\rangle H/\alpha$ alongside
+it, at $10^{-15}$ or below, because the identity is worthless if the cavity is
+not closed to round-off.
+
+\paragraph{Peak velocities are the plain maximum, not the largest magnitude.}
+The two extrema on a centreline are nearly equal and opposite, so an
+absolute-value search flips sign between resolutions --- it did, between $N=66$
+and $N=98$ --- and the reported location then stops matching de Vahl Davis, who
+tabulates the positive one.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lcccccc}
+\toprule
+$N$ & $H$ & $\tau_f$ & $\mathrm{Nu}_{\rm wall}$ & $\mathrm{Nu}_{\rm vol}$ &
+spread & dev.\ from 4.519 \\
+\midrule
+50  & 48  & 0.5384 & 4.5147 & 4.4999 & $0.330\%$ & $-0.10\%$ \\
+66  & 64  & 0.5512 & 4.5177 & 4.5107 & $0.156\%$ & $-0.03\%$ \\
+98  & 96  & 0.5767 & 4.5196 & 4.5173 & $0.051\%$ & $+0.01\%$ \\
+130 & 128 & 0.6020 & 4.5203 & 4.5192 & $0.023\%$ & $+0.03\%$ \\
+\bottomrule
+\end{tabular}
+\caption{Natural convection at $\mathrm{Ra}=10^5$, $\mathrm{Pr}=0.71$,
+$u_c=0.1$. The spread between the two estimators falls by roughly $N^{-2}$ and
+is the honest discretisation error; the deviation column is measured against de
+Vahl Davis's Richardson-extrapolated $4.519$.\label{tab:zhounat1e5}}
+\end{table}
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lccccc}
+\toprule
+quantity & this work & dVD83 \cite{devahldavis1983} & dev. &
+Luan \cite{luan2012} & Ref.~\cite{zhou2026} \\
+\midrule
+\multicolumn{6}{l}{$\mathrm{Ra}=10^5$, $N=130$} \\
+$\overline{\mathrm{Nu}}$ & 4.5203 & 4.519 & $+0.03\%$ & 4.507 & 4.505 \\
+$\mathrm{Nu}_{\max}$     & 7.7019 & 7.717 & $-0.20\%$ & 7.738 & 7.742 \\
+$(y/L)_{\max}$           & 0.0820 & 0.081 & ---       & 0.083 & 0.082 \\
+$\mathrm{Nu}_{\min}$     & 0.7319 & 0.729 & $+0.4\%$  & 0.746 & 0.700 \\
+$u^*_{\max}$             & 34.733 & 34.73 & $+0.01\%$ & ---   & ---   \\
+$v^*_{\max}$             & 68.654 & 68.59 & $+0.09\%$ & ---   & ---   \\
+\midrule
+\multicolumn{6}{l}{$\mathrm{Ra}=10^6$, $N=98$} \\
+$\overline{\mathrm{Nu}}$ & 8.8151 & 8.800 & $+0.17\%$ & 8.807 & 8.803 \\
+$u^*_{\max}$             & 64.846 & 64.63 & $+0.33\%$ & ---   & ---   \\
+$v^*_{\max}$             & 219.65 & 219.36& $+0.13\%$ & ---   & ---   \\
+\bottomrule
+\end{tabular}
+\caption{Natural convection against de Vahl Davis. The extremum locations are
+reported as $(y-0.5)/H$, which cannot reach $0$ or $1$: the nearest sample to a
+corner is half a cell away, which is why both this work and Luan et al.\ place
+$(y/L)_{\min}$ near $0.997$ rather than at $1.000$.\label{tab:zhounatboth}}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{zhou_natural_convection.png}
+\caption{\textbf{Natural convection in a square cavity}, $\mathrm{Ra}=10^5$ and
+$10^6$. Top: the temperature field with isotherms, and the speed with
+streamlines. Bottom: the two centreline velocity profiles and the local Nusselt
+number on the hot wall, with de Vahl Davis's tabulated peaks marked --- they land
+on the curves. Rendered by \code{doc/fig/zhou\_natural\_convection.py}.}
+\label{fig:zhounat2d}
+\end{figure}
+
+\paragraph{The collision operator, and the paper's Figs.~13--14.} That paper's
+central algorithmic claim is that a central-moments collision keeps driving the
+residual down where BGK stalls --- at $10^{-9}$ for $\mathrm{Ra}=10^5$ and
+$10^{-8}$ for $10^6$ in its Fig.~13. Re-measuring it here needs one thing
+changed and nothing else, and since the temperature field is D3Q7 BGK in both
+runs, what is being compared is the fluid operator alone.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{llcccc}
+\toprule
+$\mathrm{Ra}$ & op & steps & final residual & $\overline{\mathrm{Nu}}$ &
+dev.\ from dVD83 \\
+\midrule
+$10^5$ & BGK & 108\,000 & $1.2\times10^{-13}$ & 4.5129 & $-0.14\%$ \\
+       & CM  & 104\,000 & $1.8\times10^{-13}$ & 4.5177 & $-0.03\%$ \\
+$10^6$ & BGK & 228\,000 & $2.1\times10^{-13}$ & 8.7894 & $-0.12\%$ \\
+       & CM  & 228\,000 & $2.8\times10^{-13}$ & 8.8022 & $+0.03\%$ \\
+\bottomrule
+\end{tabular}
+\caption{$N=66$, $u_c=0.1$, drift tolerance $10^{-13}$.\label{tab:zhouop}}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{zhou_operator_residuals.png}
+\caption{\textbf{The paper's Figs.~13--14, re-measured.} BGK is drawn wide and
+pale underneath, central moments thin and dark on top, because the two histories
+coincide --- a same-width dashed line simply vanishes under the solid one. Neither
+operator has a residual floor above round-off in this solver. Rendered by
+\code{doc/fig/zhou\_operator\_residuals.py}.}
+\label{fig:zhouop}
+\end{figure}
+
+\noindent The accuracy half of the claim holds and is not marginal: central
+moments are four to five times closer to the benchmark at both Rayleigh numbers.
+The convergence half does not reproduce. Both operators drive the residual
+smoothly to round-off with no plateau anywhere, in step counts that agree to
+four per cent, and the two histories are indistinguishable on a log scale. The
+floor in the paper's Fig.~13 is therefore unlikely to be a property of BGK; the
+natural candidate is the FVM--LBM exchange, which injects a fixed perturbation
+every FVM step. One caveat on the comparison: that paper's residual is per step
+and this one is per 2000-step interval, so the two are not the same number ---
+but a per-step residual of $10^{-9}$ is four to seven orders above round-off
+however it is normalised, and nothing here sits above round-off at all.
+
+
+%------------------------------------------------------------------------------
+\subsection{3.5 Thermal lid-driven cavity, and two conclusions drawn too early}
+\label{sec:zhoulid}
+
+A square cavity with the lid sliding right, the other three walls no-slip, the
+\emph{bottom} hot and the top --- the moving lid --- cold, and adiabatic flanks.
+Three groups are independent: $\mathrm{Pr}=0.71$, $\mathrm{Gr}=10^6$ and
+$\mathrm{Ri}=\mathrm{Gr}/\mathrm{Re}^2$, swept over $10$, $1$ and $0.1$, so
+$\mathrm{Re}=316.2$, $1000$ and $3162.3$. Setting
+$u_c=\sqrt{g\beta\Delta T L}$ fixes $\nu = u_c L/\sqrt{\mathrm{Gr}}$, and then
+the lid speed is \emph{not} free: $U = u_c/\sqrt{\mathrm{Ri}}$. That is the whole
+numerical difficulty of the case. At $\mathrm{Ri}=0.1$ the lid must run
+$3.16\times$ the buoyancy scale, so $u_c$ has to come down to keep the lid
+subsonic, and $\tau = \tfrac12 + 3u_cL/1000$ comes down with it: $u_c=0.03$ caps
+the Mach number at $0.16$ and then $L\ge128$ is needed to clear $\tau=0.51$. The
+two constraints pull opposite ways, and the largest $u_c$ each case tolerates is
+also the cheapest, because $\langle\theta\rangle$ relaxes on
+$L^2/(\alpha\,\mathrm{Nu})$ and $\alpha$ grows with $u_c$ --- so $u_c$ is chosen
+per $\mathrm{Ri}$ ($0.15$, $0.08$, $0.03$) rather than held fixed, with a
+separate control on that choice reported below.
+
+Three things had to be fixed before this case produced a number worth quoting,
+and they are worth recording because two of them were invisible in the residual.
+
+\paragraph{A body force along both side walls.} The moving lid forces the fluid
+side into the on-node family, so the isothermal walls use the moment condition.
+The obvious partner for the adiabatic flanks was \code{ScalarAdiabatic}, and it
+is wrong here: bounce-back puts the insulated plane at $0.5$, which makes the
+boundary node a ghost outside the fluid, and \code{ScalarSolver} says so by
+writing $T=0$ there. In cases 3.2 and 3.6 that costs nothing, because those
+nodes are \code{Solid} for the fluid and never collide. Here they are
+\code{RegWall} nodes --- fluid nodes that do collide and do get forced --- so
+\code{BoussinesqGuo} read $T=0$ against $T_0=0.5$ and applied
+$-\tfrac12 g\beta$ down two whole columns. The gauge is now symmetric about
+zero, which makes a node reporting $T=0$ neutrally buoyant instead of maximally
+cold, and \code{-flank} selects between bounce-back and \code{ScalarOutflow},
+which is on-node and zero-gradient and reports the real temperature. This is the
+concrete cost of mixing the two wall families, and it is now in
+\code{CLAUDE.md}.
+
+\paragraph{The hot/cold Nusselt imbalance is real here, and it was the mean
+temperature.} Unlike case 3.2, the moving lid breaks the centro-symmetry, so the
+two wall Nusselt numbers are independent and their difference is an honest check.
+It read $-1.5\%$ to $-4\%$ and would not go away. It was not a leak at either
+flank: the domain-mean temperature was still falling, and
+\begin{equation}
+  \frac{{\rm d}\langle\theta\rangle}{{\rm d}t}
+  = \bigl(\mathrm{Nu}_{\rm hot} - \mathrm{Nu}_{\rm cold}\bigr)\frac{\alpha}{L^2}
+  \label{eq:zhoubudget}
+\end{equation}
+predicted $-0.128$ against a measured imbalance of $-0.111$ --- fifteen per cent,
+so the imbalance \emph{is} the drift and nothing is being destroyed at a wall.
+
+\paragraph{Which means the convergence criterion had to change.} The mean
+temperature relaxes on $L^2/(\alpha\,\mathrm{Nu}) \sim t_{\rm diff}/\mathrm{Nu}$,
+about $10^5$ steps at $N=65$ and growing with $N$, because $\alpha$ itself grows
+with $N$ here. Several hundred lid turnovers is nowhere near it: after $190\,000$
+steps $\langle\theta\rangle$ was $0.386$ and still moving. And the whole-field
+residual of \S\ref{sec:zhoudrift} cannot see the problem: it is dominated by the
+velocity field, which has already settled, so it floors while
+$\langle\theta\rangle$ is still walking. So this case declares steady state on the heat budget
+itself: $|\mathrm{Nu}_{\rm hot}-\mathrm{Nu}_{\rm cold}|/\mathrm{Nu}$ below a
+tolerance for three consecutive probes, and not before twenty probes have
+elapsed --- a state that is still \emph{symmetric} balances the budget trivially,
+which is how a seed with no asymmetry satisfied the test within a few thousand
+steps before the flow existed. By Eq.~\eqref{eq:zhoubudget} the criterion is
+exactly the statement that $\langle\theta\rangle$ has stopped moving.
+
+
+\paragraph{A seed that cost 130\,000 steps, and two wrong conclusions.} The
+relaxation above is the expensive part, so \code{-tseed} replaces the conduction
+profile with a well-mixed core at a chosen mean. It cannot change the answer ---
+the fixed point is unique --- but the first pass chose that mean badly: $0.38$,
+taken from a coarse $N=65$ run that was itself still moving. With the core
+seeded some $0.08$ too cold the hot-wall gradient is inflated, and
+$\mathrm{Ri}=10$ read $\mathrm{Nu}\approx7$ for $130\,000$ steps, looking
+quasi-steady, before falling back to $4.7$ as $\langle\theta\rangle$ climbed to
+its real value of $0.463$.
+
+Two conclusions were drafted from that state and both were wrong: that the case
+has no steady state, and that the buoyancy-dominated cases disagree with
+Cheng \& Liu by some $44\%$. Nothing in the field residual flagged either. The
+imbalance did, at the $2$--$4\%$ level, which is the whole reason it is the
+criterion. The runs below are seeded at the measured mean, use a four-fold
+tighter tolerance, and average over sixty intervals.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lccccccccccc}
+\toprule
+$\mathrm{Ri}$ & $\mathrm{Re}$ & $u_c$ & $U$ & $\tau_f$ & Ma &
+$\langle\theta\rangle$ & $\overline{\mathrm{Nu}}$ &
+\cite{chengliu2010} & \cite{bettaibi2014} & \cite{zhou2026} & dev. \\
+\midrule
+$10$ & 316.2 & 0.15 & 0.0474 & 0.5576 & 0.098 & 0.463 & 4.689 $\pm$ 0.021 & 4.860 & 4.848 & 4.588 & $-3.5\%$ \\
+$1$ & 1000.0 & 0.08 & 0.0800 & 0.5307 & 0.139 & 0.373 & 5.749 $\pm$ 0.008 & 5.750 & 5.739 & 5.402 & $-0.0\%$ \\
+$0.1$ & 3162.3 & 0.03 & 0.0949 & 0.5115 & 0.164 & 0.248 & 12.323 $\pm$ 0.723 & 12.161 & 12.138 & 12.610 & $+1.3\%$ \\
+\bottomrule
+\end{tabular}
+\caption{Thermal lid-driven cavity, $N=129$, on-node isothermal walls,
+bounce-back flanks. $\overline{\mathrm{Nu}}$ is the mean of the two wall values
+over the last sixty probe intervals and the quoted spread is half their gap; the
+fluctuation within the window is smaller still, $0.05\%$ to $0.5\%$ of the mean,
+so these are steady states rather than time averages of a wandering one.
+Deviations are measured against Cheng \& Liu.\label{tab:zhoulid}}
+\end{table}
+
+\noindent The agreement is close at all three Richardson numbers, and the flow
+structures are the paper's. Its Fig.~23 describes, at $\mathrm{Ri}=10$, two
+counter-rotating vortices stacked vertically with the lower one larger and a
+secondary vortex in the lower-left corner; at $\mathrm{Ri}=1$ two of comparable
+strength with the buoyancy-driven one distorted; at $\mathrm{Ri}=0.1$ a single
+primary vortex with three small corner vortices. Fig.~\ref{fig:zhoulid} has all
+of it, feature by feature.
+
+The $\mathrm{Ri}=0.1$ error bar is the one exception worth naming. Its two wall
+Nusselt numbers differ by $12\%$ ($13.05$ against $11.60$) and that gap is
+\emph{not} a heat-budget violation: Eq.~\eqref{eq:zhoubudget} turns it into a
+mean-temperature drift a hundred times larger than the $5\times10^{-4}$ actually
+measured over the window. It is a difference between the two wall-gradient
+stencils in the thinnest thermal layer of the set --- $\mathrm{Nu}=12$ over
+$L=128$ puts it at five cells --- one of which sits under a sheared lid. The
+mean is quoted with the gap as the uncertainty.
+
+\paragraph{The $u_c$ control did not do its job, and what it found instead.}
+Re-running $\mathrm{Ri}=10$ at $u_c=0.03$ rather than $0.15$ was meant to show
+that the answer does not depend on the compressibility knob. It came back at
+$\overline{\mathrm{Nu}} = 7.439$ with $\langle\theta\rangle = 0.394$, against
+$4.689$ at $0.463$ --- a different state, with its own balanced heat budget,
+reached because that run was seeded near $0.394$ and stayed there. So the
+control is inconclusive on $u_c$; what it demonstrates instead is that this
+configuration admits more than one steady state and that the seed selects among
+them. A second reading of the same thing: with the lid stopped altogether, a seed
+carrying one half-wavelength across the box settles at
+$\overline{\mathrm{Nu}} = 5.71$ while one carrying two settles at $3.94$, both
+with a balanced budget and $\langle\theta\rangle$ back at $0.500$ as the
+symmetry of the lid-off problem requires. The $\mathrm{Ri}=10$ row above is the branch the physical evolution
+actually reached, having drifted there on its own from a colder seed. Anyone
+using this case should expect branch sensitivity and say which state they are
+reporting.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{zhou_lid_cavity.png}
+\caption{\textbf{Thermal lid-driven cavity}, $\mathrm{Gr}=10^6$,
+$\mathrm{Pr}=0.71$. Top: the temperature field with isotherms at
+$\Delta\theta = 0.1$. Bottom: the speed with streamlines. Compare with the
+paper's Fig.~23 --- two counter-rotating vortices stacked vertically with the
+lower one larger and a secondary vortex in the lower-left corner at
+$\mathrm{Ri}=10$; two of comparable strength at $\mathrm{Ri}=1$; a single
+primary vortex with three corner vortices at $\mathrm{Ri}=0.1$. Rendered by
+\code{doc/fig/zhou\_lid\_cavity.py}.}
+\label{fig:zhoulid}
+\end{figure}
+
+%------------------------------------------------------------------------------
+\subsection{3.6 Natural convection in a cubic cavity}
+\label{sec:zhounat3d}
+
+The same problem in three dimensions: hot at $x=0$, cold at $x=L$, the other four
+walls adiabatic and no-slip. Cases 3.2 and 3.6 share one routine here, because
+they are the same problem one cell deep and $N$ cells deep, and running them
+through the same code is what makes the 2-D and 3-D numbers comparable.
+
+The paper gives no table for this case --- it compares centreline profiles on the
+$z=L/2$ plane against Fusegi et al.~\cite{fusegi1991}, plotted as symbols in its
+Figs.~27 and 29. So the reference numbers below are the peaks \emph{read off
+those plots}, which makes them good to about five per cent and no better. They
+are used anyway, for two reasons: they come from the source rather than from a
+remembered table, and the paper's own normalisation
+$u_{\rm ref}=\sqrt{g\beta h\Delta T}$ is exactly the $u_c$ these runs are pinned
+with, so the comparison needs no conversion.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lccccc}
+\toprule
+$\mathrm{Ra}$ & $N$ ($H$) & $\mathrm{Nu}_{\rm wall}$ & $\mathrm{Nu}_{\rm vol}$ &
+$u_x/u_{\rm ref}$ at $y/L$ & $u_y/u_{\rm ref}$ at $x/L$ \\
+\midrule
+$10^5$ & 50 (48) & 4.3296 & 4.3154 & 0.1409 at 0.844 & 0.2429 at 0.073 \\
+       & \multicolumn{3}{r}{Fusegi via Figs.~27, 29:} & $\sim$0.14 at $\sim$0.85
+       & $\sim$0.22 at $\sim$0.075 \\
+$10^6$ & 50 (48) & 8.5716 & 8.4499 & 0.0809 at 0.865 & 0.2450 at 0.031 \\
+       & \multicolumn{3}{r}{Fusegi via Figs.~27, 29:} & $\sim$0.11 at $\sim$0.88
+       & $\sim$0.26 at $\sim$0.055 \\
+\bottomrule
+\end{tabular}
+\caption{Cubic cavity, $\mathrm{Pr}=0.71$, $u_c=0.2$. The hot/cold Nusselt
+difference is $10^{-14}\%$ here as well --- the centro-symmetry of
+\S\ref{sec:zhounat2d} survives the third dimension --- so
+$\mathrm{Nu}_{\rm vol}$ is again the independent
+number.\label{tab:zhounat3d}}
+\end{table}
+
+\noindent At $\mathrm{Ra}=10^5$ the agreement is as good as reading a plot
+allows, and the two estimators sit $0.33\%$ apart --- the same figure the 2-D
+case reaches at the same $H$. Note also that the 3-D Nusselt number, $4.330$, is
+four per cent \emph{below} the 2-D value $4.520$ at the same Rayleigh number,
+which is the expected effect of the two extra no-slip walls.
+
+At $\mathrm{Ra}=10^6$ the same resolution is not enough and the diagnostics say
+so without needing the reference: the two estimators separate to $1.44\%$, and
+the $u_x$ peak --- which sits at $y/L=0.865$, inside a boundary layer roughly
+$H/2\mathrm{Nu} \approx 2.8$ cells thick --- comes in $26\%$ low. This is a
+resolution shortfall, not a model failure, and it is stated rather than
+presented as a result: $H=48$ at $\mathrm{Ra}=10^6$ in three dimensions is
+under-resolved, and the resolution that would fix it is beyond what this machine
+can reach in a session.
+
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{zhou_natural3d.png}
+\caption{\textbf{Cubic cavity}, the same quantities the paper's Figs.~26--29
+plot. Velocities are on the paper's own axis, $u/u_{\rm ref}$ with
+$u_{\rm ref}=\sqrt{g\beta h\Delta T}$, which is exactly the $u_c$ these runs
+are pinned with; the circles and squares are the Fusegi peaks read off those
+figures and are good to about five per cent. The dashed curves are the 2-D result
+at the same Rayleigh number. At $\mathrm{Ra}=10^6$ the $u_x$ peak sitting well
+below its marker is the resolution shortfall discussed in the text, visible
+without needing the reference. Rendered by \code{doc/fig/zhou\_natural3d.py}.}
+\label{fig:zhounat3d}
 \end{figure}
 
 %==============================================================================
@@ -6982,6 +7575,26 @@ the fitted rate is blamed on the scheme.
   $T_{\rm ref}$ must be set to the mean temperature by the user for FP32 accuracy;
   leaving it at $0$ reproduces unshifted storage.
 
+\item \textbf{The scalar module has no on-node zero-flux condition.}
+  \code{ScalarAdiabatic} is bounce-back, so an insulated wall always sits half a
+  cell inside the boundary node. That is consistent with halfway bounce-back for
+  the fluid and inconsistent with the regularised condition, which is on-node ---
+  so a case whose \emph{velocity} boundary must be on-node, because a wall moves,
+  cannot have an on-node adiabatic wall to go with it. Case 3.5 of
+  \S\ref{sec:zhou} is exactly that case: its isothermal walls sit on nodes and
+  its two adiabatic flanks half a cell in, making the cavity $N-1$ tall and $N-2$
+  wide. The aspect-ratio error is $1/(N-1)$ and refines away, but it is a gap in
+  the boundary set rather than a property of the problem.
+
+\item \textbf{Conjugate heat transfer varies the diffusivity, not the heat
+  capacity.} \code{ScalarBGK::omega\_of} gives every node its own relaxation
+  rate, which reproduces a conductivity ratio only where $\rho c_p$ is uniform:
+  the scheme transports $\sum_i g_i$, and that sum is the temperature rather
+  than the enthalpy. A jump in volumetric heat capacity needs a different
+  transported variable and is not implemented. Where $\rho c_p$ \emph{is}
+  uniform the interface is exact, not merely second order --- \S\ref{sec:zhou}
+  measures $10^{-9}\%$ at ratios from $0.1$ to $100$.
+
 \item \textbf{$\nabla\!\cdot\!\bb$ is not preserved to machine precision}
   (order 1.65 convergence). No divergence cleaning is implemented.
 
@@ -7286,6 +7899,30 @@ the fitted rate is blamed on the scheme.
 \bibitem{clercx2006} H.~J.~H.~Clercx and C.-H.~Bruneau,
   \emph{The normal and oblique collision of a dipole with a no-slip boundary},
   Comput. Fluids \textbf{35}, 245--279 (2006).
+
+\bibitem{zhou2026} Y.~Zhou, A.~De Rosis and A.~Revell,
+  \emph{Coupling finite volume-lattice Boltzmann methods for advanced heat
+  transfer simulations}, Engineering with Computers \textbf{42}:56 (2026).
+
+\bibitem{luan2012} H.~Luan, H.~Xu, L.~Chen, Y.~Feng, Y.~He and W.~Tao,
+  \emph{Coupling of finite volume method and thermal lattice Boltzmann method
+  and its application to natural convection},
+  Int.~J.~Numer.~Meth.~Fluids \textbf{70}, 200--221 (2012).
+
+\bibitem{chengliu2010} T.~Cheng and W.~Liu,
+  \emph{Effect of temperature gradient orientation on the characteristics of
+  mixed convection flow in a lid-driven square cavity},
+  Comput.~Fluids \textbf{39}, 965--978 (2010).
+
+\bibitem{bettaibi2014} S.~Bettaibi, F.~Kuznik and E.~Sediki,
+  \emph{Hybrid lattice Boltzmann finite difference simulation of mixed
+  convection flows in a lid-driven square cavity},
+  Phys.~Lett.~A \textbf{378}, 2429--2435 (2014).
+
+\bibitem{fusegi1991} T.~Fusegi, J.~M.~Hyun, K.~Kuwahara and B.~Farouk,
+  \emph{A numerical study of three-dimensional natural convection in a
+  differentially heated cubical enclosure},
+  Int.~J.~Heat Mass Transf. \textbf{34}, 1543--1557 (1991).
 
 \end{thebibliography}
 

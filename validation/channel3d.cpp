@@ -110,6 +110,7 @@ int main(int argc, char** argv) {
     int    avg_stride = 37;      // steps between samples (see the banner note)
     int    servo_every = 200;    // steps between mass-servo updates
     std::size_t fevery = 0;      // >0: dump a mid z-plane frame every this many steps
+    std::size_t probe_override = 0;  // >0: fix the probe interval in steps
     double servo_kp = 1.0, servo_ki = 0.05;   // PI gains, -outlet servo
     bool   verbose = false;      // per-probe progress, flushed
     double re_override = 0.0;    // if set, overrides nu_phys via Re
@@ -137,6 +138,7 @@ int main(int argc, char** argv) {
       if (a == "-astride" && i + 1 < argc) avg_stride = std::atoi(argv[++i]);
       if (a == "-servo" && i + 1 < argc) servo_every = std::atoi(argv[++i]);
       if (a == "-fevery" && i + 1 < argc) fevery = std::strtoull(argv[++i], nullptr, 10);
+      if (a == "-probe"  && i + 1 < argc) probe_override = std::strtoull(argv[++i], nullptr, 10);
       if (a == "-kp" && i + 1 < argc) servo_kp = std::atof(argv[++i]);
       if (a == "-ki" && i + 1 < argc) servo_ki = std::atof(argv[++i]);
       if (a == "-v")    verbose = true;
@@ -447,7 +449,9 @@ int main(int argc, char** argv) {
         });
       };
 
-      const std::size_t probe =
+      // Frames are written at probe boundaries, so the probe also sets the
+      // animation's frame rate; -probe overrides it for that purpose.
+      const std::size_t probe = probe_override > 0 ? probe_override :
           std::min<std::size_t>(5000, std::max<std::size_t>(200, std::size_t(T_adv / 20.0)));
       const std::size_t tmin  = std::size_t(t_min * T_adv);
       const std::size_t cap   = std::size_t(t_cap * T_adv);

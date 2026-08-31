@@ -19,6 +19,11 @@
 //  The Dirichlet form carries T_ref because the arrays hold h = g - w_i T_ref;
 //  since w_i == w_opp(i) the reference simply shifts the target value.
 //
+//  The relaxation rate is asked for PER NODE, via Collision::omega_at(n), so a
+//  problem with two materials needs nothing from this file: see the conjugate
+//  heat transfer note in collision/ScalarBGK.hpp. A collision operator used
+//  here must provide omega_at(Index) and the six-argument collide().
+//
 //  Note the asymmetry with the fluid: bounce-back is the identity on Esoteric
 //  Pull's storage, so adiabatic cells can be skipped outright, but anti-bounce-
 //  back flips a sign and adds a source, so Dirichlet cells must be processed at
@@ -334,7 +339,7 @@ class ScalarSolver {
           const Real vx = have_u ? ux(n) : Real(0);
           const Real vy = have_u ? uy(n) : Real(0);
           const Real vz = have_u ? uz(n) : Real(0);
-          coll.collide(g, dTm, vx, vy, vz);
+          coll.collide(g, dTm, vx, vy, vz, coll.omega_at(n));
           field(n) = coll.T_ref + dTm;
           acc.store_rest(nb, g[0]);
           for (int i = 1; i < Q; i += 2) acc.store_pair(nb, i, g[i], g[i + 1]);
@@ -354,7 +359,7 @@ class ScalarSolver {
         const Real vx = have_u ? ux(n) : Real(0);
         const Real vy = have_u ? uy(n) : Real(0);
         const Real vz = have_u ? uz(n) : Real(0);
-        coll.collide(g, dT, vx, vy, vz);
+        coll.collide(g, dT, vx, vy, vz, coll.omega_at(n));
         field(n) = coll.T_ref + dT;
         acc.store_rest(nb, g[0]);
         for (int i = 1; i < Q; i += 2) acc.store_pair(nb, i, g[i], g[i + 1]);

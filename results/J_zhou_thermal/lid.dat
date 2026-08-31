@@ -1,0 +1,14 @@
+# Zhou et al. (2026) Sec. 3.5: thermal lid-driven cavity, heated from
+# below, Gr = 1e6, Pr = 0.71, Ri = Gr/Re^2. M3LB D3Q27 fluid + D3Q7 BGK
+# temperature, ON-NODE wall family (regularised fluid + Dellar moment),
+# adiabatic flanks by bounce-back. FP64.
+# The state is TIME DEPENDENT: Nu is a mean over the last navg probe
+# intervals, with its RMS and peak-to-peak alongside. lid=off is the
+# control -- the same configuration with U = 0, i.e. Rayleigh-Benard.
+# References (steady-state solutions): Cheng & Liu (2010) 4.860 5.750
+#   12.161 and Bettaibi et al. (2014) 4.848 5.739 12.138 at Ri = 10, 1, 0.1
+# N Ri Re lid flank U uc tau_f tau_T Ma Nu_hot Nu_cold Nu_rms Nu_pkpk theta_mean theta_drift imbalance pert nwave res drift steps conv
+129 10 316.2 on abb 0.009487 0.03 0.511520 0.521634 0.024807 7.349990 7.527547 0.132605 0.528330 0.39359994 -5.936e-03 2.387e-02 1.000e-03 2e+00 0.0146057 1.277e-01 1.621e-318 1 -1912087344
+129 1 1000.0 on abb 0.080000 0.08 0.530720 0.557690 0.138564 5.756815 5.741653 0.006484 0.024390 0.37306084 2.381e-03 2.637e-03 1.000e-03 2e+00 0.000990168 9.902e-04 1.739e-318 1 -1912087344
+129 10 316.2 on abb 0.047434 0.15 0.557600 0.608169 0.097534 4.668479 4.709533 0.023190 0.086787 0.46347644 1.111e-03 8.756e-03 1.000e-03 2e+00 0.00253602 2.631e-02 1.887e-318 1 -1912087344
+129 0.1 3162.3 on abb 0.094868 0.03 0.511520 0.521634 0.164317 13.046164 11.599327 0.006470 0.022039 0.24816477 5.314e-04 1.174e-01 1.000e-03 2e+00 0.000105052 1.051e-04 8.004e-318 0 -1912087344

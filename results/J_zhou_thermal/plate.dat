@@ -1,0 +1,14 @@
+# Zhou et al. (2026) Sec. 3.4: normal plate velocity. Uniform u_y
+# through an isothermal layer, theta = (exp(Pe y/L)-1)/(exp(Pe)-1),
+# Pe = Re Pr. M3LB D3Q7 BGK, prescribed velocity, FP64. Two wall
+# families: abb = anti-bounce-back (midway), mom = Dellar moment
+# (on-node). tau is held fixed so u_y follows Pe.
+# Zhou et al. Table 9 (coupled, H=200): 0.41 2.00 3.65 % at Pe = 1, 10, 100
+# H Pe tau U D eps_abb[%] eps_mom[%] drift steps_abb steps_mom
+200 1 0.8000 3.750000e-04 7.500000e-02 6.099761e-04 3.596571e-05 9.770655e-10 1014000 1014000
+200 10 0.8000 3.750000e-03 7.500000e-02 2.329473e-02 1.509157e-02 9.529305e-10 348000 348000
+200 100 0.8000 3.750000e-02 7.500000e-02 2.331265e+00 1.970843e+00 2.504953e-13 14000 14000
+100 100 0.8000 7.500000e-02 7.500000e-02 9.353389e+00 1.126666e+01 0.000000e+00 6000 6000
+400 100 0.8000 1.875000e-02 7.500000e-02 5.824321e-01 4.217558e-01 6.018629e-10 48000 48000
+800 100 0.8000 9.375000e-03 7.500000e-02 1.455850e-01 9.827050e-02 9.141126e-10 190000 190000
+1600 100 0.8000 4.687500e-03 7.500000e-02 3.639481e-02 2.376422e-02 9.905802e-10 758000 758000
