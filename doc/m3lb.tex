@@ -4361,6 +4361,22 @@ document cannot drift from the data behind it.
   \input{fig/enan_interface_table.tex}
 \end{table}
 
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{fig/enan_phase_field.png}
+  \caption{The interface-capture campaign. (a) the six cases of their
+  III.A--III.F, both collisions against their finite-difference column; note
+  that the translation case is the one where the central-moment operator loses
+  badly and the Zalesak disk the one where it wins. (b) their Tables~I and III;
+  a cross marks a run that reached $10^{300}$, and the three of them are the
+  reason the central-moment operator exists. (c) the cycle scan, which is the
+  measurement that disproved a crossover in $\omega_\phi$: BGK's translation
+  error is flat across a tenfold change in run length and the central-moment
+  error compounds. (d) the mobility ladder at fixed run length, which is what
+  made the $\omega_\phi$ reading look right in the first place.}
+  \label{fig:enanphase}
+\end{figure}
+
 Read the BGK column against the last one first, because that is the
 like-for-like comparison. It is favourable on four of the seven rows where both
 complete --- the Geier translation, the Zalesak disk, and both smoothed-shear
@@ -4485,31 +4501,255 @@ isotropic Eq.~(20) stencil, the error is their Eq.~(71), and $L_0$, $R$, $\xi$,
 $U_0$ and the cycle count all match --- so it is a real disagreement, and it is
 recorded as one.
 
-\paragraph{The wedge, and why it is absent.} Their III.G drives a symmetric
-wedge of deadrise angle $\varphi$ into quiescent water at a constant
-$v=1\,$m\,s$^{-1}$ with a Peskin immersed boundary, and compares the resultant
-against Wagner's potential-flow slamming force,
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{fig/enan_rt_wedge.png}
+  \caption{Rayleigh--Taylor and wedge entry. (a) the 2-D spike against their
+  Table~VIII at three Reynolds numbers --- the pass. (b) the two 3-D cases
+  against their Tables~IX and X, with the band their Table~IX collects from
+  eight published models; being outside it from $t/t_0=1$ is the failure, drawn
+  rather than asserted. (c) wedge entry at three deadrise angles with Wagner's
+  line for each and the fit window shaded; the $30^\circ$ curve collapsing
+  inside the window has the same signature as (d) and is the same cause. (d)
+  the release height: identical impact and window, and at 20 cells the pulse
+  from the impulsive release returns inside the window and takes the fitted
+  slope from $29.55$ to $6.51$.}
+  \label{fig:enanrtwedge}
+\end{figure}
+
+\paragraph{Rayleigh--Taylor instability.} Their III.H and III.I are the first
+cases in this group where the fluid is solved at all: the phase field is coupled
+to \code{MultiphaseCentralMoments} through the interfacial force, and both
+lattices run central moments. Four configurations are tabulated, and the paper's
+own list of cases announces only three of them --- its Table~X,
+three-dimensional at $Re=30\,000$, appears without being introduced, and is run
+here because it is there.
+
+The measured quantity is the vertical position of the spike normalised by the
+domain width, at $t/t_0 = 0,\,0.5,\dots,3$ with $t_0=\sqrt{W/(g\,\mathrm{At})}$.
+Table~\ref{tab:enanrt} is generated from \code{results/L\_enan/enan\_rt.dat}.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Rayleigh--Taylor spike position, D3Q27 on both lattices, against
+  their Tables VIII, IX and X. Their values in italics. Table~X ends at exactly
+  zero, so that instant is excluded from the worst relative deviation rather
+  than reported as infinite.}
+  \label{tab:enanrt}
+  \input{fig/enan_rt_table.tex}
+\end{table}
+
+\subparagraph{Two dimensions: a pass, and a resolution requirement.} The 2-D
+case agrees with their Table~VIII to 2.7\% at worst and to under 1\% through
+most of the run. That is the whole of III.H, and it is the strongest evidence in
+this section that the coupled multiphase solver is right, because unlike the
+interface-capture group it exercises the fluid operator, the interfacial force
+and the coupling order together.
+
+It also comes with a resolution requirement that is worth stating separately,
+because it is the first thing to check before reading anything into a
+disagreement:
+
+\begin{table}[htbp]
+  \centering
+  \caption{The same case, 2-D at $Re=30\,000$, with only $W$ and $Ca$ varied.
+  The deficit is entirely late: the first five instants agree to about 1\% at
+  every resolution.}
+  \label{tab:enanrtres}
+  \input{fig/enan_rt_resolution.tex}
+\end{table}
+
+The scheme converges --- 15.8\%, 4.9\%, 2.7\% at $W=64$, 128, 256 --- and the
+error is late in every case, appearing only once the spike has rolled up and
+what has to be resolved is the filament rather than the interface.
+
+The $Ca$ rows correct something this document got wrong on first writing. At
+$W=64$, raising $Ca$ from 0.26 to 960 --- dropping $\sigma$ from
+$1.58\e{-4}$ to $1.25\e{-6}$ --- takes the worst deviation from 15.8\% to
+29.4\%, which reads exactly like surface tension adding a second, independent
+penalty. It does not. The same change at $W=256$ gives 1.9\% against 2.7\%,
+very slightly \emph{better}. A nearly surface-tension-free interface simply
+needs more cells to carry the filament; given them, it costs nothing.
+
+\subparagraph{Three dimensions: a failure, reported as one.} Both 3-D cases fall
+much faster than the published tables --- 92.8\% and 46.2\% at worst, with the
+$Re=256$ spike reaching 0.047 where all eight models their Table~IX collects lie
+between 0.648 and 0.863. This is not presented as agreement inside a spread; it
+is outside it from $t/t_0=1$ onward.
+
+What has been ruled out is worth as much as what has not. The setup is theirs:
+their Eq.~(83) puts a domain of $W\times4W\times W$ at $W=64$, the interface at
+$2W$ and a perturbation $0.05W[\cos2\pi x + \cos2\pi z]$, and all three match.
+The \emph{measurement} is also not at fault, which was the leading hypothesis
+here and a reasonable one: ``position of the spike'' means the tip of the
+coherent finger, whereas a global minimum over $\phi>\tfrac12$ becomes a
+different quantity the moment anything detaches, and $Ca=960$ is the regime an
+interface fragments in. \code{validation/enan\_rt} therefore reports three spike
+measures side by side --- the global minimum, the tip on the axis where
+Eq.~(83) puts the finger, and one thresholded on a cross-section population so
+a single stray cell cannot set it. On the 3-D $Re=256$ case \emph{they agree to
+the digit at every one of the seven instants}, 0.047 included. There is no
+detached material: the finger really does reach the floor.
+
+So the deficit is physics, and it is only partly accounted for. Their 3-D cases
+run at $W=64$, where the 2-D ladder above already costs 15.8\%, and at
+$Ca=960$, which costs nothing on its own. That leaves most of the gap
+unexplained, and the run that would test whether the residue is also resolution
+--- three-dimensional at $W=96$ or beyond --- costs several hours and several
+gigabytes and has not been done. It is recorded here as an open disagreement
+with the bound that is known, rather than as a limitation with a cause.
+
+The two remaining 2-D configurations, $Re=256$ and $Re=3000$, have no table in
+the paper; its Fig.~11 plots them against four other studies. They are run and
+reported as trajectories rather than scored, and behave as viscosity should:
+the spike at $t/t_0=3$ sits at 1.324, 0.668 and 0.570 for $Re=256$, 3000 and
+$30\,000$.
+
+\paragraph{Vertical penetration of a wedge.} Their III.G drives a symmetric
+wedge of deadrise angle $\varphi$ into quiescent water at constant speed $v$
+and compares the vertical force with Wagner's potential-flow slamming result,
 \[
-  F_W(t) = \rho_H \frac{\pi^2 v^2 a(t)}{4\tan\varphi},
+  F_W(t) = \rho_H\,\frac{\pi^2 v^2 a(t)}{4\tan\varphi},
   \qquad a(t) = \frac{\pi v t}{2\tan\varphi},
 \]
-$a(t)$ being the wetted length. Three things would have to be built for that
-number to mean anything here. There is no immersed boundary in this tree at all:
-rigid bodies are handled by volume penalisation
-(\S\ref{sec:penalisation}), which is a different discretisation of a different
-boundary condition. The rigid body is two-dimensional and \emph{falls} --- the
-reaction is fed back into Newton's equations --- whereas Wagner's result is for
-prescribed constant-velocity entry, so the comparison would need a driven-body
-mode that does not exist. And the body machinery is wired to the free-surface
-solver, not to the phase field, so it is the wrong two-phase model for this
-case.
+$a(t)$ being the wetted half-width. Those combine to
+$F_W = \rho_H \pi^3 v^3 t/(8\tan^2\varphi)$, which is \emph{linear in time} ---
+and that linearity is most of the test, being a statement the simulation can
+fail in a way no fitted constant hides. Normalising,
+\[
+  F^* = \frac{F}{\rho_H v^2 b} = \frac{\pi^3}{8\tan^2\varphi}\,\tau,
+  \qquad \tau = \frac{v t}{b},
+\]
+so the comparison is a dimensionless slope depending on nothing but the
+deadrise angle, and the case needs no conversion out of lattice units despite
+the paper stating it in metres and seconds.
 
-\code{demonstrator/water\_entry} is the nearest thing in the tree and is
-deliberately \emph{not} this test: it drops a flat-bottomed square, whose impact
-pressure is singular at first contact and has no closed form, so it is
-registered as a demonstrator and reports a force history whose shape is
-physical rather than a number to quote. Presenting it as a reproduction of
-III.G would be exactly the kind of claim this document warns about throughout.
+\subparagraph{Penalisation in place of an immersed boundary.} The paper uses a
+Peskin IBM; this tree has volume penalisation, and \code{PenalisedBody.hpp}
+argues the substitution: for a body whose interior moves rigidly it enforces
+the same condition, keeps the pose continuous rather than lattice-quantised,
+and needs no refill scheme for uncovered nodes. The wedge is a new indicator on
+that existing machinery --- a signed distance to the two faces with the same
+$\tanh$ smoothing the rectangle uses --- and the body was already able to be
+driven rather than free, which is what Wagner's constant-velocity entry needs.
+
+The one thing that costs is surface accuracy, and it is worth being precise
+about where. The product of two $\tanh$ indicators rounds a convex corner, and
+a wedge apex is sharper than a rectangle's; measured as the integral of $\chi$
+over the nominal area, the penalised wedge is larger than nominal by 0.03\% at
+$45^\circ$, 0.23\% at $15^\circ$ and 0.50\% at $10^\circ$ for $b=100$ and a
+one-cell smoothing --- and by 5.6\% at $10^\circ$ if the body is only $b=30$.
+The excess sits at the apex, which for water entry is exactly where the impact
+starts, so a shallow-deadrise run wants a large body rather than a small one
+with the smoothing turned down.
+
+\subparagraph{Results.} Table~\ref{tab:enanwedge} is the deadrise sweep at
+$b=80$.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Wedge entry against Wagner. The slope is fitted over the middle of
+  Wagner's own validity window, $0.25 < \tau/\tau_{\rm valid} < 0.70$ with
+  $\tau_{\rm valid} = 2\tan\varphi/\pi$; below that the wetted length is a few
+  cells across, above it the spray root nears the knuckle.}
+  \label{tab:enanwedge}
+  \begin{tabular}{rrrrrl}
+    \toprule
+    $\varphi$ & Slope & Wagner & Dev. & $R^2$ & \\
+    \midrule
+    $10^\circ$ & 107.15 & 124.66 & $-14.0$\% & 0.991 & \\
+    $15^\circ$ &  60.64 &  53.98 & $+12.3$\% & 0.999 & \\
+    $20^\circ$ &  29.55 &  29.26 & $+1.0$\%  & 0.997 & \\
+    $30^\circ$ &   7.69 &  11.63 & $-33.9$\% & 0.106 & \textit{see below} \\
+    $45^\circ$ &   3.15 &   3.88 & $-18.6$\% & 0.208 & \textit{reflections} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+At $10$, $15$ and $20$ degrees the force is linear in time to $R^2 \ge 0.99$
+and the slope is within 14\%, 12\% and 1\% of Wagner. That is the regime Wagner
+is asymptotically valid in --- his result is derived for vanishing $\varphi$ ---
+and the paper reports the same trend of improving agreement as the angle falls.
+
+The two largest angles failed on the first pass, and the cause was one thing
+rather than two. Wagner's window $\tau_{\rm valid} = 2\tan\varphi/\pi$
+\emph{grows with the deadrise angle}, so at $45^\circ$ the fit runs to 1783
+steps after touchdown while an acoustic wave crosses the periodic domain in
+1109: the fit was being taken through the simulation's own reflections. At
+$30^\circ$ the step-count bound said the window closed just inside that, and
+the force appeared instead to saturate --- which was written up here as
+unexplained until Fig.~\ref{fig:enanrtwedge}(c) was drawn and showed the
+$30^\circ$ curve collapsing to near zero inside the window, with exactly the
+signature of panel (d). It was the same artefact, and looking at the curve was
+what settled it; a step-count estimate had said otherwise.
+
+The remedy is to size the domain by the acoustic time rather than by the body,
+which is what \code{validation/enan\_wedge} now does: it takes
+$n_x = \max(8b,\,1.6\,c_s \times 0.7\,\tau_{\rm valid}\,b/v)$, leaving
+$10^\circ$ and $20^\circ$ untouched at $8b$ and widening $30^\circ$ to 950
+cells and $45^\circ$ to 1646. A fixed multiple of the body cannot work here,
+because the requirement scales with $\tan\varphi$ and the body does not.
+
+\subparagraph{Two traps, one of which nearly produced a wrong conclusion.} The
+first is the gauge: the multiphase populations carry a normalised pressure, not
+a density, so seeding \code{FlowState} with $\rho$ starts a run that is finite,
+plausible, and dead fifteen steps later with nothing to indicate why.
+
+The second is worth more space. Released with its apex on the surface, the
+wedge delivers an added-mass impulse that has nothing to do with slamming:
+$F^*=35.8$ at contact against a Wagner value of zero there and about 7 at the
+end of the window, and the force then \emph{decays} through the window instead
+of growing. Releasing it above the surface fixes the trend --- but the drop
+must also outlast the acoustic pulse the impulsive release launches, and that
+is a second requirement. Released 20 cells up at $b=80$, the force rises
+cleanly to $F^*=5.84$ and then collapses to 1.29 and recovers, in the middle of
+the fit window. It looks exactly like the spray root doing something physical.
+Changing only the drop settles it:
+
+\begin{center}
+\begin{tabular}{lrrr}
+  \toprule
+  Drop & Slope & Dev. & $R^2$ \\
+  \midrule
+  20 cells & 6.51  & $-77.8$\% & 0.034 \\
+  60 cells & 29.55 & $+1.0$\%  & 0.997 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+Same impact, same window, same everything else. The natural next move would
+have been a resolution study, and it would have been actively misleading:
+$b=40$ scores \emph{better} than $b=80$ at the short drop, because a smaller
+domain moves the artefact rather than removing it. The default is now $0.75b$,
+which buys about 2.7 acoustic crossings at every $b$ --- a fixed cell count
+would have hidden the same bug at a different size.
+
+\subparagraph{The density ratio, which turned out not to be the obstacle.}
+Water over air is $1000/1.225 = 816$, and the phase field here is characterised
+to about 100, so the expectation was that the paper's own fluids would be out
+of reach and a reduced ratio would have to be reported instead. Measured at
+$\varphi=20^\circ$:
+
+\begin{center}
+\begin{tabular}{rrrr}
+  \toprule
+  Ratio & Slope & Dev. & $R^2$ \\
+  \midrule
+  10  & 103.29 & $+253.1$\% & 0.986 \\
+  50  &  30.06 & $+2.8$\%   & 0.987 \\
+  100 &  29.55 & $+1.0$\%   & 0.997 \\
+  200 &  31.14 & $+6.4$\%   & 0.999 \\
+  816 &  32.73 & $+11.9$\%  & 0.9999 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+The paper's 816 runs, with the best linearity of the sweep, so this case does
+not depend on the reduced-ratio approximation at all; only a ratio of 10 fails,
+and it fails loudly. The deviation grows mildly with the ratio while Wagner ---
+who has no air whatever --- ought to be approached as the air thins, so two
+effects are working against each other here and this sweep does not separate
+them.
 
 %------------------------------------------------------------------------------
 \subsection{Thermal flows}

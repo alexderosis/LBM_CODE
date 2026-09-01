@@ -278,6 +278,65 @@ int main(int argc, char** argv) {
             stale = std::max(stale, std::fabs(double(gfx(d.id(x, y)))));
       check::near(stale, 0.0, 1e-30, "no force is left where the body used to be");
     }
+
+    //-------------------------------------------------------------- wedge
+    // The Wedge indicator, checked against the geometry it claims rather than
+    // against itself. half_beam = 100 with smooth = 1 so the body is resolved:
+    // at half_beam = 30 and 15 degrees the wedge is only 8 cells tall and the
+    // face and cap smoothing regions overlap, so chi never reaches 1 anywhere
+    // inside -- which is a true statement about a wedge that small, not about
+    // the shape, and is why the sizes here are what they are.
+    std::printf("\n-- the wedge indicator --\n");
+    {
+      const double PI = 3.14159265358979323846;
+      // Measured apex-rounding excess at b = 100, smooth = 1; see the banner.
+      const double excess[3] = {1.00232, 1.00058, 1.00025};
+      int k = 0;
+      for (double deg : {15.0, 30.0, 45.0}) {
+        Wedge w;
+        w.cx = 0; w.cy = 0; w.half_beam = Real(100); w.smooth = Real(1.0);
+        w.set_deadrise(Real(deg * PI / 180.0));
+        w.set_angle(Real(0));
+        const double H = double(w.height());
+        const std::string at = " at " + std::to_string(int(deg));
+        check::near(double(w.chi(Real(0), Real(0.5 * H))), 1.0, 1e-9,
+                    "chi = 1 inside the wedge" + at);
+        // Placed at a fixed FACE-NORMAL distance, not a fixed axial one: chi
+        // decays as exp(-2d) in the normal distance, so an axial probe would
+        // sit 15 cells out at 0 degrees and 10.6 at 45, and the tolerance
+        // would be measuring the deadrise angle rather than the indicator.
+        const double below = 15.0 / std::cos(deg * PI / 180.0);
+        check::near(double(w.chi(Real(0), Real(-below))), 0.0, 1e-12,
+                    "chi = 0 below the apex" + at);
+        check::near(double(w.chi(Real(0), Real(H + 12))), 0.0, 1e-9,
+                    "chi = 0 above the knuckle" + at);
+        // On a face, away from apex and knuckle, the cap factor is 1 to
+        // round-off and the indicator is exactly one half.
+        const double xf = 0.5 * double(w.half_beam);
+        const double yf = xf * std::tan(deg * PI / 180.0);
+        check::near(double(w.chi(Real(xf), Real(yf))), 0.5, 1e-9,
+                    "chi = 1/2 on the face" + at);
+        check::near(double(w.chi(Real(xf), Real(yf + 3))),
+                    double(w.chi(Real(-xf), Real(yf + 3))), 1e-14,
+                    "chi is symmetric about the axis" + at);
+        // The integral of chi is the nominal area PLUS the apex rounding, and
+        // the rounding is pinned rather than tolerated: it is the quantity that
+        // decides how much bigger than nominal the penalised body actually is.
+        double area = 0;
+        const double h = 0.25;
+        const int xi = int((double(w.half_beam) + 10.0) / h);
+        const int ylo = int(-10.0 / h), yhi = int((H + 10.0) / h);
+        for (int i = -xi; i <= xi; ++i)
+          for (int j = ylo; j <= yhi; ++j)
+            area += double(w.chi(Real(i * h), Real(j * h))) * h * h;
+        const double ratio = area / (double(w.half_beam) * H);
+        check::near(ratio, excess[k], 5e-4,
+                    "integral of chi matches the recorded apex excess" + at);
+        std::printf("        (%2d deg: chi integral is %.5f x nominal)\n",
+                    int(deg), ratio);
+        ++k;
+      }
+    }
   }
   const int rc = check::report("body");
   Kokkos::finalize();

@@ -208,6 +208,95 @@
 namespace lbm {
 
 //------------------------------------------------------------------------------
+// A symmetric wedge, for De Rosis & Enan's Sec. III.G water entry: an apex
+// pointing DOWN and two faces rising from it at the deadrise angle phi, capped
+// at the knuckle. Same idiom as Rect below -- a plain struct, tilt carried as
+// its cosine and sine, a product of tanh indicators -- so everything the body
+// does with a Rect it does with this unchanged.
+//
+// THE ORIGIN IS THE APEX, NOT THE CENTROID, and that is a deliberate difference
+// from Rect. A water-entry case prescribes the depth of the apex and compares
+// against a wetted length measured from it, so carrying the apex is what the
+// driver actually wants; putting the centroid there would mean converting on
+// every read. The consequence is that `free_rotation` about this origin is NOT
+// the physical roll axis -- the case this shape exists for drives both degrees
+// of freedom, and a freely rotating wedge would need the centroid offset
+// (0, 2 height / 3) folded in first.
+//
+// GEOMETRY. In the body frame with the apex at the origin, the wedge is the set
+//
+//     Y > |X| tan(phi)      above the two faces
+//     Y < H                 below the knuckle,  H = half_beam tan(phi)
+//
+// and the face condition is written as a true normal distance,
+//
+//     d_face = Y cos(phi) - |X| sin(phi),
+//
+// because cos^2 + sin^2 = 1 makes that the perpendicular distance to whichever
+// face the point is on. Scaling `smooth` against a non-normalised distance
+// would make the smoothing width depend on the deadrise angle, so that a
+// shallow wedge got a diffuse surface and a steep one a sharp surface -- the
+// kind of thing that quietly turns a deadrise sweep into a smoothing sweep.
+//
+// THE APEX IS ROUNDED, AND IT MATTERS MOST WHERE THE PHYSICS DOES. The product
+// of two tanh indicators rounds a convex corner, exactly as Rect's does, and a
+// wedge apex is a sharper corner than a rectangle's right angle. Measured as
+// the integral of chi over the nominal area b^2 tan(phi):
+//
+//     deadrise     b = 100, smooth = 1     b = 30, smooth = 1
+//     10 deg           +0.50 %                 +5.6 %
+//     15 deg           +0.23 %                 +2.6 %
+//     30 deg           +0.06 %                 +0.64 %
+//     45 deg           +0.03 %                 +0.28 %
+//
+// So the penalised wedge is slightly LARGER than the nominal one, the excess
+// concentrated at the apex, and it grows as the wedge sharpens or the body
+// shrinks against the smoothing width. For water entry that is the worst place
+// for it: the apex is where the impact starts and where Wagner's wetted length
+// is measured from, so a shallow-deadrise run wants a big body in cells rather
+// than a small one with the smoothing turned down -- reducing `smooth` below
+// about one cell makes the indicator a step again and reintroduces the
+// lattice-quantised pressure pulses penalisation exists to avoid.
+//------------------------------------------------------------------------------
+struct Wedge {
+  Real cx = 0, cy = 0;         // THE APEX
+  Real half_beam = 0;          // half-width at the knuckle
+  Real smooth = Real(1.5);     // indicator smoothing width, in cells
+  Real theta = 0;              // tilt, unwrapped
+  Real ct = Real(1);           // cos(theta)
+  Real st = Real(0);           // sin(theta)
+  Real cphi = Real(1);         // cos(deadrise)
+  Real sphi = Real(0);         // sin(deadrise)
+
+  KOKKOS_INLINE_FUNCTION void set_angle(Real th) {
+    theta = th;  ct = Kokkos::cos(th);  st = Kokkos::sin(th);
+  }
+  // Deadrise from the horizontal, in radians. Stored as its pair for the same
+  // reason theta is: it is used at every node of the domain every step.
+  KOKKOS_INLINE_FUNCTION void set_deadrise(Real p) {
+    cphi = Kokkos::cos(p);  sphi = Kokkos::sin(p);
+  }
+  KOKKOS_INLINE_FUNCTION Real deadrise() const { return Kokkos::atan2(sphi, cphi); }
+  KOKKOS_INLINE_FUNCTION Real height() const {
+    return half_beam * sphi / cphi;                       // H = b tan(phi)
+  }
+  // Apex to knuckle corner: sqrt(b^2 + H^2) = b / cos(phi).
+  KOKKOS_INLINE_FUNCTION Real reach() const {
+    return half_beam / cphi + Real(4) * smooth;
+  }
+  KOKKOS_INLINE_FUNCTION Real chi(Real x, Real y) const {
+    const Real dx = x - cx, dy = y - cy;
+    const Real X =  ct * dx + st * dy;
+    const Real Y = -st * dx + ct * dy;
+    const Real df = (Y * cphi - Kokkos::fabs(X) * sphi) / smooth;
+    const Real dt = (height() - Y) / smooth;
+    const Real sf = Real(0.5) * (Real(1) + Kokkos::tanh(df));
+    const Real st_ = Real(0.5) * (Real(1) + Kokkos::tanh(dt));
+    return sf * st_;
+  }
+};
+
+//------------------------------------------------------------------------------
 // A rectangle, described by its centre, half-extents and tilt. Kept a plain
 // struct so it captures into a device lambda by value.
 //
@@ -289,7 +378,7 @@ struct reduction_identity<lbm::BodySums> {
 
 namespace lbm {
 
-template <class L>
+template <class L, class Shape = Rect>
 class PenalisedBody {
  public:
   // Two dimensions, and said in the compiler's voice rather than only in the
@@ -311,7 +400,7 @@ class PenalisedBody {
   View1D<Real> z() const { return fz_; }
 
   //---- state, public so a driver can prescribe, clamp or read any of it -------
-  Rect shape;
+  Shape shape;
   Real vx = 0, vy = 0;             // centre-of-mass velocity
   Real omega = 0;                  // angular velocity about z
 
@@ -342,7 +431,7 @@ class PenalisedBody {
 
   Moments indicator_moments() const {
     const Domain d = dom_;
-    const Rect b = shape;
+    const Shape b = shape;
     const Index hx = dom_.hx, hy = dom_.hy;
     Real a = 0, s = 0;
     Kokkos::parallel_reduce("penalised_moments", Range(0, dom_.n_padded),
@@ -430,7 +519,7 @@ class PenalisedBody {
   template <class LiquidOf, class LbmOf>
   BodySums probe(LiquidOf density_of, LbmOf lbm_of) const {
     const Domain d = dom_;
-    const Rect b = shape;
+    const Shape b = shape;
     const Real bvx = vx, bvy = vy, bw = omega;
     auto ux = ux_, uy = uy_;
     auto fx = fx_, fy = fy_;
@@ -478,7 +567,7 @@ class PenalisedBody {
   template <class LiquidOf, class LbmOf>
   void apply(LiquidOf density_of, LbmOf lbm_of) {
     const Domain d = dom_;
-    const Rect b = shape;
+    const Shape b = shape;
     const Real bvx = vx, bvy = vy, bw = omega;
     auto ux = ux_, uy = uy_;
     auto fx = fx_, fy = fy_, fz = fz_;

@@ -518,6 +518,13 @@ int main(int argc, char** argv) {
 
     //--------------------------------------------------------------------------
     // The field-free row first: it separates the plumbing from the physics.
+    // Run ONLY at -ha 0, for the same reason the fixed-Ha ladder is skipped
+    // there: with both blocks unconditional, every -ha 10 run appended six
+    // Ha = 0 rows that a -ha 0 run had already written, and the tracked table
+    // came out with each of them twice. The two blocks are now exclusive, so
+    // -ha 0 gives the field-free ladder at two viscosities and a nonzero -ha
+    // gives the fixed-Ha one, and neither writes the other's rows.
+    if (Ha_one == 0.0) {
     header("Ha = 0: the field-free limit, against the parabola");
     std::printf("  With B0 = 0 the induction equation decouples and the exact answer\n");
     std::printf("  is F (L^2 - y^2) / 2 nu. This is NOT round-off at a general omega:\n");
@@ -551,8 +558,18 @@ int main(int argc, char** argv) {
     }
     std::printf("\n  the nu = 1/6 block is omega = 1 exactly, where the slip term\n"
                 "  (omega-1)/omega^2 is identically zero.\n");
+    }  // end of the field-free block, run only at Ha = 0
 
     //--------------------------------------------------------------------------
+    // Ha = 0 is ALREADY the block above, at two viscosities rather than one, so
+    // running this one as well writes the nu = nu_in ladder into the table
+    // twice. It is a duplicate row rather than a wrong one, which is exactly
+    // the kind of thing a tracked results file should not accumulate.
+    if (Ha_one == 0.0) {
+      std::printf("\n  Ha = 0 was the field-free block above; the fixed-Ha ladder\n"
+                  "  would repeat it, so it is skipped. Pass -ha with a nonzero\n"
+                  "  value for that ladder.\n");
+    } else {
     header("Grid convergence at fixed Ha");
     std::printf("  Ha = %g. nu and the peak velocity are held fixed while L grows,\n"
                 "  so B0 = Ha sqrt(nu eta)/L and F both shrink and the exact\n"
@@ -585,6 +602,8 @@ int main(int argc, char** argv) {
                 "  visible too.\n");
 
     //--------------------------------------------------------------------------
+    }  // end of the fixed-Ha ladder, skipped at Ha = 0
+
     if (hasweep) {
       header("Hartmann number sweep at fixed resolution");
       std::printf("  ny = 129 throughout, so L = 64 and the layer thins as 64/Ha.\n\n");
