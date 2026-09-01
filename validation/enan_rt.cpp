@@ -72,7 +72,22 @@
 //  0.26 to 960 -- sigma from 1.58e-4 to 1.25e-6 -- takes the worst deviation
 //  from 15.8 % to 29.3 %, again entirely in the last two instants. Their 3-D
 //  cases run at Ca = 960 AND W = 64, so they sit at the bad end of both knobs
-//  at once, and their 92.8 % is not a single cause.
+//  at once, and their 92.8 % is not a single cause. It is also not fully
+//  accounted for: the 2-D equivalent of those settings gives 29.3 %, so
+//  something 3-D-specific remains, and it is left open rather than guessed at.
+//
+//  WHAT IT IS NOT is the spike measure, and that was worth ruling out rather
+//  than assuming. "Position of the spike" is the tip of the coherent finger,
+//  while a global minimum over phi > 0.5 is a different quantity as soon as
+//  anything detaches -- and Ca = 960 is a surface tension of 1.25e-6, exactly
+//  the regime where an interface fragments freely. In 3-D the global scan also
+//  covers 64x more nodes per y-level than in 2-D, so one stray cell is far
+//  likelier to capture it. All three measures below therefore run side by side,
+//  and on the 3-D Re = 256 case they agree TO THE DIGIT at every one of the
+//  seven tabulated instants, 0.0469 at t/t0 = 3 included. No fragmentation, no
+//  stray cells: the finger really does reach the floor, and the deficit is
+//  physics. The measures are kept because the hypothesis was reasonable and
+//  the next person will have it too.
 //==============================================================================
 #include "collision/MultiphaseCentralMoments.hpp"
 #include "collision/PhaseFieldCentralMoments.hpp"
