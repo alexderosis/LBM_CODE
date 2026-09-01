@@ -4361,14 +4361,27 @@ document cannot drift from the data behind it.
   \input{fig/enan_interface_table.tex}
 \end{table}
 
-Read the BGK column against the last one first, because that is the like-for-like
-comparison and it is favourable in four cases out of six. The two it loses ---
-the circular interface in a shear flow and the swirling sphere --- are the two
-that stretch the interface into a filament a few cells across before returning
-it, so they are the cases where the reconstruction, rather than the transport,
-is being measured. That the same code wins on translation and on the Zalesak
-disk and loses on the two filament tests is a coherent pattern rather than
-scatter, and it is worth stating as a limitation rather than averaging away.
+Read the BGK column against the last one first, because that is the
+like-for-like comparison. It is favourable on four of the seven rows where both
+complete --- the Geier translation, the Zalesak disk, and both smoothed-shear
+cases --- and unfavourable on three, and the three are worth separating because
+they fail for two different reasons.
+
+The circular interface in a shear flow and the swirling sphere are the two that
+stretch the interface into a filament a few cells across before returning it,
+so they measure the reconstruction rather than the transport; being 14\% and
+31\% off there is a limitation of the scheme on thin filaments and is stated as
+one rather than averaged away.
+
+Their Table~I is a different and worse story. At $Pe=125$ BGK gives 0.0781
+against their 0.0066, a factor of twelve, and the central-moment collision is
+worse again at 0.3053. This is the one place in the section where \emph{both}
+operators are far from the published result, which locates the deficit in what
+they share --- the gradient stencil, the anti-diffusion source, the
+initialisation --- rather than in either collision. It is not resolved here.
+Note that the same physical test at half the run length and half the Peclet
+number, their Table~II, has BGK \emph{beating} the published column at 0.0082
+against 0.0134, so whatever it is switches on somewhere between the two.
 
 \paragraph{The central-moment collision does not dominate BGK, and what it
 buys is the stability ceiling rather than accuracy.} This is the least expected
