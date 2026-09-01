@@ -4373,15 +4373,22 @@ so they measure the reconstruction rather than the transport; being 14\% and
 31\% off there is a limitation of the scheme on thin filaments and is stated as
 one rather than averaged away.
 
-Their Table~I is a different and worse story. At $Pe=125$ BGK gives 0.0781
-against their 0.0066, a factor of twelve, and the central-moment collision is
-worse again at 0.3053. This is the one place in the section where \emph{both}
-operators are far from the published result, which locates the deficit in what
-they share --- the gradient stencil, the anti-diffusion source, the
-initialisation --- rather than in either collision. It is not resolved here.
-Note that the same physical test at half the run length and half the Peclet
-number, their Table~II, has BGK \emph{beating} the published column at 0.0082
-against 0.0134, so whatever it is switches on somewhere between the two.
+Their Table~I is a different and worse story, and it is the one honest failure
+in the section. Both operators complete all three Peclet numbers --- BGK gives
+0.0781, 0.0267 and 0.0496 against their 0.0066, 0.0050 and 0.0090, and the
+central-moment collision 0.3053, 0.1190 and 0.0731 --- so nothing diverges and
+nothing is missing; the numbers are simply five to forty-six times the
+published ones. That \emph{both} operators miss by so much is what makes this
+informative: it locates the deficit in what they share --- the gradient
+stencil, the anti-diffusion source, the initialisation --- rather than in
+either collision, and it is recorded unresolved.
+
+Two details sharpen it rather than explain it away. The same physical test at
+half the run length and half the Peclet number, their Table~II, has BGK
+\emph{beating} the published column at 0.0082 against 0.0134, so whatever this
+is switches on between the two. And the error is not monotonic in $Pe$ for
+either operator, which rules out a simple under-resolution of the interface at
+low mobility.
 
 \paragraph{The central-moment collision does not dominate BGK, and what it
 buys is the stability ceiling rather than accuracy.} This is the least expected
