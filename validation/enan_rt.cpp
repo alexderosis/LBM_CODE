@@ -68,9 +68,14 @@
 //  disagreement at t/t0 = 3 on a coarse grid is the expected behaviour rather
 //  than a defect to hunt.
 //
-//  Surface tension stacks with it. At W = 64, Re = 30000, changing ONLY Ca from
-//  0.26 to 960 -- sigma from 1.58e-4 to 1.25e-6 -- takes the worst deviation
-//  from 15.8 % to 29.3 %, again entirely in the last two instants. Their 3-D
+//  SURFACE TENSION DOES NOTHING ON ITS OWN -- it only sharpens the resolution
+//  requirement, and the first version of this note got that wrong. At W = 64,
+//  Re = 30000, changing ONLY Ca from 0.26 to 960 -- sigma from 1.58e-4 to
+//  1.25e-6 -- takes the worst deviation from 15.8 % to 29.3 %, which reads like
+//  an independent penalty. It is not. The SAME change at W = 256 gives 1.9 %
+//  against 2.7 %, i.e. very slightly BETTER. A nearly surface-tension-free
+//  interface simply needs more cells to carry the filament; given them, it
+//  costs nothing. Their 3-D
 //  cases run at Ca = 960 AND W = 64, so they sit at the bad end of both knobs
 //  at once, and their 92.8 % is not a single cause. It is also not fully
 //  accounted for: the 2-D equivalent of those settings gives 29.3 %, so
