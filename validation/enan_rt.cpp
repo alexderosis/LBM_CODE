@@ -164,7 +164,7 @@ struct RT {
 
 static RT run(Index W, bool three_d, double At, double Re, double Ca, double Pe,
               double U, double iw, double tmax, const char* dump,
-              const char* field) {
+              const char* field, bool volume) {
   const Index nx = W, ny = 4 * W, nz = three_d ? W : Index(1);
   const double g     = U * U / double(W);           // so sqrt(gW) = U
   const double nu    = double(W) * U / Re;
@@ -298,18 +298,29 @@ static RT run(Index W, bool three_d, double At, double Re, double Ca, double Pe,
       // the finger forms on the diagonal of the box, and that plane cuts
       // through it.
       if (field && *field) {
+        // In 2-D the plane IS the field. In 3-D the whole volume is written
+        // when -vol is given, so the interface can be rendered as an
+        // isosurface rather than inferred from one slice: their Fig. 15 shows
+        // the surface, and a mid-plane cut through a mushroom is not the same
+        // picture. 64 x 256 x 64 float32 is 4 MB a snapshot, which is why it
+        // is opt-in and why doc/fig/*.bin is gitignored.
         char fp[256];
         std::snprintf(fp, sizeof fp, "doc/fig/rtphi_%s_t%d.bin", field, int(next));
         if (std::FILE* bf = std::fopen(fp, "wb")) {
-          const std::int32_t dims[2] = {std::int32_t(nx), std::int32_t(ny)};
-          std::fwrite(dims, sizeof(std::int32_t), 2, bf);
-          std::vector<float> plane(std::size_t(nx) * std::size_t(ny));
-          const Index zc = three_d ? nz / 2 : 0;
-          for (Index yy = 0; yy < ny; ++yy)
-            for (Index xx = 0; xx < nx; ++xx)
-              plane[std::size_t(yy) * std::size_t(nx) + std::size_t(xx)] =
-                  float(hp(d.id(xx, yy, zc)));
-          std::fwrite(plane.data(), sizeof(float), plane.size(), bf);
+          const bool vol = three_d && volume;
+          const std::int32_t dims[3] = {std::int32_t(nx), std::int32_t(ny),
+                                        std::int32_t(vol ? nz : 1)};
+          std::fwrite(dims, sizeof(std::int32_t), 3, bf);
+          const Index z0 = vol ? 0 : (three_d ? nz / 2 : 0);
+          const Index z1 = vol ? nz : (z0 + 1);
+          std::vector<float> buf(std::size_t(nx) * std::size_t(ny));
+          for (Index zz = z0; zz < z1; ++zz) {
+            for (Index yy = 0; yy < ny; ++yy)
+              for (Index xx = 0; xx < nx; ++xx)
+                buf[std::size_t(yy) * std::size_t(nx) + std::size_t(xx)] =
+                    float(hp(d.id(xx, yy, zz)));
+            std::fwrite(buf.data(), sizeof(float), buf.size(), bf);
+          }
           std::fclose(bf);
         }
       }
@@ -367,6 +378,7 @@ int main(int argc, char** argv) {
   const bool   dump = arg_flag(argc, argv, "-dump");
   // Order-parameter snapshots for the figures, into doc/fig as raw float32.
   const bool   fieldflag = arg_flag(argc, argv, "-field");
+  const bool   volflag   = arg_flag(argc, argv, "-vol");   // full 3-D volume
 
   Kokkos::initialize(argc, argv);
   int status = 0;
@@ -387,7 +399,7 @@ int main(int argc, char** argv) {
     std::snprintf(tag, sizeof tag, "rt%s_w%d_re%.0f_iw%g",
                   td ? "3d" : "2d", int(W), Re, iw);
     const RT r = run(W, td, At, Re, Ca, Pe, U, iw, tmax, dump ? tag : "",
-                     fieldflag ? tag : "");
+                     fieldflag ? tag : "", volflag);
 
     std::printf("\n  nu = %.4e   tau = %.5f   sigma = %.4e   M = %.4e   "
                 "rho_H = %.2f\n", r.nu, r.tau, r.sigma, r.M, r.rho_h);

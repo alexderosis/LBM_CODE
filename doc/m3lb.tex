@@ -4436,6 +4436,18 @@ interface-capture group it exercises the fluid operator, the interfacial force
 and the coupling order together. It is also insensitive to the corrections
 above: at the wrong $\xi$ and the wrong mobility it gave 2.7\%.
 
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{fig/enan_rt3d.png}
+  \caption{The $\phi=1/2$ surface of the 3-D case at $Re=256$, the
+  counterpart of their Fig.~15, extracted by marching cubes from the volumes
+  \code{validation/enan\_rt -field -vol} writes. The morphology is what their
+  text describes --- a mushroom-shaped spike, rising bubbles, and four saddle
+  points at the middle of the four sides --- which is why the disagreement in
+  Table~\ref{tab:enanrt} is read as a rate rather than as a broken force.}
+  \label{fig:enanrt3d}
+\end{figure}
+
 \subparagraph{Three dimensions: still wrong, but wrong differently.} Both 3-D
 cases now fall too \emph{slowly} --- $+42\%$ at $t/t_0=3$ on their Table IX,
 $+144\%$ at $t/t_0=2.5$ on their Table X --- where before the reference-time
@@ -4446,7 +4458,51 @@ the corrected clock predicted $\approx0.88$ against their 0.648, and the rerun
 gave 0.922.
 
 It is still outside the band their Table IX collects from eight published
-models, from $t/t_0=1$ onward. Three candidates remain and none is settled:
+models, from $t/t_0=1$ onward.
+
+\subparagraph{A second, independent model says the phase field is not the
+cause.} \code{validation/enan\_rt\_cg} runs the identical case with the
+colour gradient of \S\ref{sec:multiphase}: same D3Q27, same Esoteric Pull,
+same domain and walls, same perturbation from their Eq.~(83), same reference
+time $\sqrt{W/g}$, same three spike measures. What it shares with the phase
+field is everything \emph{except} the interface treatment --- there is no
+Allen--Cahn equation, no mobility, no prescribed width, and the interface
+thickness is an outcome of the recolouring. Their $Pe=1024$ has no counterpart
+and is not matched; $Re$, $\mathrm{At}$ and $Ca$ are.
+
+\begin{center}
+\begin{tabular}{rrrr}
+  \toprule
+  $t/t_0$ & Colour gradient & Phase field & Their Table IX \\
+  \midrule
+  1.0 & 1.781 & 1.797 & 1.741 \\
+  1.5 & 1.641 & 1.641 & 1.553 \\
+  2.0 & 1.422 & 1.438 & 1.304 \\
+  2.5 & 1.172 & 1.203 & 1.001 \\
+  3.0 & 0.891 & 0.922 & 0.648 \\
+  \midrule
+  worst & $+37.4$\% & $+42.3$\% & \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+The two agree with each other to within a cell or two at every instant and
+miss the published column together. That is a stronger constraint than a null
+result: it eliminates the entire class of explanations specific to the
+conservative Allen--Cahn formulation --- its source, its mobility, its
+prescribed width --- and points instead at what the two models share. Their
+Table IX is the right place for this comparison, since three of the eight
+models it collects are colour-gradient methods.
+
+The isosurface sequence of Fig.~\ref{fig:enanrt3d} says the same thing from a
+different direction: the morphology is right. The light fluid rises into
+bubbles, the heavy falls into a mushroom-shaped spike, and the four saddle
+points at the middle of the four sides that their text describes are all
+present from $t/t_0=1$. A broken interfacial force or coupling order would
+distort that; instead the instability develops in the correct shape and simply
+lags.
+
+So the remaining candidates are narrower than they were, and none is settled:
 
 \begin{itemize}
   \item \textbf{The Reynolds number is ambiguous in their own sources.} The
