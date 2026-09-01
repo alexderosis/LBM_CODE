@@ -42,6 +42,7 @@ class Fluid {
   Fluid(int nx, int ny, int nz, Op op, Real nu, Real omega_bulk = Real(1))
       : nx_(nx), ny_(ny), nz_(nz), op_(op), omega_bulk_(omega_bulk) {
     omega_ = omega_from_viscosity(nu);
+    omega_minus_ = omega_minus_for(omega_, magic_3_16);
     N_ = long(nx) * ny * nz;
     f_.assign(std::size_t(27 * N_), Real(0));
     flags_.assign(std::size_t(N_), Fluid_);
@@ -49,6 +50,9 @@ class Fluid {
 
   void set_geometry(const std::vector<std::uint8_t>& fl) { flags_ = fl; has_geometry_ = true; }
   void set_force(const BodyForce& b, int kind) { force_ = b; fkind_ = kind; }
+  void set_magic(Real lambda) { omega_minus_ = omega_minus_for(omega_, lambda); }
+  Real omega_minus() const { return omega_minus_; }
+  Real magic() const { return magic_parameter(omega_, omega_minus_); }
   void couple_magnetic(const Real* bx, const Real* by, const Real* bz) {
     Bx_ = bx; By_ = by; Bz_ = bz; mhd_ = true;
     enable_velocity_output();
@@ -133,12 +137,14 @@ class Fluid {
     p.force = force_;
     p.nx = nx_; p.ny = ny_; p.nz = nz_;
     p.omega = omega_; p.omega_bulk = omega_bulk_;
+    p.omega_minus = omega_minus_;
     return p;
   }
 
   template <int P> void dispatch_op() {
-    if (op_ == Op::BGK) dispatch_force<P, 0>();
-    else                dispatch_force<P, 1>();
+    if      (op_ == Op::BGK) dispatch_force<P, 0>();
+    else if (op_ == Op::TRT) dispatch_force<P, 2>();
+    else                     dispatch_force<P, 1>();
   }
   template <int P, int O> void dispatch_force() {
     if (mhd_) {
@@ -163,7 +169,7 @@ class Fluid {
   int nx_, ny_, nz_;
   long N_;
   Op op_;
-  Real omega_, omega_bulk_;
+  Real omega_, omega_bulk_, omega_minus_;
   std::vector<Real> f_;
   std::vector<std::uint8_t> flags_;
   std::vector<Real> ux_, uy_, uz_;

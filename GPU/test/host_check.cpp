@@ -668,6 +668,104 @@ int main() {
     check(all_ok, "D3Q7: streaming transports each direction by exactly c_i", worst_err);
   }
 
+  // ---- 22. TRT --------------------------------------------------------------
+  //
+  // Four algebraic properties, each of which fails differently:
+  //
+  //   * with omega_minus == omega_plus TRT IS BGK, to the last bit. That is the
+  //     definition, and it is the check that catches a sign error in the
+  //     symmetric/antisymmetric split -- such an error still conserves mass and
+  //     still relaxes toward equilibrium, so nothing else here would see it.
+  //   * equilibrium is a fixed point at ANY pair of rates. The antisymmetric
+  //     part of (e - f) is zero at equilibrium, so omega_minus cannot move it;
+  //     if it can, the split is not about opp(i).
+  //   * mass and momentum are conserved for any pair of rates.
+  //   * a forced collision adds exactly F to the momentum -- and it must do so
+  //     through the ANTISYMMETRIC channel, since the Guo source is odd in c_i
+  //     to leading order. That is why the forced check is here and not implied
+  //     by the BGK one.
+  {
+    const Real omp = Real(1.6);
+    const Real omm = omega_minus_for(omp, magic_3_16);
+    const Macro m{Real(1.03), Real(0.04), Real(-0.02), Real(0.03)};
+
+    // magic parameter round-trips
+    const double lam = double(magic_parameter(omp, omm));
+    check(std::fabs(lam - 3.0 / 16.0) < 1e-9, "TRT: magic parameter round-trips",
+          lam - 3.0 / 16.0);
+
+    // omega_minus == omega_plus reproduces BGK exactly
+    {
+      Real fa[27], fb[27];
+      for (int i = 0; i < 27; ++i) {
+        fa[i] = feq(i, m.rho, m.ux, m.uy, m.uz) * Real(1.0 + 0.01 * ((i % 5) - 2));
+        fb[i] = fa[i];
+      }
+      const Macro ma = macroscopic(fa);
+      collide_bgk(fa, ma, omp);
+      collide_trt(fb, ma, omp, omp);
+      double e = 0;
+      for (int i = 0; i < 27; ++i) e = worst(e, double(fa[i]) - double(fb[i]));
+      check(std::fabs(e) < eps, "TRT: omega_minus == omega_plus IS BGK", e);
+    }
+
+    // equilibrium is a fixed point at both rates
+    {
+      Real f[27];
+      for (int i = 0; i < 27; ++i) f[i] = feq(i, m.rho, m.ux, m.uy, m.uz);
+      Real g[27];
+      for (int i = 0; i < 27; ++i) g[i] = f[i];
+      collide_trt(g, m, omp, omm);
+      double e = 0;
+      for (int i = 0; i < 27; ++i) e = worst(e, double(g[i]) - double(f[i]));
+      check(std::fabs(e) < eps, "TRT: equilibrium is a fixed point", e);
+    }
+
+    // mass and momentum conserved
+    {
+      Real f[27];
+      for (int i = 0; i < 27; ++i)
+        f[i] = feq(i, m.rho, m.ux, m.uy, m.uz) * Real(1.0 + 0.02 * ((i % 7) - 3));
+      const Macro pre = macroscopic(f);
+      collide_trt(f, pre, omp, omm);
+      const Macro post = macroscopic(f);
+      double e = double(post.rho) - double(pre.rho);
+      check(std::fabs(e) < eps, "TRT: mass conserved", e);
+      double mm = 0;
+      mm = worst(mm, double(post.rho * post.ux) - double(pre.rho * pre.ux));
+      mm = worst(mm, double(post.rho * post.uy) - double(pre.rho * pre.uy));
+      mm = worst(mm, double(post.rho * post.uz) - double(pre.rho * pre.uz));
+      check(std::fabs(mm) < eps, "TRT: momentum conserved", mm);
+    }
+
+    // a forced collision adds exactly F
+    {
+      Coupling cp;
+      cp.F[0] = Real(1e-4); cp.F[1] = Real(-2e-4); cp.F[2] = Real(3e-4);
+      Real f[27];
+      for (int i = 0; i < 27; ++i)
+        f[i] = feq(i, m.rho, m.ux, m.uy, m.uz) * Real(1.0 + 0.02 * ((i % 7) - 3));
+      double p0[3] = {0, 0, 0};
+      for (int i = 0; i < 27; ++i) {
+        p0[0] += double(f[i]) * D3Q27::cx(i);
+        p0[1] += double(f[i]) * D3Q27::cy(i);
+        p0[2] += double(f[i]) * D3Q27::cz(i);
+      }
+      Macro mf = macroscopic(f);
+      shift_velocity(mf, cp.F);
+      collide_trt_gen<true, false>(f, mf, omp, omm, cp);
+      double p1[3] = {0, 0, 0};
+      for (int i = 0; i < 27; ++i) {
+        p1[0] += double(f[i]) * D3Q27::cx(i);
+        p1[1] += double(f[i]) * D3Q27::cy(i);
+        p1[2] += double(f[i]) * D3Q27::cz(i);
+      }
+      double e = 0;
+      for (int a = 0; a < 3; ++a) e = worst(e, p1[a] - p0[a] - double(cp.F[a]));
+      check(std::fabs(e) < eps * 1e-2, "TRT: a forced collision adds exactly F", e);
+    }
+  }
+
   std::printf("\n%s  (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED",
               failures, failures == 1 ? "" : "s");
   return failures ? 1 : 0;

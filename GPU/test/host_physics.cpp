@@ -110,7 +110,7 @@ static double slope(const std::vector<double>& x, const std::vector<double>& y) 
 //  looks like a parabola and is wrong by O(1/H). This case is therefore as much
 //  a test of where the wall IS as of whether it holds.
 //==============================================================================
-static void poiseuille(Op op, const char* name) {
+static void poiseuille(Op op, const char* name, double tol_fp64, double tol_fp32) {
   const int H = 16, nx = 4, nz = 4, ny = H + 2;
   const double nu = 1.0 / 6.0;
   const double umax = 0.05;
@@ -159,10 +159,150 @@ static void poiseuille(Op op, const char* name) {
   const double amp = num / den;
   const double amp_exact = G / (2.0 * nu);
   char buf[128];
+  const double tol = fp64 ? tol_fp64 : tol_fp32;
   std::snprintf(buf, sizeof buf, "Poiseuille %s: fitted parabola amplitude", name);
-  check(std::fabs(amp - amp_exact) / amp_exact < (fp64 ? 2e-3 : 3e-3), buf, amp, amp_exact);
+  check(std::fabs(amp - amp_exact) / amp_exact < tol, buf, amp, amp_exact);
   std::snprintf(buf, sizeof buf, "Poiseuille %s: worst profile error / u_max", name);
-  check(worst_rel < (fp64 ? 2e-3 : 3e-3), buf, worst_rel, 0.0);
+  check(worst_rel < tol, buf, worst_rel, 0.0);
+}
+
+//==============================================================================
+//  1b. WHERE THE BOUNCE-BACK WALL ACTUALLY IS, and what TRT buys.
+//
+//  Case 1 fixes the viscosity at 1/6 (tau = 1) and asks whether the profile is
+//  right. That is the one viscosity at which the question is easy: BGK is TRT
+//  with omega_minus == omega_plus, so its magic parameter is
+//  Lambda = (tau - 1/2)^2 = 1/4, which at tau = 1 happens to sit near the 3/16
+//  that puts the wall halfway. Every other viscosity is a different story, and
+//  a code validated only at tau = 1 does not know that.
+//
+//  The measurement. Fit a quadratic through the profile at y = 1..H and take its
+//  lower root: that is where the fluid thinks the no-slip plane is. Halfway
+//  bounce-back puts it at exactly 0.5, between the last fluid node at y = 1 and
+//  the solid at y = 0.
+//
+//  MEASURED, H = 16, u_max = 0.002, 200 000 steps (converged; the drift over the
+//  last 140 000 is 7e-5 at the stiffest point):
+//
+//      nu       tau      BGK y0      TRT y0 (Lambda = 3/16)
+//      0.005    0.515     0.5249      0.5008
+//      0.02     0.56      0.5156      0.5018
+//      0.1667   1.00      0.5052      0.5105
+//      0.5      2.00      0.3605      0.5315
+//      1.5      5.00     -0.9471      0.5943
+//
+//  Read the last row. At tau = 5 BGK places its wall almost a lattice and a half
+//  OUTSIDE the solid node -- the effective channel is nearly three cells wider
+//  than the geometry, so a Reynolds number computed from H is wrong by 18% and
+//  nothing in the run says so. TRT is 0.094 out at the same point and bounded
+//  everywhere. At tau = 1, as predicted, BGK is marginally the better of the two.
+//
+//  TRT AT 3/16 IS NOT EXACT HERE, and the honest reading of the third column is
+//  that the residual grows with tau rather than vanishing. It is not a Mach
+//  effect: dropping u_max by a factor of 100 moves y0 by 1e-3 at tau = 2 and by
+//  1e-3 at tau = 1. The 3/16 result is derived for the Stokes problem with a
+//  pressure gradient in the equilibrium; this runs the compressible D3Q27
+//  equilibrium with Guo forcing, and the exactness does not survive that
+//  intact. What survives -- and is what the operator is actually for -- is that
+//  the wall stays put instead of running away with tau.
+//
+//  THE SECOND HALF OF THE CASE IS THE ONE THAT PINS THE SCHEME: omega_minus is
+//  FREE. Sweeping Lambda over a factor of twelve moves y0 from 0.443 to 0.519
+//  and leaves the implied viscosity at 0.166675 against 0.1666667 -- five parts
+//  in 100 000, the same for every Lambda. If the split leaked into the
+//  symmetric channel, the viscosity would move with it and this is the only
+//  test here that would see it.
+//==============================================================================
+static double fit_wall(const std::vector<double>& u, int H, double& curvature) {
+  // Least squares u = a + b y + c y^2 over y = 1..H, then the lower root.
+  double S[5] = {0, 0, 0, 0, 0}, T[3] = {0, 0, 0};
+  for (int y = 1; y <= H; ++y) {
+    double pw = 1.0;
+    for (int k = 0; k < 5; ++k) { S[k] += pw; pw *= double(y); }
+    pw = 1.0;
+    for (int k = 0; k < 3; ++k) { T[k] += u[std::size_t(y - 1)] * pw; pw *= double(y); }
+  }
+  double M[3][4] = {{S[0], S[1], S[2], T[0]},
+                    {S[1], S[2], S[3], T[1]},
+                    {S[2], S[3], S[4], T[2]}};
+  for (int i = 0; i < 3; ++i) {
+    int piv = i;
+    for (int r = i + 1; r < 3; ++r)
+      if (std::fabs(M[r][i]) > std::fabs(M[piv][i])) piv = r;
+    for (int k = 0; k < 4; ++k) std::swap(M[i][k], M[piv][k]);
+    for (int r = 0; r < 3; ++r)
+      if (r != i) {
+        const double fac = M[r][i] / M[i][i];
+        for (int k = i; k < 4; ++k) M[r][k] -= fac * M[i][k];
+      }
+  }
+  const double a = M[0][3] / M[0][0], b = M[1][3] / M[1][1], c = M[2][3] / M[2][2];
+  curvature = c;
+  return (-b + std::sqrt(b * b - 4.0 * c * a)) / (2.0 * c);
+}
+
+static double channel_wall(Op op, double nu, double lambda, int H, std::size_t T,
+                           double& curvature) {
+  const int nx = 4, nz = 4, ny = H + 2;
+  const double umax = 0.002;
+  const double G = 8.0 * nu * umax / (double(H) * double(H));
+
+  host::Fluid fl(nx, ny, nz, op, Real(nu));
+  if (op == Op::TRT) fl.set_magic(Real(lambda));
+
+  std::vector<std::uint8_t> flags(std::size_t(nx) * ny * nz, std::uint8_t(Fluid));
+  for (int z = 0; z < nz; ++z)
+    for (int x = 0; x < nx; ++x) {
+      flags[std::size_t(node_id(x, 0,      z, nx, ny))] = Solid;
+      flags[std::size_t(node_id(x, ny - 1, z, nx, ny))] = Solid;
+    }
+  fl.set_geometry(flags);
+
+  BodyForce b;
+  b.fx = Real(G);
+  fl.set_force(b, ForceUniform);
+  fl.initialise_with([](int, int, int) {
+    return Macro{Real(1), Real(0), Real(0), Real(0)};
+  });
+  for (std::size_t t = 0; t < T; ++t) fl.step();
+
+  std::vector<Real> rho, ux, uy, uz;
+  fl.macroscopic_to_host(rho, ux, uy, uz);
+  std::vector<double> prof(std::size_t(H), 0.0);   // NOT prof(std::size_t(H)) -- that declares a function
+  for (int y = 1; y <= H; ++y) {
+    double u = 0;
+    for (int z = 0; z < nz; ++z)
+      for (int x = 0; x < nx; ++x) u += double(ux[std::size_t(node_id(x, y, z, nx, ny))]);
+    prof[std::size_t(y - 1)] = u / (double(nx) * nz);
+  }
+  return fit_wall(prof, H, curvature);
+}
+
+static void wall_position() {
+  const int H = 16;
+  const std::size_t T = 40000;      // 30 time constants at the stiffest tau here
+  double c = 0;
+
+  // tau = 2, where BGK's own magic parameter is 2.25 against the wanted 3/16.
+  const double nu = 0.5;
+  const double y_bgk = channel_wall(Op::BGK, nu, 0.0,        H, T, c);
+  const double y_trt = channel_wall(Op::TRT, nu, 3.0 / 16.0, H, T, c);
+  check(std::fabs(y_bgk - 0.5) > 0.1, "wall at tau = 2: BGK misplaces it by > 0.1",
+        y_bgk, 0.5);
+  check(std::fabs(y_trt - 0.5) < 0.05, "wall at tau = 2: TRT holds it to < 0.05",
+        y_trt, 0.5);
+  note("TRT is not exact at 3/16 with this equilibrium and Guo forcing; it is bounded.");
+
+  // omega_minus is free: Lambda moves the wall and NOT the viscosity.
+  const double nu0 = 1.0 / 6.0;
+  const double G0  = 8.0 * nu0 * 0.002 / (double(H) * double(H));
+  double y_lo = 0, y_hi = 0, nu_lo = 0, nu_hi = 0;
+  y_lo = channel_wall(Op::TRT, nu0, 1.0 / 12.0, H, T, c);  nu_lo = -G0 / (2.0 * c);
+  y_hi = channel_wall(Op::TRT, nu0, 1.0,        H, T, c);  nu_hi = -G0 / (2.0 * c);
+  check(std::fabs(y_lo - y_hi) > 0.05, "Lambda moves the wall position",
+        std::fabs(y_lo - y_hi), 0.076);
+  check(std::fabs(nu_lo - nu0) / nu0 < 1e-3 && std::fabs(nu_hi - nu0) / nu0 < 1e-3,
+        "Lambda leaves the viscosity untouched", nu_hi, nu0);
 }
 
 //==============================================================================
@@ -605,8 +745,20 @@ int main() {
   std::printf("Physics checks, host build, Real = %s\n\n", fp64 ? "double" : "float");
 
   std::printf("  -- geometry and forcing --\n");
-  poiseuille(Op::BGK, "BGK");
-  poiseuille(Op::CentralMoments, "CM");
+  poiseuille(Op::BGK, "BGK", 2e-3, 3e-3);
+  poiseuille(Op::CentralMoments, "CM", 2e-3, 3e-3);
+  // TRT gets a WIDER tolerance at this one viscosity, and the reason is not
+  // slack. Case 1 runs at nu = 1/6, i.e. tau = 1, where BGK's implicit magic
+  // parameter (tau - 1/2)^2 = 1/4 is nearer the wall-consistent 3/16 than 3/16
+  // is to whatever this equilibrium and forcing actually want -- case 1b
+  // measures the wall at 0.5052 for BGK against 0.5105 for TRT here. The
+  // amplitude error IS that displacement: a wall out by delta narrows the
+  // effective channel by 2 delta and lowers the fitted amplitude by about
+  // 4 delta / H, which is 0.13% for BGK and 0.26% for TRT against the 0.17%
+  // and 0.33% measured. So this row is TRT being honestly worse at the single
+  // viscosity that flatters BGK, and case 1b is where it is worth having.
+  poiseuille(Op::TRT, "TRT", 4e-3, 5e-3);
+  wall_position();
   closed_box();
 
   std::printf("\n  -- the passive scalar --\n");

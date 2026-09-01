@@ -472,7 +472,7 @@ LBM_HD LBM_INLINE void force_at(const BodyForce& b, long n, Real F[3]) {
 //==============================================================================
 //  Collision operators.
 //==============================================================================
-enum class Op { BGK, CentralMoments };
+enum class Op { BGK, CentralMoments, TRT };
 
 //------------------------------------------------------------------------------
 // Guo's half-force shift. The velocity a forced scheme must collide with, and
@@ -609,6 +609,96 @@ LBM_HD LBM_INLINE void collide_cm_gen(Real f[27], const Macro& m, Real omega,
 }
 
 //------------------------------------------------------------------------------
+// TRT -- two relaxation times (Ginzburg, d'Humieres). A port of
+// ../src/collision/TRT.hpp.
+//
+// Split every population about its opposite direction and relax the two parts
+// at different rates:
+//
+//     f_i^+ = (f_i + f_opp)/2   at omega_plus    -> sets the viscosity
+//     f_i^- = (f_i - f_opp)/2   at omega_minus   -> free
+//
+// The free rate is fixed through the magic parameter
+//
+//     Lambda = (1/omega_plus - 1/2)(1/omega_minus - 1/2),
+//
+// and at Lambda = 3/16 the halfway bounce-back wall sits exactly midway between
+// the last fluid node and the first solid node AT ANY VISCOSITY. BGK manages
+// that only at the single tau = 0.5 + sqrt(3)/4, because BGK is TRT with
+// omega_minus == omega_plus.
+//
+// WHY IT IS WORTH THE FIVE EXTRA LINES ON A GPU, where the argument is not the
+// same as on a CPU. TRT costs one extra 27-element array in registers and no
+// extra memory traffic at all, so on a bandwidth-bound kernel it is very nearly
+// free -- unlike the central-moment operator, which is also nearly free but for
+// a different reason (it is arithmetic, and there is arithmetic to spare). What
+// TRT buys is the honest baseline: a wall-bounded result that improves when the
+// central-moment operator is switched on has to be shown to improve against
+// TRT, not against BGK, or the improvement is just the bounce-back position.
+//
+// THE DIRECTION ORDERING PAYS OFF HERE. opp(i) == i + 1 for odd i, so the pair
+// loop is `for (i = 1; i < Q; i += 2)` with no lookup and no table -- the same
+// contract Esoteric Pull depends on, used a second time.
+//
+// The equilibrium is evaluated into a flat array first. The pair loop reads
+// f[i] and f[i+1] together and does not vectorise; leaving the equilibrium
+// inside it costs more than the array does. The parent reached the same
+// conclusion for the same reason.
+//------------------------------------------------------------------------------
+template <bool Forced, bool Mhd>
+LBM_HD LBM_INLINE void collide_trt_gen(Real f[27], const Macro& m, Real omega_p,
+                                       Real omega_m, const Coupling& cp) {
+  Real e[27];
+  for (int i = 0; i < 27; ++i) {
+    e[i] = feq(i, m.rho, m.ux, m.uy, m.uz);
+    if (Mhd) e[i] += maxwell(i, cp.B);
+  }
+  Real sr[27];
+  if (Forced)
+    for (int i = 0; i < 27; ++i)
+      sr[i] = guo_source_raw<D3Q27>(i, cp.F, m.ux, m.uy, m.uz);
+
+  const Real hp = Real(1) - Real(0.5) * omega_p;
+  const Real hm = Real(1) - Real(0.5) * omega_m;
+
+  // The rest population is its own opposite, so it is purely symmetric.
+  f[0] += omega_p * (e[0] - f[0]);
+  if (Forced) f[0] += hp * sr[0];
+
+  for (int i = 1; i < 27; i += 2) {
+    const int j = i + 1;                     // opp(i), by the ordering contract
+    const Real fp = Real(0.5) * (f[i] + f[j]);
+    const Real fm = Real(0.5) * (f[i] - f[j]);
+    const Real ep = Real(0.5) * (e[i] + e[j]);
+    const Real em = Real(0.5) * (e[i] - e[j]);
+    Real dp = omega_p * (ep - fp);
+    Real dm = omega_m * (em - fm);
+    if (Forced) {
+      dp += hp * Real(0.5) * (sr[i] + sr[j]);
+      dm += hm * Real(0.5) * (sr[i] - sr[j]);
+    }
+    f[i] += dp + dm;
+    f[j] += dp - dm;
+  }
+}
+
+//------------------------------------------------------------------------------
+// The magic parameter, and the omega_minus that realises a given one.
+//
+// Lambda = 3/16 is the value that puts the bounce-back wall halfway; it is the
+// default everywhere in this code and `magic_3_16` exists so a driver says why
+// rather than writing 0.1875.
+//------------------------------------------------------------------------------
+constexpr Real magic_3_16 = Real(3) / Real(16);
+
+LBM_HD LBM_INLINE Real omega_minus_for(Real omega_plus, Real lambda) {
+  return Real(1) / (lambda / (Real(1) / omega_plus - Real(0.5)) + Real(0.5));
+}
+LBM_HD LBM_INLINE Real magic_parameter(Real omega_plus, Real omega_minus) {
+  return (Real(1) / omega_plus - Real(0.5)) * (Real(1) / omega_minus - Real(0.5));
+}
+
+//------------------------------------------------------------------------------
 // The uncoupled forms, unchanged in meaning and in signature.
 //------------------------------------------------------------------------------
 LBM_HD LBM_INLINE void collide_bgk(Real f[27], const Macro& m, Real omega) {
@@ -619,6 +709,11 @@ LBM_HD LBM_INLINE void collide_bgk(Real f[27], const Macro& m, Real omega) {
 LBM_HD LBM_INLINE void collide_cm(Real f[27], const Macro& m, Real omega, Real omega_bulk) {
   const Coupling cp{};
   collide_cm_gen<false, false>(f, m, omega, omega_bulk, cp);
+}
+
+LBM_HD LBM_INLINE void collide_trt(Real f[27], const Macro& m, Real omega_p, Real omega_m) {
+  const Coupling cp{};
+  collide_trt_gen<false, false>(f, m, omega_p, omega_m, cp);
 }
 
 LBM_HD LBM_INLINE Real omega_from_viscosity(Real nu) {

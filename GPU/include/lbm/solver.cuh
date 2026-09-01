@@ -50,6 +50,7 @@ struct FluidParams {
   BodyForce force{};
   int nx = 0, ny = 0, nz = 0;
   Real omega = Real(1), omega_bulk = Real(1);
+  Real omega_minus = Real(1);               // TRT only
 };
 
 //------------------------------------------------------------------------------
@@ -91,8 +92,9 @@ LBM_HD LBM_INLINE void fluid_node_update(const FluidParams& p, long N, long n) {
   // already been applied to, i.e. the physical one.
   if (p.ux_out) { p.ux_out[n] = m.ux; p.uy_out[n] = m.uy; p.uz_out[n] = m.uz; }
 
-  if (OpKind == 0) collide_bgk_gen<FKind != ForceNone, Mhd>(f, m, p.omega, cp);
-  else             collide_cm_gen <FKind != ForceNone, Mhd>(f, m, p.omega, p.omega_bulk, cp);
+  if      (OpKind == 0) collide_bgk_gen<FKind != ForceNone, Mhd>(f, m, p.omega, cp);
+  else if (OpKind == 1) collide_cm_gen <FKind != ForceNone, Mhd>(f, m, p.omega, p.omega_bulk, cp);
+  else                  collide_trt_gen<FKind != ForceNone, Mhd>(f, m, p.omega, p.omega_minus, cp);
 
   scatter<Parity>(p.f, N, x, y, z, p.nx, p.ny, p.nz, f);
 }
@@ -213,7 +215,8 @@ class Solver {
  public:
   Solver(int nx, int ny, int nz, Op op, Real nu, Real omega_bulk = Real(1))
       : nx_(nx), ny_(ny), nz_(nz), op_(op),
-        omega_(omega_from_viscosity(nu)), omega_bulk_(omega_bulk) {
+        omega_(omega_from_viscosity(nu)), omega_bulk_(omega_bulk),
+        omega_minus_(omega_minus_for(omega_from_viscosity(nu), magic_3_16)) {
     N_ = long(nx) * ny * nz;
     LBM_CUDA_CHECK(cudaMalloc(&f_, sizeof(Real) * 27 * N_));
     LBM_CUDA_CHECK(cudaMalloc(&flags_, sizeof(std::uint8_t) * N_));
@@ -243,6 +246,15 @@ class Solver {
   }
 
   void set_force(const BodyForce& b, int kind) { force_ = b; fkind_ = kind; }
+
+  // TRT's free rate, set through the magic parameter rather than directly --
+  // Lambda is the quantity with a meaning (3/16 puts the bounce-back wall
+  // halfway) and omega_minus is the quantity the kernel wants. Ignored by
+  // every other operator. Defaults to 3/16, so a TRT run that says nothing
+  // gets the wall-consistent value rather than BGK by accident.
+  void set_magic(Real lambda) { omega_minus_ = omega_minus_for(omega_, lambda); }
+  Real omega_minus() const { return omega_minus_; }
+  Real magic() const { return magic_parameter(omega_, omega_minus_); }
 
   // Device pointers owned by a MagneticSolver. Switches the fluid to the MHD
   // equilibrium; the Maxwell stress then enters through the second moment
@@ -350,6 +362,7 @@ class Solver {
     p.force = force_;
     p.nx = nx_; p.ny = ny_; p.nz = nz_;
     p.omega = omega_; p.omega_bulk = omega_bulk_;
+    p.omega_minus = omega_minus_;
     return p;
   }
 
@@ -359,8 +372,9 @@ class Solver {
   // therefore never compiled.
   //--------------------------------------------------------------------------
   template <int P> void launch_op() {
-    if (op_ == Op::BGK) launch_force<P, 0>();
-    else                launch_force<P, 1>();
+    if      (op_ == Op::BGK) launch_force<P, 0>();
+    else if (op_ == Op::TRT) launch_force<P, 2>();
+    else                     launch_force<P, 1>();
   }
   template <int P, int O> void launch_force() {
     if (mhd_) {
@@ -387,7 +401,7 @@ class Solver {
   int nx_, ny_, nz_;
   long N_;
   Op op_;
-  Real omega_, omega_bulk_;
+  Real omega_, omega_bulk_, omega_minus_;
   Real* f_ = nullptr;
   std::uint8_t* flags_ = nullptr;
   Real *ux_ = nullptr, *uy_ = nullptr, *uz_ = nullptr;
