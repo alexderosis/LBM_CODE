@@ -110,7 +110,8 @@ struct Run {
   double tau_valid = 0;                // 2 tan(phi) / pi
   double nu = 0, tau_f = 0, sigma = 0, ratio = 0;
   double tau_died = -1;
-  double win_lo = 0.25, win_hi = 0.70;
+  double win_lo = 0.30, win_hi = 0.95;   // fractions of tau_END, see below
+  double re_eff = 0, re_phys = 0, dx = 0, dt = 0, tau_end = 0;
   bool finite = true;
   std::size_t steps = 0;
 };
@@ -130,7 +131,7 @@ void fit(Run& r) {
   // nearing the knuckle and Wagner is losing validity from his side. Both ends
   // are excluded for stated reasons rather than to flatter the fit, and -window
   // moves them.
-  const double lo = r.win_lo * r.tau_valid, hi = r.win_hi * r.tau_valid;
+  const double lo = r.win_lo * r.tau_end, hi = r.win_hi * r.tau_end;
   double n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
   for (std::size_t i = 0; i < r.tau.size(); ++i) {
     const double x = r.tau[i], y = r.fstar[i];
@@ -154,8 +155,9 @@ void fit(Run& r) {
 }
 
 //------------------------------------------------------------------------------
-Run run(double deg, Index b, double v, double ratio, double re, double we,
-        double g, double iw, double tmax, double drop, int probe,
+Run run(double deg, Index b, Index nx, Index ny, double v, double v_phys,
+        double ratio, double tau_t, double we, double g, double iw,
+        double t_end, double drop, double visrat, double nu_phys, int probe,
         double wlo_, double whi_, const char* dump) {
   Run r;
   r.win_lo = wlo_;  r.win_hi = whi_;
@@ -164,31 +166,42 @@ Run run(double deg, Index b, double v, double ratio, double re, double we,
   r.tau_valid = 2.0 * std::tan(phi) / PI;
   r.ratio     = ratio;
 
-  // THE DOMAIN IS SIZED BY THE ACOUSTIC TIME, NOT BY THE BODY. Wagner is an
-  // infinite half space, and what "far enough" means here is that no pressure
-  // wave returns to the wedge before the fit window closes. A wave crosses nx
-  // in nx/cs steps; the window closes 0.7 tau_valid b / v steps after
-  // touchdown, and tau_valid = 2 tan(phi)/pi GROWS WITH THE DEADRISE ANGLE. So
-  // a fixed 8b is adequate at 10 or 20 degrees and is not at 30 or 45, which
-  // is exactly where this case first failed: the force rose cleanly and then
-  // collapsed to near zero inside the window, with the same signature as the
-  // release-height artefact above, and was briefly written up as the force
-  // "saturating" for want of looking at the curve.
+  // THE PAPER'S OWN DISCRETISATION, which is stated: the semi-wedge is 500
+  // grid points and the lattice is 2000 x 1000, outflow at each side. So the
+  // domain is taken from -nx/-ny rather than derived from the body, and dx
+  // follows from D and b.
   //
-  // The 1.6 is margin over the bound rather than a fitted number, and the 8b
-  // floor keeps the shallow angles from shrinking to something too narrow for
-  // the spray to develop.
-  const double win_end = 0.70 * (2.0 * std::tan(phi) / PI) * double(b) / v;
-  const double cs = 0.5773502691896258;
-  const Index need = Index(1.6 * cs * win_end);
-  const Index nx = std::max(Index(8 * b), need);
-  const Index water = std::max(Index(4 * b), need / 2), air = 2 * b;
-  const Index ny = water + air;
+  //     dx = D / b = 2 mm,     dt = u_lat dx / v_phys
+  //
+  // AND THE REYNOLDS NUMBER CANNOT BE THEIRS. Water at nu = 1e-6 m^2/s with
+  // D = 1 m and v = 1 m/s is Re = 1e6, and this tree already records that as
+  // out of reach: the relaxation time reaches the 1/2 floor long before it
+  // (see the channel work in doc/m3lb.tex). At dx = 2 mm and dt small enough
+  // to resolve 4 ms, nu_lat would be O(1e-7) and tau = 0.5000002.
+  //
+  // What makes that acceptable rather than fatal is that WAGNER IS INVISCID.
+  // Eq. (80) is potential flow; the slamming force is pressure, not shear. So
+  // nu_lat is set from a target tau instead, and the effective Reynolds number
+  // is reported alongside so the deviation is on the page rather than implied.
+  // -re sweeps it, which is how "the force does not care" gets measured
+  // instead of asserted.
+  const double ds = 0.5;                        // marker spacing, as theirs
+  const double dx = 1.0 / double(b);            // D = 1 m by their definition
+  const double dt = v * dx / v_phys;            // v is the LATTICE velocity
+  const Index water = (7 * ny) / 10, air = ny - water;
   const double rho_h = 1.0, rho_l = 1.0 / ratio;
-  const double nu    = v * double(b) / re;               // Re = v b / nu
+  // nu_lat = nu_phys / (dx^2/dt), which at their discretisation is 5e-6 and
+  // tau = 0.500015. That IS the physical Re = 1e6, and it is reachable here
+  // only because the whole run is ~300 steps -- there is no time to go
+  // unstable. -tau overrides it for a stability sweep.
+  const double nu    = (tau_t > 0.5) ? (tau_t - 0.5) / 3.0
+                                     : nu_phys / (dx * dx / dt);
   const double sigma = rho_h * v * v * double(b) / we;   // We = rho v^2 b / sigma
   r.nu = nu;  r.sigma = sigma;
   r.tau_f = 3.0 * nu + 0.5;
+  r.re_eff  = v * double(b) / nu;
+  r.re_phys = v_phys * 1.0 / 1e-6;                      // water, D = 1 m
+  r.dx = dx;  r.dt = dt;
 
   Domain d(nx, ny, 1, /*periodic x*/ true, /*y*/ false, /*z*/ true);
 
@@ -216,7 +229,9 @@ Run run(double deg, Index b, double v, double ratio, double re, double we,
   fc.Vx = vf.x(); fc.Vy = vf.y(); fc.Vz = vf.z();
   fc.Ex = body.x(); fc.Ey = body.y(); fc.Ez = body.z();
   fc.rho_L = Real(rho_l);      fc.rho_H = Real(rho_h);
-  fc.mu_L  = Real(rho_l * nu); fc.mu_H  = Real(rho_h * nu);
+  // The light phase is 15x more viscous in KINEMATIC terms, which is
+  // nu_air/nu_water: they set niL = nu*15 and so does this.
+  fc.mu_L  = Real(rho_l * nu * visrat); fc.mu_H  = Real(rho_h * nu);
   fc.kappa = FColl::kappa_from_sigma(Real(sigma), Real(iw));
   fc.beta  = FColl::beta_from_sigma(Real(sigma), Real(iw));
   fc.by    = Real(-g);
@@ -295,26 +310,83 @@ Run run(double deg, Index b, double v, double ratio, double re, double we,
   vf.set_velocity(fl.ux(), fl.uy(), fl.uz());
   vf.set_phase_gradient(pf.grad_x(), pf.grad_y(), pf.grad_z());
 
+  // tau = v t / D, so the run stops at tau_end = v_phys t_end / D. At their
+  // 2 and 3 degrees that is 0.18 and 0.12 of tau_valid -- the run stops WELL
+  // SHORT of the knuckle, which is why the fit window below is a fraction of
+  // tau_end and not of tau_valid. Fitting 0.25 to 0.70 of tau_valid, as an
+  // earlier version did, would have been fitting past the end of the run.
+  r.tau_end = v_phys * t_end / 1.0;
   const std::size_t settle = std::size_t(drop / v);        // to touchdown
-  const std::size_t nsteps = settle + std::size_t(tmax * double(b) / v);
+  const std::size_t nsteps = settle + std::size_t(r.tau_end * double(b) / v);
   const Real rlr = Real(rho_l), rhr = Real(rho_h);
   auto dens = KOKKOS_LAMBDA(Index n) {
     return rlr + (rhr - rlr) * phiv(n);
   };
 
+  // WAGNER'S EQ. (80) IS THE SEMI-WEDGE, and so is the P their Fig. 9 plots:
+  // "the force experienced by the semi-wedge", "the resultant of the pressures
+  // acting upon the semi-wedge". PenalisedBody returns the reaction on the
+  // WHOLE body, both faces, so it is halved here. Getting this wrong is a
+  // clean factor of two that looks like a modelling error rather than a
+  // bookkeeping one: it put both angles at about +230 % against Wagner while
+  // the 1/tan^2(phi) scaling between them stayed correct to 4 %, which is the
+  // signature of a constant factor and not of physics.
+  // THE MEASUREMENT IS THE PRESSURE OVER THE WETTED SEMI-WEDGE, NOT THE BODY
+  // REACTION, and that is the substantive difference from the first version of
+  // this case. Their driver sums the nodal pressure at the surface markers
+  // over half the wedge and never uses the immersed-boundary reaction for the
+  // Wagner comparison at all.
+  //
+  // It matters for more than bookkeeping. A reaction force includes the
+  // added-mass impulse of starting the body, which is what forced the whole
+  // release-height apparatus above: released on the surface, the reaction put
+  // F* = 35.8 at contact against a Wagner value of zero. A surface-pressure
+  // sum does not see that impulse, which is why their wedge can start with its
+  // apex ON the undisturbed surface and no drop at all.
+  //
+  // Markers run from the apex out to the knuckle on ONE side, spaced ds = 0.5
+  // as theirs are, and the pressure is taken at the nearest node and weighted
+  // by the local density -- press[id] * rho[id] in their notation, where press
+  // is the zeroth moment and is the normalised pressure on this path.
+  const int NM = int(double(b) / ds) + 1;
+  const double tanb = std::tan(phi);
+  constexpr double cs2v = 1.0 / 3.0;
+  auto hrho = Kokkos::create_mirror_view(fl.rho());
+  auto hphi = Kokkos::create_mirror_view(pf.phi());
   const double norm = rho_h * v * v * double(b);
   for (std::size_t step = 0; step <= nsteps; ++step) {
     fl.compute_macroscopic();
-    const auto R = body.refresh(dens);           // after macroscopic, before step
-    if (!std::isfinite(double(R.fy))) {
-      r.finite = false;  r.steps = step;
-      r.tau_died = (double(step) - double(settle)) * v / double(b);
-      break;
-    }
+    body.refresh(dens);                  // after macroscopic, before the step
     if (step >= settle && probe > 0 && (step - settle) % std::size_t(probe) == 0) {
+      Kokkos::deep_copy(hrho, fl.rho());
+      Kokkos::deep_copy(hphi, pf.phi());
+      const double cxn = double(body.shape.cx), cyn = double(body.shape.cy);
+      double P = 0;
+      bool ok = true;
+      for (int k = 0; k < NM; ++k) {
+        const double xk = cxn - double(k) * ds;      // apex outward, one side
+        const double yk = cyn + (cxn - xk) * tanb;
+        const Index ii = Index(xk + double(d.hx));
+        const Index jj = Index(yk + double(d.hy));
+        if (ii < 0 || ii >= nx + 2 * d.hx || jj < 0 || jj >= ny + 2 * d.hy) continue;
+        const Index n = d.id(Index(xk), Index(yk));
+        const double pt = double(hrho(n));
+        const double rl2 = rho_l + (rho_h - rho_l) * double(hphi(n));
+        if (!std::isfinite(pt)) { ok = false; break; }
+        // p_phys = p~ rho cs2, and the force is the integral of it along the
+        // surface: ds per marker, times cos(phi) for the vertical component,
+        // over a face whose arc length per unit x is 1/cos(phi) -- the two
+        // cosines cancel. Their live line carries neither cs2 nor ds (their
+        // commented-out bilinear branch does carry the cs2), so this is the
+        // physical force rather than a transcription of that sum.
+        P += pt * rl2 * cs2v * ds;
+      }
+      if (!ok) { r.finite = false; r.steps = step;
+                 r.tau_died = (double(step) - double(settle)) * v / double(b);
+                 break; }
       const double t = double(step - settle) * v / double(b);
       r.tau.push_back(t);
-      r.fstar.push_back(double(R.fy) / norm);
+      r.fstar.push_back(P / norm);
     }
     fl.step(true);
     pf.refresh();
@@ -327,14 +399,19 @@ Run run(double deg, Index b, double v, double ratio, double re, double we,
   if (dump && *dump) {
     const std::string p = std::string("results/M_wedge/") + dump + ".dat";
     if (std::FILE* f = std::fopen(p.c_str(), "w")) {
-      std::fprintf(f, "# wedge deadrise=%g b=%d v=%g ratio=%g Re=%g We=%g\n",
-                   deg, int(b), v, ratio, re, we);
-      std::fprintf(f, "# Wagner slope pi^3/(8 tan^2 phi) = %.6f, valid to "
-                      "tau = %.4f\n", r.wagner, r.tau_valid);
-      std::fprintf(f, "# tau  F/(rho_H v^2 b)  Wagner\n");
+      std::fprintf(f, "# wedge deadrise=%g b=%d u_lat=%g ratio=%g tau_f=%.5f "
+                      "Re_eff=%.0f We=%g\n",
+                   deg, int(b), v, ratio, r.tau_f, r.re_eff, we);
+      std::fprintf(f, "# Wagner slope pi^3/(8 tan^2 phi) = %.6f; run ends at "
+                      "tau = %.5f, which is %.3f of tau_valid = %.5f\n",
+                   r.wagner, r.tau_end, r.tau_end / r.tau_valid, r.tau_valid);
+      std::fprintf(f, "# dx = %.4e m, dt = %.4e s\n", r.dx, r.dt);
+      std::fprintf(f, "# F is the SEMI-wedge, as theirs is\n");
+      std::fprintf(f, "# tau  F/(rho_H v^2 b)  Wagner  t_ms\n");
       for (std::size_t i = 0; i < r.tau.size(); ++i)
-        std::fprintf(f, "%.6f %.8e %.8e\n", r.tau[i], r.fstar[i],
-                     r.wagner * r.tau[i]);
+        std::fprintf(f, "%.8f %.8e %.8e %.6f\n", r.tau[i], r.fstar[i],
+                     r.wagner * r.tau[i],
+                     1e3 * r.tau[i] * 1.0 / (v_phys));
       std::fclose(f);
     }
   }
@@ -345,28 +422,28 @@ Run run(double deg, Index b, double v, double ratio, double re, double we,
 
 //------------------------------------------------------------------------------
 int main(int argc, char** argv) {
-  const double v     = arg_num(argc, argv, "-v", 0.02);
-  const Index  b     = Index(arg_num(argc, argv, "-b", 80));
-  const double ratio = arg_num(argc, argv, "-ratio", 100.0);
-  const double re    = arg_num(argc, argv, "-re", 100.0);
-  const double we    = arg_num(argc, argv, "-we", 1000.0);
-  const double g     = arg_num(argc, argv, "-g", 0.0);
-  const double iw    = arg_num(argc, argv, "-iw", 4.0);
-  // In half-beams, and 0.75 is not a round number picked for looks. The
-  // release is impulsive however high it is, and the acoustic pulse it launches
-  // has to leave the measurement window; the domain is 8b wide, so one crossing
-  // is 8b/cs steps and the fall to touchdown is drop*b/v. At v = 0.02 and
-  // cs = 0.577 those are equal when drop = 0.28, so 0.75 buys about 2.7
-  // crossings AT EVERY b -- which is why it is a fraction of the body and not a
-  // fixed number of cells. See the banner for what 20 cells did instead.
-  const double dropf = arg_num(argc, argv, "-drop", 0.75);   // in half-beams
-  const double wlo   = arg_num(argc, argv, "-wlo", 0.25);
-  const double whi   = arg_num(argc, argv, "-whi", 0.70);
-  const double tmax  = arg_num(argc, argv, "-tmax", 0.0);   // 0 = 1.5x the window
-  const double one   = arg_num(argc, argv, "-phi", 0.0);
-  const bool   dump  = arg_flag(argc, argv, "-dump");
+  // Their Sec. III.G, as stated there: deadrise 2 and 3 degrees, semi-wedge
+  // D = 1 m at 500 grid points, lattice 2000 x 1000, v = 1 m/s, water over
+  // air, and the pressure resultant compared to Wagner out to a few ms.
+  const double v      = arg_num(argc, argv, "-ulat", 0.01);   // LATTICE speed
+  const double v_phys = arg_num(argc, argv, "-vphys", 1.0);   // m/s
+  const Index  b      = Index(arg_num(argc, argv, "-b", 500));
+  const Index  nx     = Index(arg_num(argc, argv, "-nx", 2000));
+  const Index  ny     = Index(arg_num(argc, argv, "-ny", 1000));
+  const double tms    = arg_num(argc, argv, "-tms", 6.1);     // end time, ms
+  const double ratio  = arg_num(argc, argv, "-ratio", 100.0); // THEIR value, not 816
+  const double tau_t  = arg_num(argc, argv, "-tau", 0.0);    // 0 = from nu_phys
+  const double we     = arg_num(argc, argv, "-we", 1000.0);
+  const double g      = arg_num(argc, argv, "-g", 0.0);
+  const double iw     = arg_num(argc, argv, "-iw", 4.0);
+  const double one    = arg_num(argc, argv, "-phi", 0.0);
+  const bool   dump   = arg_flag(argc, argv, "-dump");
   const bool   rsweep = arg_flag(argc, argv, "-ratiosweep");
-
+  const bool   tsweep = arg_flag(argc, argv, "-tausweep");
+  const double drop   = arg_num(argc, argv, "-drop", 0.0);    // theirs starts ON the surface
+  const double visrat = arg_num(argc, argv, "-visrat", 15.0); // nu_air / nu_water
+  const double wlo    = arg_num(argc, argv, "-wlo", 0.30);
+  const double whi    = arg_num(argc, argv, "-whi", 0.95);
   Kokkos::initialize(argc, argv);
   int status = 0;
   {
@@ -374,38 +451,44 @@ int main(int argc, char** argv) {
     std::printf("D2Q9 multiphase central moments + D2Q9 conservative "
                 "Allen-Cahn, volume penalisation\n");
     std::printf("backend %s   precision %s\n", ExecSpace::name(), precision_name());
-    std::printf("  v = %g, half-beam b = %d, density ratio %g "
-                "(THEIRS IS 816 -- see the banner)\n", v, int(b), ratio);
-    std::printf("  Re = v b / nu = %g, We = rho v^2 b / sigma = %g, g = %g\n",
-                re, we, g);
+    std::printf("  their setup: D = 1 m at b = %d points, lattice %d x %d,\n"
+                "  v = %g m/s, deadrise 2 and 3 deg, water over air (ratio %g)\n",
+                int(b), int(nx), int(ny), v_phys, ratio);
+    std::printf("  u_lat = %g, We = %g, g = %g\n", v, we, g);
     std::printf("  Wagner: F/(rho_H v^2 b) = pi^3 tau / (8 tan^2 phi), "
-                "tau = v t / b\n");
-    std::printf("  valid while the spray root is on the face, "
-                "tau < 2 tan(phi)/pi\n\n");
+                "tau = v t / D\n");
+    std::printf("  his result holds while the spray root is on the face,\n"
+                "  tau < 2 tan(phi)/pi -- and their 4 ms stops well short of "
+                "it\n\n");
 
     std::vector<double> angles;
     if (one > 0) angles.push_back(one);
-    else         angles = {10.0, 15.0, 20.0, 30.0, 45.0};
+    else         angles = {2.0, 3.0};
 
-    std::printf("  %6s %9s %11s %11s %9s %8s %9s\n", "phi", "tau_max",
-                "slope", "Wagner", "dev", "R^2", "tau_f");
+    const double dxp = 1.0 / double(b), dtp = v * dxp / v_phys;
+    std::printf("  dx = %.3f mm, dt = %.3e s; %.0f steps to t = %g ms\n",
+                dxp * 1e3, dtp, tms * 1e-3 / dtp, tms);
+    const double nul = (tau_t > 0.5) ? (tau_t - 0.5) / 3.0
+                                     : 1e-6 / (dxp * dxp / dtp);
+    std::printf("  nu_lat = %.3e, tau = %.6f, Re = u_lat b / nu = %.3e\n"
+                "  which IS their physical v D / nu -- reachable only because\n"
+                "  the run is ~300 steps. -tau overrides it.\n\n",
+                nul, 3.0 * nul + 0.5, v * double(b) / nul);
+
+    std::printf("  %6s %10s %10s %11s %11s %9s %8s\n", "phi", "tau_end",
+                "of valid", "slope", "Wagner", "dev", "R^2");
     std::printf("  %s\n", std::string(72, '-').c_str());
 
-    std::vector<double> devs;
     for (double deg : angles) {
       char tag[96];
-      std::snprintf(tag, sizeof tag, "wedge_phi%g_ratio%g", deg, ratio);
-      const double tm = (tmax > 0) ? tmax : 1.5 * (2.0 * std::tan(deg * PI / 180.0) / PI);
-      const Run r = run(deg, b, v, ratio, re, we, g, iw, tm,
-                        dropf * double(b), 20, wlo, whi, dump ? tag : "");
+      std::snprintf(tag, sizeof tag, "wedge_phi%g_tau%g", deg, tau_t);
+      const Run r = run(deg, b, nx, ny, v, v_phys, ratio, tau_t, we, g, iw,
+                        tms * 1e-3, drop, visrat, 1e-6, 5, wlo, whi,
+                        dump ? tag : "");
       const double dev = 100.0 * (r.slope / r.wagner - 1.0);
-      devs.push_back(std::fabs(dev));
-      std::printf("  %6.1f %9.4f %11.4f %11.4f %+8.1f%% %8.4f %9.5f%s\n",
-                  deg, r.tau_valid, r.slope, r.wagner, dev, r.r2, r.tau_f,
-                  r.finite ? "" : "   DIVERGED");
-      if (!r.finite)
-        std::printf("         died at step %zu, tau = %.4f of %.4f\n",
-                    r.steps, r.tau_died, r.tau_valid);
+      std::printf("  %6.1f %10.5f %10.3f %11.2f %11.2f %+8.1f%% %8.4f%s\n",
+                  deg, r.tau_end, r.tau_end / r.tau_valid, r.slope, r.wagner,
+                  dev, r.r2, r.finite ? "" : "   DIVERGED");
       std::fflush(stdout);
       if (!r.finite) status = 1;
     }
@@ -418,7 +501,7 @@ int main(int argc, char** argv) {
                 "  is a shape the simulation cannot fit by accident.\n");
 
     if (rsweep) {
-      std::printf("\n  Density-ratio sweep at phi = 20 deg. Slamming is a\n"
+      std::printf("\n  Density-ratio sweep at phi = 2 deg. Slamming is a\n"
                   "  water-side phenomenon and Wagner has no air at all, so the\n"
                   "  slope should barely move; this is where that is measured\n"
                   "  rather than assumed.\n\n");
@@ -428,8 +511,9 @@ int main(int argc, char** argv) {
         char tag[96];
         std::snprintf(tag, sizeof tag, "wedge_phi20_ratio%g", q);
         const double tm = 1.5 * (2.0 * std::tan(20.0 * PI / 180.0) / PI);
-        const Run r = run(20.0, b, v, q, re, we, g, iw, tm,
-                          dropf * double(b), 20, wlo, whi, dump ? tag : "");
+        const Run r = run(2.0, b, nx, ny, v, v_phys, q, tau_t, we, g, iw,
+                          tms * 1e-3, drop, visrat, 1e-6, 5, wlo, whi,
+                          dump ? tag : "");
         std::printf("  %8.0f %11.4f %+8.1f%% %8.4f%s\n", q, r.slope,
                     100.0 * (r.slope / r.wagner - 1.0), r.r2,
                     r.finite ? "" : "   DIVERGED");

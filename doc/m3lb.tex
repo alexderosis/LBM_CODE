@@ -4508,12 +4508,16 @@ recorded as one.
   Table~VIII at three Reynolds numbers --- the pass. (b) the two 3-D cases
   against their Tables~IX and X, with the band their Table~IX collects from
   eight published models; being outside it from $t/t_0=1$ is the failure, drawn
-  rather than asserted. (c) wedge entry at three deadrise angles with Wagner's
-  line for each and the fit window shaded; the $30^\circ$ curve collapsing
-  inside the window has the same signature as (d) and is the same cause. (d)
-  the release height: identical impact and window, and at 20 cells the pulse
-  from the impulsive release returns inside the window and takes the fitted
-  slope from $29.55$ to $6.51$.}
+  rather than asserted. (c) and (d) are from a superseded parameterisation of the
+  wedge --- deadrise $10$--$45^\circ$ and a body-reaction force, before their
+  own $2$ and $3^\circ$ and their surface-pressure measure were adopted --- and
+  are kept because each records a way this case misleads: in (c) the
+  $30^\circ$ curve collapses inside the fit window with the same signature as
+  (d), and in (d) an identical impact gives a fitted slope of $29.55$ or
+  $6.51$ according to release height alone, because the pulse from an
+  impulsive release returns inside the window. The reaction force is what makes
+  both possible; the surface-pressure measure of Table~\ref{tab:enanwedge} is
+  not exposed to either.}
   \label{fig:enanrtwedge}
 \end{figure}
 
@@ -4621,8 +4625,9 @@ fail in a way no fitted constant hides. Normalising,
   \qquad \tau = \frac{v t}{b},
 \]
 so the comparison is a dimensionless slope depending on nothing but the
-deadrise angle, and the case needs no conversion out of lattice units despite
-the paper stating it in metres and seconds.
+deadrise angle. The case is stated in metres and seconds, and \emph{their}
+discretisation is stated too, so the conversion below follows theirs rather
+than being chosen here.
 
 \subparagraph{Penalisation in place of an immersed boundary.} The paper uses a
 Peskin IBM; this tree has volume penalisation, and \code{PenalisedBody.hpp}
@@ -4633,8 +4638,8 @@ that existing machinery --- a signed distance to the two faces with the same
 $\tanh$ smoothing the rectangle uses --- and the body was already able to be
 driven rather than free, which is what Wagner's constant-velocity entry needs.
 
-The one thing that costs is surface accuracy, and it is worth being precise
-about where. The product of two $\tanh$ indicators rounds a convex corner, and
+The one thing that costs is surface accuracy, and on this case it is the
+leading suspect for what does not reproduce. The product of two $\tanh$ indicators rounds a convex corner, and
 a wedge apex is sharper than a rectangle's; measured as the integral of $\chi$
 over the nominal area, the penalised wedge is larger than nominal by 0.03\% at
 $45^\circ$, 0.23\% at $15^\circ$ and 0.50\% at $10^\circ$ for $b=100$ and a
@@ -4643,113 +4648,81 @@ The excess sits at the apex, which for water entry is exactly where the impact
 starts, so a shallow-deadrise run wants a large body rather than a small one
 with the smoothing turned down.
 
-\subparagraph{Results.} Table~\ref{tab:enanwedge} is the deadrise sweep at
-$b=80$.
+\subparagraph{Their discretisation, which is stated and is worth following.}
+The semi-wedge is 500 grid points, the lattice is $2000\times1000$, $v=1$~m/s
+and $D=1$~m, so $\mathrm{d}x = 2$~mm and $\mathrm{d}t = u_{\rm lat}\,
+\mathrm{d}x/v = 2\e{-5}$~s at their $u_{\rm lat}=0.01$. The whole run to
+6.1~ms is then \emph{305 steps}.
+
+That last number is what makes the rest of it possible. Water at
+$\nu=10^{-6}$~m$^2$/s gives $\nu_{\rm lat}=5\e{-6}$ and $\tau=0.500015$, which
+is $Re=10^6$ --- a Reynolds number this document records elsewhere as out of
+reach, because the relaxation time sits on the stability floor. It is reachable
+here for one reason: in 305 steps nothing has time to go unstable. The
+temptation is to stretch the run instead by lowering $u_{\rm lat}$, which
+forces $\nu_{\rm lat}$ up and the effective Reynolds number down by orders of
+magnitude; that is the wrong trade for this case and it was the first one tried
+here.
+
+Two further details are taken from the same source rather than from the paper's
+prose, because they differ. The density ratio is \textbf{100}, not the 816 of
+water over air that the text quotes; and the light phase is 15 times more
+viscous in kinematic terms, $\nu_{\rm air}/\nu_{\rm water}$, rather than
+equally viscous.
+
+\subparagraph{The measurement is the surface pressure, not the body reaction.}
+This is the substantive difference between the two ways of doing this case, and
+getting it wrong costs more than a factor. Their driver sums the nodal pressure
+at the surface markers over half the wedge; the immersed-boundary reaction is
+never used for the Wagner comparison at all.
+
+A reaction force carries the added-mass impulse of starting the body. Released
+with its apex on the undisturbed surface, that impulse put $F^*=35.8$ at the
+instant of contact against a Wagner value of zero there --- five times the
+signal, with the force then \emph{decaying} through the window instead of
+growing. A surface-pressure sum does not see it, which is why their wedge can
+start on the surface and fall with no release height at all, while a
+reaction-based version of this case needs one and needs it tuned against the
+domain's acoustic time.
+
+So the force here is $\int p\,\mathrm{d}s$ over the wetted semi-wedge, with
+$p = \tilde p\,\rho\,c_s^2$ and markers at their spacing of half a cell.
+
+\subparagraph{Results.}
 
 \begin{table}[htbp]
   \centering
-  \caption{Wedge entry against Wagner. The slope is fitted over the middle of
-  Wagner's own validity window, $0.25 < \tau/\tau_{\rm valid} < 0.70$ with
-  $\tau_{\rm valid} = 2\tan\varphi/\pi$; below that the wetted length is a few
-  cells across, above it the spray root nears the knuckle.}
+  \caption{Wedge entry against Wagner at their two deadrise angles and their
+  discretisation. The slope is of $F^*$ against $\tau=vt/D$; Wagner's is
+  $\pi^3/(8\tan^2\varphi)$.}
   \label{tab:enanwedge}
-  \begin{tabular}{rrrrrl}
+  \begin{tabular}{rrrrr}
     \toprule
-    $\varphi$ & Slope & Wagner & Dev. & $R^2$ & \\
+    $\varphi$ & Slope & Wagner & Dev. & $R^2$ \\
     \midrule
-    $10^\circ$ & 107.15 & 124.66 & $-14.0$\% & 0.991 & \\
-    $15^\circ$ &  60.64 &  53.98 & $+12.3$\% & 0.999 & \\
-    $20^\circ$ &  29.55 &  29.26 & $+1.0$\%  & 0.997 & \\
-    $30^\circ$ &   7.69 &  11.63 & $-33.9$\% & 0.106 & \textit{see below} \\
-    $45^\circ$ &   3.15 &   3.88 & $-18.6$\% & 0.208 & \textit{reflections} \\
+    $2^\circ$ & 2518.6 & 3178.3 & $-20.8$\% & 0.9904 \\
+    $3^\circ$ & 1727.1 & 1411.1 & $+22.4$\% & 0.9906 \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-At $10$, $15$ and $20$ degrees the force is linear in time to $R^2 \ge 0.99$
-and the slope is within 14\%, 12\% and 1\% of Wagner. That is the regime Wagner
-is asymptotically valid in --- his result is derived for vanishing $\varphi$ ---
-and the paper reports the same trend of improving agreement as the angle falls.
+Both angles sit within about 22\% of Wagner, and the force is linear in time to
+$R^2=0.99$ --- which is the half of Wagner's result that a simulation can fail
+outright, and it does not.
 
-The two largest angles failed on the first pass, and the cause was one thing
-rather than two. Wagner's window $\tau_{\rm valid} = 2\tan\varphi/\pi$
-\emph{grows with the deadrise angle}, so at $45^\circ$ the fit runs to 1783
-steps after touchdown while an acoustic wave crosses the periodic domain in
-1109: the fit was being taken through the simulation's own reflections. At
-$30^\circ$ the step-count bound said the window closed just inside that, and
-the force appeared instead to saturate --- which was written up here as
-unexplained until Fig.~\ref{fig:enanrtwedge}(c) was drawn and showed the
-$30^\circ$ curve collapsing to near zero inside the window, with exactly the
-signature of panel (d). It was the same artefact, and looking at the curve was
-what settled it; a step-count estimate had said otherwise.
+\subparagraph{What does not reproduce.} The ratio between the two angles is
+1.46 where Wagner's $1/\tan^2\varphi$ gives 2.25, so the scaling \emph{with}
+deadrise is under-reproduced even though both magnitudes are close. The
+$2^\circ$ case comes in low and the $3^\circ$ high.
 
-The remedy is to size the domain by the acoustic time rather than by the body,
-which is what \code{validation/enan\_wedge} now does: it takes
-$n_x = \max(8b,\,1.6\,c_s \times 0.7\,\tau_{\rm valid}\,b/v)$, leaving
-$10^\circ$ and $20^\circ$ untouched at $8b$ and widening $30^\circ$ to 950
-cells and $45^\circ$ to 1646. A fixed multiple of the body cannot work here,
-because the requirement scales with $\tan\varphi$ and the body does not.
-
-\subparagraph{Two traps, one of which nearly produced a wrong conclusion.} The
-first is the gauge: the multiphase populations carry a normalised pressure, not
-a density, so seeding \code{FlowState} with $\rho$ starts a run that is finite,
-plausible, and dead fifteen steps later with nothing to indicate why.
-
-The second is worth more space. Released with its apex on the surface, the
-wedge delivers an added-mass impulse that has nothing to do with slamming:
-$F^*=35.8$ at contact against a Wagner value of zero there and about 7 at the
-end of the window, and the force then \emph{decays} through the window instead
-of growing. Releasing it above the surface fixes the trend --- but the drop
-must also outlast the acoustic pulse the impulsive release launches, and that
-is a second requirement. Released 20 cells up at $b=80$, the force rises
-cleanly to $F^*=5.84$ and then collapses to 1.29 and recovers, in the middle of
-the fit window. It looks exactly like the spray root doing something physical.
-Changing only the drop settles it:
-
-\begin{center}
-\begin{tabular}{lrrr}
-  \toprule
-  Drop & Slope & Dev. & $R^2$ \\
-  \midrule
-  20 cells & 6.51  & $-77.8$\% & 0.034 \\
-  60 cells & 29.55 & $+1.0$\%  & 0.997 \\
-  \bottomrule
-\end{tabular}
-\end{center}
-
-Same impact, same window, same everything else. The natural next move would
-have been a resolution study, and it would have been actively misleading:
-$b=40$ scores \emph{better} than $b=80$ at the short drop, because a smaller
-domain moves the artefact rather than removing it. The default is now $0.75b$,
-which buys about 2.7 acoustic crossings at every $b$ --- a fixed cell count
-would have hidden the same bug at a different size.
-
-\subparagraph{The density ratio, which turned out not to be the obstacle.}
-Water over air is $1000/1.225 = 816$, and the phase field here is characterised
-to about 100, so the expectation was that the paper's own fluids would be out
-of reach and a reduced ratio would have to be reported instead. Measured at
-$\varphi=20^\circ$:
-
-\begin{center}
-\begin{tabular}{rrrr}
-  \toprule
-  Ratio & Slope & Dev. & $R^2$ \\
-  \midrule
-  10  & 103.29 & $+253.1$\% & 0.986 \\
-  50  &  30.06 & $+2.8$\%   & 0.987 \\
-  100 &  29.55 & $+1.0$\%   & 0.997 \\
-  200 &  31.14 & $+6.4$\%   & 0.999 \\
-  816 &  32.73 & $+11.9$\%  & 0.9999 \\
-  \bottomrule
-\end{tabular}
-\end{center}
-
-The paper's 816 runs, with the best linearity of the sweep, so this case does
-not depend on the reduced-ratio approximation at all; only a ratio of 10 fails,
-and it fails loudly. The deviation grows mildly with the ratio while Wagner ---
-who has no air whatever --- ought to be approached as the air thins, so two
-effects are working against each other here and this sweep does not separate
-them.
+The candidate is resolution at the apex, and it is a candidate rather than a
+conclusion. At $b=500$ the $2^\circ$ wedge is 17.5 cells tall against 26.2 at
+$3^\circ$, so the shallower angle --- the one that reads low --- is the less
+resolved of the two, and volume penalisation represents a surface by a diffuse
+indicator a cell or so thick where a Peskin immersed boundary puts markers on
+it exactly. That difference is at its worst on a shallow apex, which is
+precisely where a slamming pressure lives. Testing it needs a resolution ladder
+at fixed deadrise, which has not been run.
 
 %------------------------------------------------------------------------------
 \subsection{Thermal flows}
