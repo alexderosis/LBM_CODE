@@ -2901,6 +2901,7 @@ The cost is two population arrays instead of one, which for a method that
 deletes an entire phase is not the expensive part.
 
 \subsection{A standing gravity wave}
+\label{sec:gravitywave}
 
 The validation case is the linear dispersion relation
 $\omega^2 = g k \tanh(k h)$, and it is that rather than a dam break because a
@@ -2972,11 +2973,41 @@ tolerance being chased.
 \section{Validation}
 \label{sec:validation}
 
-Every scheme is accompanied by the test that establishes it. The suite runs in
-both FP64 and FP32 and consists of ten executables; the numbers below are FP64
-unless stated.
+Every scheme in this document is accompanied by the test that establishes it,
+and this section collects all of them. It runs in both FP64 and FP32; the
+numbers below are FP64 unless stated.
 
-\subsection{Poiseuille flow: wall placement and the magic parameter}
+The tests come from three places, and the difference matters when reading a
+number. Most were written alongside the feature they exercise, and are chosen to
+isolate it: an exact solution where one exists, a convergence rate where it does
+not. Two blocks instead work through somebody else's published suite without
+modification, so that the numbers can be put beside theirs --- the fluid-only
+campaign of De Rosis and Coreixas (\S\ref{sec:campaign}) and the thermal suite of
+Zhou, De Rosis and Revell (\S\ref{sec:zhou}). Where a test is one of those, its
+heading says so.
+
+The organisation below is by physics rather than by provenance: single-phase
+flow, multiphase flow, thermal transport, magnetohydrodynamics. A few tests sit
+awkwardly in that scheme and are placed where the bulk of their content lives
+rather than split --- the boundary-condition survey of \S\ref{sec:bcvalid} is
+mostly velocity walls and sits under single-phase flow, but its magnetic-wall
+part is the Hartmann validation and \S\ref{sec:val:mhd} points back to it.
+
+\paragraph{On the field snapshots.} The tables say whether a number is right.
+The figures say whether the \emph{flow} is right, which is a different question
+and one a norm cannot answer: a scheme can hit an integral quantity while
+getting the structure wrong. Every field shown is the one the corresponding test
+actually converged to, dumped from the run that produced the numbers quoted for
+it. Signed quantities --- vorticity, current --- use a diverging map centred on
+zero; quantities with no meaningful zero --- temperature, speed --- use a
+sequential one. Where the colour saturates below the peak the caption says so:
+several of these fields are strongly localised, and scaling by the maximum
+leaves the structure that matters invisible.
+
+%------------------------------------------------------------------------------
+\subsection{Single-phase flows}
+\label{sec:val:single}
+\subsubsection{Poiseuille flow: wall placement and the magic parameter}
 \label{sec:poiseuille}
 
 Force-driven plane Poiseuille flow, periodic in $x$, halfway bounce-back walls in
@@ -3039,8 +3070,7 @@ These two assertions are FP64-only by design: at $H=64$ the discretisation error
 is $3\times10^{-4}$, which in FP32 lies below the accumulated round-off floor of
 about $10^{-3}$. Loosening the tolerance would not fix that, it would only stop
 the test measuring anything.
-
-\subsection{Decaying flows with exact solutions}
+\subsubsection{Decaying flows with exact solutions}
 
 Three periodic flows, chosen so that each isolates something the others cannot.
 
@@ -3069,8 +3099,7 @@ discrete Laplacian, which differs from $\nu k^2$ at $O(k^2)$. What is asserted i
 therefore that the error converges away at second order, not that it is small at
 any given $N$. Diffusive scaling $U\sim1/N$ keeps the Mach-number error second
 order alongside the spatial error.
-
-\subsection{Grid convergence: all lattices, all operators}
+\subsubsection{Grid convergence: all lattices, all operators}
 
 A dedicated sweep (\code{validation/grid\_convergence}) covers every
 lattice $\times$ operator combination over a resolution ladder and reports 92 data
@@ -3164,8 +3193,7 @@ central moments & $2.15\times10^{-3}$ & $\bm{1.38\times}$ better (D3Q27) \\
 \noindent TRT is the most accurate in a periodic bulk flow, because the magic
 parameter tunes the third-order modes that the moment operators send straight to
 equilibrium. On the off-axis wave the ordering reverses.
-
-\subsection{Galilean invariance}
+\subsubsection{Galilean invariance}
 \label{sec:galilean}
 
 Superimposing a uniform velocity $U_0$ on a solution only translates it, so the
@@ -3201,434 +3229,7 @@ Two findings deserve emphasis.
 \noindent Every residual scales as $U_0^2$ (fitted powers $2.00$--$2.10$), so what
 remains is the weakly-compressible $O(\mathrm{Ma}^2)$ error of the method itself,
 not frame dependence of the collision.
-
-
-\subsection{Thermal transport}
-
-Two exact solutions of the advection--diffusion equation, with amplitude and
-Peclet number both scaled diffusively ($U\sim1/N$) so that the comparison is a
-convergence study rather than a measurement of how far the wave travelled:
-
-\begin{center}\small
-\begin{tabular}{lcccc}
-\toprule
-case & order (FP64) & order (FP32) & $D_{\rm eff}$ rel.\ err & phase err \\
-\midrule
-D2Q5 diffusion            & 2.00 & 2.03 & $1.5\times10^{-3}$ & $4.5\times10^{-14}$ \\
-D3Q7 diffusion            & 2.00 & 2.00 & $1.3\times10^{-3}$ & $2.8\times10^{-14}$ \\
-D2Q5 advection--diffusion & 2.00 & 2.02 & $1.1\times10^{-3}$ & $2.5\times10^{-4}$ \\
-D3Q7 advection--diffusion & 1.99 & 2.00 & $7.2\times10^{-4}$ & $2.3\times10^{-4}$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\noindent The phase is measured as well as the amplitude: an error in the
-coupling term puts the wave in the wrong \emph{place}, which an amplitude check
-alone would not detect.
-
-\subsection{Open boundaries: the Gaussian plume}
-\label{sec:plume}
-
-The open boundary of \S\ref{sec:scalaroutflow} is validated against the
-classical plume solution. A continuous point source of strength $Q$ at the
-origin in a uniform wind $U$ along $x$, with isotropic diffusivity $D$,
-satisfies $U\,\partial_x C = D(\partial_{yy}C + \partial_{zz}C)$ once
-streamwise diffusion is neglected. That is the two-dimensional diffusion
-equation with $x/U$ in place of time, so
-\begin{equation}
-  C(x,y,z) = \frac{Q}{4\pi D x}\,
-             \exp\!\left(-\frac{U(y^2+z^2)}{4Dx}\right),
-  \qquad \sigma(x) = \sqrt{\frac{2Dx}{U}} ,
-  \label{eq:plume}
-\end{equation}
-and integrating across the plume gives $U\!\iint C\,{\rm d}y\,{\rm d}z = Q$ at
-\emph{every} station --- which is the property the boundary condition has to
-preserve.
-
-Two tests are run, and they are deliberately of different kinds.
-
-\paragraph{Uniform-state invariance.} A constant field under a constant wind is
-an exact fixed point of equilibrium, collision, streaming and
-\eqref{eq:scalarout} alike, so this needs no analytic solution and no judgement
-about what ``close'' means. On $24^3$ with every face open, after $6\times10^4$
-steps:
-\begin{center}
-\begin{tabular}{lccc}
-\toprule
- & $\max|C-\bar{C}|$ & $\max|\Delta C|$ over $2000$ steps & $|\bar{C}-1|$ \\
-\midrule
-$u=0$    & $0$ & $0$ & $0$ \\
-$u=0.05$ & $3.1\times10^{-13}$ & $1.4\times10^{-15}$ & $6.8\times10^{-3}$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\noindent The first two columns are the criterion and are round-off. The third
-is a diagnostic, not a failure: with every face zero-gradient the problem is
-pure Neumann, so no constant is preferred and the level is not determined. The
-offset is D3Q7's first-order equilibrium, the $O(u^2)$ defect of
-\S\ref{sec:eqscalar}, and it scales accordingly --- $5.0\times10^{-4}$,
-$1.9\times10^{-3}$, $6.8\times10^{-3}$, $2.2\times10^{-2}$ at $u=0.0125$,
-$0.025$, $0.05$, $0.1$, i.e.\ as $u^{1.9}$. It is \emph{not} the initialiser
-laying down equilibrium at zero velocity, which was the obvious first
-suspicion: attaching the wind only after the field is laid down and settled
-reproduces the offset to six significant figures. Any problem with a Dirichlet
-cell in it, the plume below included, does not see this at all.
-
-\paragraph{The plume.} On $128\times64\times64$ with $U=0.05$, $D=0.01$
-($\omega=1.852$, $\mathrm{Pe}=640$), a source at $x=8$ and $Q=1$ per step,
-$x=0$ held at $C=0$ and the five remaining faces open:
-
-\begin{center}
-\begin{tabular}{rcccccc}
-\toprule
-$x$ & $\sigma$ & $\sqrt{2Dx/U}$ & err & $C_{\max}$ & $Q/4\pi Dx$ & flux$/Q$ \\
-\midrule
- 20 & 2.370 & 2.191 & $+8.2\%$ & $5.386\times10^{-1}$ & $6.632\times10^{-1}$ & $0.99962$ \\
- 44 & 3.901 & 3.795 & $+2.8\%$ & $2.048\times10^{-1}$ & $2.211\times10^{-1}$ & $0.99962$ \\
- 68 & 4.982 & 4.899 & $+1.7\%$ & $1.266\times10^{-1}$ & $1.326\times10^{-1}$ & $0.99962$ \\
- 92 & 5.867 & 5.797 & $+1.2\%$ & $9.158\times10^{-2}$ & $9.474\times10^{-2}$ & $0.99962$ \\
-122 & 6.813 & 6.753 & $+0.9\%$ & $6.807\times10^{-2}$ & $6.981\times10^{-2}$ & $0.99963$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\noindent \textbf{The flux column is the boundary-condition test}, and it is
-flat to five decimal places from $x=20$ to the last interior cell: worst
-deviation $0.038\%$. A reflecting exit would pile concentration up and make it
-climb; an over-draining one would make it fall. Neither happens, and nothing
-propagates back upstream. This is the same measurement as the aorta's
-inlet/outlet balance of \S\ref{sec:aortabc}, for the same reason.
-
-The width column tests something the uniform-state test cannot see at all,
-namely $D = c_s^2(1/\omega - 1/2)$ with $c_s^2 = 1/4$: a wrong speed of sound
-appears immediately as a slope error. The agreement improves monotonically
-downstream, from $+8.2\%$ at $x=20$ to $+0.9\%$ at $x=122$, which is the
-signature of the finite source: \eqref{eq:plume} is a \emph{point} source and
-the code releases from a $3^3$ box, so the two can only agree once the plume is
-much wider than the box. The residual near $1\%$ is consistent with the
-$O(1/\mathrm{Pe}) \approx 0.2\%$ error of neglecting streamwise diffusion in
-\eqref{eq:plume} together with D3Q7's $O(u^2)$ equilibrium defect.
-
-\subsection{Natural convection}
-\label{sec:natconv}
-
-Differentially heated square cavity, hot and cold vertical walls, adiabatic
-horizontal walls, no-slip throughout, against the benchmark of de Vahl Davis
-\cite{devahldavis1983} at $\mathrm{Pr}=0.71$. Fixing the characteristic velocity
-$u_c=\sqrt{g\beta\,\Delta T\,H}$ sets the Mach number, and then
-$\nu = H u_c\sqrt{\mathrm{Pr}/\mathrm{Ra}}$ follows.
-
-\begin{center}\small
-\begin{tabular}{llcccccc}
-\toprule
-$\mathrm{Ra}$ & $N$ & op & $\mathrm{Nu}$ & benchmark & dev. & $u_{\max}$ & reference \\
-\midrule
-$10^3$ & 64 & BGK & 1.1176 & 1.118 & $-0.04\%$ & 3.65 & 3.649 \\
-       &    & TRT & 1.1179 & 1.118 & $-0.01\%$ & 3.65 & \\
-$10^4$ & 64 & BGK & 2.2431 & 2.243 & $+0.00\%$ & 16.14 & 16.178 \\
-       &    & TRT & 2.2479 & 2.243 & $+0.22\%$ & 16.14 & \\
-$10^5$ & 96 & BGK & 4.5169 & 4.519 & $-0.05\%$ & 34.47 & 34.730 \\
-       &    & TRT & 4.5323 & 4.519 & $+0.29\%$ & 34.52 & \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\noindent Within $0.3\%$ everywhere. Note that BGK slightly edges TRT here,
-contrary to the expectation that the magic parameter would help: the wall
-placement it fixes is a \emph{momentum} boundary, whereas what limits this case is
-the thermal boundary layer, resolved by the scalar lattice.
-
-\subsection{Rayleigh--B\'enard convection}
-\label{sec:rbconv}
-\label{sec:rb}
-
-A layer of depth $H$ heated from below and cooled from above, periodic
-horizontally, no-slip and isothermal on both plates. This exercises the scalar
-Dirichlet condition in the configuration it was designed for, and couples it to
-the buoyancy force of \S\ref{sec:boussinesq}.
-
-\paragraph{Wall pairing.} The scalar uses anti-bounce-back and the fluid halfway
-bounce-back, so \emph{both} wall planes sit at $y=0.5$ and $y=H+0.5$ and the
-layer is exactly $H$ lattice units deep. Pairing an on-node condition for one
-field with a midway condition for the other would place the thermal and viscous
-boundaries half a spacing apart, which corrupts $\mathrm{Ra}$ itself rather than
-merely adding an error. The box is one critical wavelength wide,
-$2\pi/k_c = 2.0158\,H$.
-
-\paragraph{Onset.} Linear stability of a rigid--rigid layer gives
-$\mathrm{Ra}_c = 1707.762$ at $k_cH = 3.117$. This is the sharpest single number
-this configuration can be asked for: the buoyancy coupling, both boundary
-conditions, the diffusivity calibration and the wall placement all feed into it,
-and an error in any one moves it. It is measured here by bisecting on the sign of
-the growth rate of the critical mode.
-\begin{center}\small
-\begin{tabular}{rllll}
-\toprule
-& \multicolumn{2}{c}{bounce-back $+$ anti-bounce-back} & \multicolumn{2}{c}{regularised $+$ moment} \\
-\cmidrule(lr){2-3}\cmidrule(lr){4-5}
-$H$ & $\mathrm{Ra}_c$ & deviation & $\mathrm{Ra}_c$ & deviation \\
-\midrule
-16 & 1764.0 & $+3.29\%$ & 1769.5 & $+3.61\%$ \\
-24 & 1730.5 & $+1.33\%$ & 1737.4 & $+1.73\%$ \\
-32 & 1718.9 & $+0.65\%$ & 1725.7 & $+1.05\%$ \\
-48 & 1712.1 & $\bm{+0.25\%}$ & 1716.8 & $+0.53\%$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-\noindent Both families converge on $1707.762$, the midway pair at
-$O(h^{2.3})$ and the on-node pair at $O(h^{1.6})$.
-
-\paragraph{Measuring the growth rate.} The obvious estimator --- the total
-kinetic energy --- does not work. Seeded at $10^{-6}$ it sits near round-off, and
-the resulting ``growth rate'' is not even monotonic in $\mathrm{Ra}$, which is
-impossible for a linear instability; it put $\mathrm{Ra}_c$ at 1749 rather than
-1719 at $H=32$. Projecting the vertical velocity onto the critical mode
-$\sin(kx)\sin(\pi y)$ instead rejects acoustic transients, round-off and the
-spurious currents of the initial state, and recovers a growth rate that varies
-smoothly and crosses zero cleanly.
-
-\paragraph{Nusselt number.} At $H=48$, $\mathrm{Pr}=0.71$. Two independent
-estimators are reported --- the wall gradient and the volume-averaged convective
-flux $1+\langle vT\rangle H/(D\,\Delta T)$. They measure different things, so
-their agreement is a convergence check and not a tautology.
-\begin{center}\small
-\begin{tabular}{rrlllr}
-\toprule
-$\mathrm{Ra}$ & $\mathrm{Ra}/\mathrm{Ra}_c$ & $Nu$ (wall) & $Nu$ (volume) & spread & $|u|_{\max}$ \\
-\midrule
-$1\,500$   & 0.88 & $1.0000$ & $1.0000$ & $6.0\e{-13}$ & $0.0000$ \\
-$2\,500$   & 1.46 & $1.4692$ & $1.4690$ & $1.3\e{-4}$  & $0.0038$ \\
-$5\,000$   & 2.93 & $2.1079$ & $2.1073$ & $3.0\e{-4}$  & $0.0059$ \\
-$10^{4}$   & 5.86 & $2.6490$ & $2.6475$ & $5.7\e{-4}$  & $0.0073$ \\
-$3\times10^{4}$ & 17.6 & $3.6144$ & $3.6089$ & $1.5\e{-3}$ & $0.0090$ \\
-$5\times10^{4}$ & 29.3 & $4.1523$ & $4.1424$ & $2.4\e{-3}$ & $0.0096$ \\
-$10^{5}$   & 58.6 & $4.9869$ & $4.9659$ & $4.2\e{-3}$  & $0.0103$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-\noindent Below onset the result is exact: $Nu = 1.0000$ with the two estimators
-agreeing to $6\e{-13}$ and $|u|_{\max}$ identically zero, so the conductive state
-is a fixed point of the coupled system to round-off. Above onset the estimators
-agree to better than $0.1\%$ up to $\mathrm{Ra}=10^4$ and to $0.42\%$ at
-$10^5$; the growth of that spread is the honest indicator that the top of the
-table is the least settled part. A power-law fit gives
-$Nu = 0.132\,\mathrm{Ra}^{0.319}$ overall and an exponent of $0.267$ for
-$\mathrm{Ra}\ge3\times10^4$.
-
-\paragraph{What is not claimed.} These $Nu$ have \emph{not} been compared against
-published tables. Values for two-dimensional rolls depend on aspect ratio and
-Prandtl number, and no reference set has been verified here, so no deviation
-column is given. What is verified is internal: the subcritical exactness, the
-agreement of two independent estimators, and $\mathrm{Ra}_c$ itself. Two further
-caveats apply to the highest rows: the box is one critical wavelength wide, which
-is the right choice for onset but restricts the roll structure at large
-$\mathrm{Ra}$, and above $\mathrm{Ra}\sim10^5$ two-dimensional convection may
-become time-dependent, in which case a single final-state $Nu$ should be replaced
-by a time average.
-
-\subsection{Magnetohydrodynamics: exact solutions}
-\label{sec:mhdexact}
-
-\begin{center}\small
-\begin{tabular}{lccc}
-\toprule
-case & order & recovered & rel.\ error \\
-\midrule
-resistive decay, $L_2$              & 2.00 & $\eta = 0.050110$   & $2.2\times10^{-3}$ \\
-shear Alfv\'en wave, phase speed    & 2.00 & $v_A = 0.050017$    & $3.4\times10^{-4}$ \\
-shear Alfv\'en wave, damping        & ---  & $(\nu+\eta)/2$      & $5.3\times10^{-3}$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-The shear Alfv\'en wave is an exact solution of the \emph{full nonlinear}
-equations, not merely the linearised ones: with $\uu\perp\bb_0$ and everything
-depending only on $x$, $(\uu\!\cdot\!\nabla)\uu$ vanishes identically while
-$(\bb\!\cdot\!\nabla)\bb$ does not, so the Lorentz coupling and the induction
-equation are both driven and both must be correct. Phase is measured as well as
-amplitude, because an error in the coupling produces the wrong wave \emph{speed}
-rather than the wrong amplitude.
-
-\paragraph{On $\nabla\!\cdot\!\bb$.} The two wave cases report
-$|\nabla\!\cdot\!\bb|$ at round-off, and \emph{this is meaningless}: in both,
-$b_x$ depends only on $y$ and $b_y$ only on $x$, so the divergence is structurally
-zero whatever the scheme does. Orszag--Tang is the only case in the suite that
-exercises the property, and there $\nabla\!\cdot\!\bb$ is \emph{not} preserved to
-machine precision: measured against the field's own gradient scale $k|\bb|$ it
-sits at truncation level and converges away at order 1.65. That is the honest
-claim, and it is stated here in place of the stronger one.
-
-\subsection{Orszag--Tang vortex}
-\label{sec:orszag}
-
-The Orszag--Tang vortex \cite{orszag1979} has no closed-form solution, so it is
-not validated against a formula. It is validated against published reference data
-and against structural properties. Initial conditions on a periodic box of side
-$L$:
-\begin{equation}
-  \uu(\xx,0) = u_0\big[-\sin y,\ \sin x\big], \qquad
-  \bb(\xx,0) = b_0\big[-\sin y,\ \sin 2x\big].
-\end{equation}
-
-
-\begin{figure}[htbp]
-\centering
-\setlength{\tabcolsep}{3pt}
-\begin{tabular}{cc}
-\includegraphics[width=0.40\textwidth]{ot_zeta_t05.png} &
-\includegraphics[width=0.40\textwidth]{ot_zeta_t1.png} \\[1mm]
-{\small (a) vorticity $\zeta$, $t=0.5$\,s} & {\small (b) vorticity $\zeta$, $t=1$\,s} \\[3mm]
-\includegraphics[width=0.40\textwidth]{ot_j_t05.png} &
-\includegraphics[width=0.40\textwidth]{ot_j_t1.png} \\[1mm]
-{\small (c) current $j$, $t=0.5$\,s} & {\small (d) current $j$, $t=1$\,s} \\
-\end{tabular}
-\caption{Orszag--Tang vortex at $\mathrm{Re}\approx628$, $\mathrm{Pr}_m=1$, on a
-$512^2$ grid with the hybrid central-moment operator. Diverging colour scale,
-blue negative, red positive. The scale \emph{saturates at the 99th percentile of
-$|v|$} --- $6.16$ and $11.13$ for $\zeta$, $12.88$ and $22.67$ for $j$ --- because
-the current sheets are strongly localised: at $t=1$ the peak $|j|$ is $46.4$
-against a 99th percentile of $22.7$, so scaling by the maximum would leave the
-whole field pale. Between $t=0.5$ and $t=1$ the smooth initial vortex steepens
-into the thin diagonal current sheet visible in panel (d), which is the feature
-this benchmark exists to resolve and the reason $j_{\max}$ is the more
-grid-sensitive of the two reported peaks.}
-\label{fig:ot}
-\end{figure}
-
-\subsubsection{Comparison with published data}
-
-Reproducing the setup of \cite{derosis2018}: $L=2\pi$\,m, $u_0=b_0=2$,
-$\rho=1$\,kg\,m$^{-3}$, $N=1024$, $\Delta t=5\times10^{-5}$\,s. The derived lattice
-parameters reproduce the published values exactly
-($u_{0,\rm lat}=1.6297\times10^{-2}$, $\mathrm{Ma}=0.0282$), with
-$\mathrm{Re}=u_0N/\nu$ in lattice units and $\mathrm{Pr}_m=1$. The reference
-column is the high-resolution pseudo-spectral data quoted there.
-
-\begin{center}\small
-\begin{tabular}{llcccc}
-\toprule
- & $t$ (s) & spectral & published LB & here, BGK & here, hybrid CM \\
-\midrule
-$j_{\max}$    & 0.5 & 18.24 & 18.24 & 18.23 & 18.23 \\
-$j_{\max}$    & 1.0 & 46.59 & 46.65 & 46.55 & 46.55 \\
-$\zeta_{\max}$& 0.5 & 6.758 & 6.756 & 6.756 & \textbf{6.756} \\
-$\zeta_{\max}$& 1.0 & 14.20 & 14.18 & 14.182 & \textbf{14.180} \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\noindent Errors against the spectral reference are
-$0.07 / 0.09 / 0.03 / 0.14\,\%$, where the published LB errors are
-$0 / 0.13 / 0.03 / 0.14\,\%$: the same accuracy from an independent
-implementation, with the hybrid scheme landing on the published vorticity values
-to every quoted digit. Convergence toward the reference is second order, $j_{\max}$
-at $t=1$ going $-1.92\%$ ($N=256$), $-0.46\%$ ($N=512$), $-0.09\%$ ($N=1024$).
-
-The one residual is $j_{\max}$ at $t=1$, $0.22\%$ below the published value. That
-is the quantity in which to expect it: the reference computes the current locally
-from the distributions whereas this code uses second-order central differences,
-and $j$ is the more gradient-sensitive of the two peaks. Vorticity agreeing
-exactly while the current is $0.2\%$ low points at the derivative operator rather
-than at the scheme.
-
-\subsubsection{Stability at high Reynolds number}
-
-At $\mathrm{Re}=5000$ the lattice viscosity gives $\tau=0.510$ on the $1024^2$
-grid, close enough to $1/2$ that the BGK ghost modes go unstable. Runs are
-terminated at the first non-finite field or at $\mathrm{Ma}>0.5$.
-
-\begin{center}\small
-\begin{tabular}{lccccc}
-\toprule
-grid & $\tau$ & BGK & hybrid CM & published BGK \\
-\midrule
-$512^2$  & 0.505 & blow-up $t=0.38$\,s & stable to $t=1.00$\,s & --- \\
-$1024^2$ & 0.510 & blow-up $\bm{t=0.54}$\,s & stable to $\bm{t=1.20}$\,s & $t\approx0.52$\,s \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-The BGK failure reproduces the published behaviour quantitatively --- within one
-probe interval ($0.02$\,s) --- and shows the correct resolution dependence. Its
-signature is instructive: $j_{\max}$ grows smoothly to $24.0$ at $t=0.50$, triples
-to $73.7$ at $t=0.52$, then overflows, while the Mach number is $0.055$ at the
-last clean sample. This is a collision instability, not a gradual compressibility
-breakdown.
-
-The hybrid central-moment scheme runs $2.2\times$ longer on the same grid and
-passes the $t\approx0.99$\,s mark that defeated BGK even on a finer grid in
-\cite{derosis2018}. Its $j_{\max}$ peaks at $166.2$ near $t=1.00$ and then
-\emph{decays} smoothly to $155.4$ by $t=1.18$, with the Mach number bounded at
-$0.069$ throughout. That turnover is the clearest evidence the run is genuinely
-resolved rather than merely not-yet-diverged: an unstable run grows
-monotonically, it does not turn over.
-
-\subsubsection{Quasi-two-dimensional reduction: 3D lattices with $n_z=1$}
-\label{sec:reduction}
-
-The Orszag--Tang vortex is a two-dimensional problem, so running it on a 3D
-lattice with a \emph{single} cell in $z$ is a reduction test: with $n_z=1$ and
-periodic $z$ the neighbour wrap sends the out-of-plane neighbour back to the node
-itself, the corresponding populations stream in place, and the answer must agree
-with the native 2D lattice. No code change was required --- the wrap of
-\S\ref{sec:periodic} and the pair swap of Table~\ref{tab:esopull} handle it.
-
-The magnetic field follows the fluid's dimensionality by default (D2Q5 beside
-D2Q9, D3Q7 beside D3Q27), but since $b_z\equiv0$ for this flow a 2D
-magnetic lattice is a legitimate pairing and isolates its contribution.
-Error against the spectral reference, per cent:
-
-\begin{center}\small
-\begin{tabular}{llcccc}
-\toprule
-fluid & magnetic & $j_{\max}(0.5)$ & $j_{\max}(1)$ & $\zeta_{\max}(0.5)$ & $\zeta_{\max}(1)$ \\
-\midrule
-\multicolumn{6}{l}{\emph{$N=256$}}\\
-D2Q9  & D2Q5 & $-0.89$ & $-1.92$ & $-0.25$ & $-1.57$ \\
-\textbf{D3Q27} & \textbf{D2Q5} & $\bm{-0.89}$ & $\bm{-1.92}$ & $\bm{-0.25}$ & $\bm{-1.57}$ \\
-D3Q27 & D3Q7 & $-0.77$ & $-1.66$ & $-0.24$ & $-1.51$ \\
-\midrule
-\multicolumn{6}{l}{\emph{$N=512$}}\\
-D2Q9  & D2Q5 & $-0.25$ & $-0.46$ & $-0.07$ & $-0.48$ \\
-D3Q27 & D3Q7 & $-0.22$ & $-0.39$ & $-0.07$ & $-0.46$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-Two results, one exact and one asymptotic.
-
-\paragraph{D3Q27 reduces to D2Q9 exactly.} Not approximately: the agreement in
-the highlighted row is structural, and both conditions for it can be checked in
-exact arithmetic. First, summing the D3Q27 weights over $z$ reproduces the D2Q9
-weights term for term,
-\begin{equation}
-  \tfrac{8}{27}+2\cdot\tfrac{2}{27} = \tfrac49, \qquad
-  \tfrac{2}{27}+2\cdot\tfrac{1}{54} = \tfrac19, \qquad
-  \tfrac{1}{54}+2\cdot\tfrac{1}{216} = \tfrac1{36},
-\end{equation}
-so for a $z$-invariant field the projected equilibrium and the projected BGK
-update are exactly D2Q9's. Second --- and this is the part that is not automatic
---- the out-of-plane Maxwell-stress contribution cancels within every in-plane
-group:
-\begin{equation}
-  \sum_{c_z} w_i\,\big(c_z^2-\cs^2\big) = 0
-  \qquad\text{for each } (c_x,c_y) \ \text{on D3Q27}.
-\end{equation}
-
-\paragraph{The spread converges away.} Between $N=256$ and $N=512$ the
-lattice-to-lattice spread falls from $0.12$, $0.26$ and $0.06$ percentage points
-(on $j_{\max}(0.5)$, $j_{\max}(1)$, $\zeta_{\max}(1)$) to $0.03$, $0.07$ and
-$0.02$ --- factors of $4.0$, $3.7$ and $3.0$, i.e.\ second order. The lattice
-pairings are therefore converging to the same answer, and what separates them at finite
-resolution is truncation error rather than different physics. Of the two
-choices, the magnetic lattice matters more than the fluid one: swapping D2Q5 for
-D3Q7 moves $j_{\max}$ by about $0.25$ percentage points at $N=256$, which is
-unsurprising given $\cs^2=1/3$ against $1/4$ and correspondingly different
-truncation in the induction equation.
-
-%------------------------------------------------------------------------------
-\subsection{Boundary conditions}
+\subsubsection{Boundary conditions}
 \label{sec:bcvalid}
 
 Four tests, one per claim. All are second order, which is the accuracy of the
@@ -3793,8 +3394,370 @@ $N$ & $T=0$ at & $T=1$ at & $T=0$ at & $T=1$ at \\
 \end{center}
 \noindent Anti-bounce-back places its wall half a spacing outside the node, the
 moment condition exactly on it, at every resolution and to machine precision.
+\begin{figure}[htbp]
+\centering
+\begin{tabular}{cc}
+\includegraphics[width=0.40\textwidth]{hm_ux.png} &
+\includegraphics[width=0.40\textwidth]{hm_bx.png} \\[1mm]
+\small (a) velocity $u_x$ & \small (b) induced field $b_x$ \\
+\end{tabular}
+\caption{\textbf{Inlet-driven Hartmann flow}, $\mathrm{Ha}=10$, $L_y=65$,
+D2Q9 fluid with D2Q5 induction, central moments
+(\S\ref{sec:hartmanninlet}). The velocity shows the flat Hartmann core with
+boundary layers of thickness $L/\mathrm{Ha}$; the induced field is antisymmetric
+about the centreline, vanishing there and at both walls. Both are visibly
+independent of the streamwise coordinate, which is the property the exact
+solution has and which the convergence table depends on --- any $x$ structure
+here would be boundary error, and it is how the magnetic outflow defect
+(\S\ref{sec:momentbc}) was found.}
+\label{fig:hartmann}
+\end{figure}
+\subsubsection{A published campaign: De Rosis and Coreixas (2020)}
+\label{sec:campaign}
 
-\subsection{Laplace's law}
+The tests above were written alongside the features they exercise. The ones
+that follow are different: they work through a published test suite without
+modification, so that the numbers can be put beside someone else's.
+
+The suite is Sec.~III of De Rosis and Coreixas~\cite{derosis2020}, tests III.A
+to III.E, plus the inlet-driven Poiseuille flow of Sec.~III.A of De
+Rosis~\cite{derosis2017pre}. Test III.F is out of scope: the campaign was
+specified to exclude applied body forces, and III.F has one.
+
+\paragraph{Settings, and where they depart from the papers.} Everything runs on
+the central-moments operator with the highest-order equilibrium each lattice
+admits (\S\ref{sec:eqsummary}) --- sixth order on D2Q9 and D3Q27. BGK and MRT
+were deliberately not run. The two-dimensional cases are run on D2Q9 and on
+D3Q27 with a single periodic point in $z$; III.E is genuinely
+three-dimensional and uses D3Q27. Fixed $u_0=0.02$
+throughout rather than the papers' sweeps, and reduced resolutions where cost
+demanded: $D=64$ rather than $128$ in III.E, $D_{\rm lb}=512$ only in III.D,
+$N=129$ rather than $201$ in III.C. These are stated per test below because in
+two cases they change what the number means.
+
+%------------------------------------------------------------------------------
+\subsubsection{Taylor--Green vortex}
+
+Periodic square of side $2\pi$, $N^2$ points, $\mathrm{Re}=1000$, error measured
+at $t=T$ against the exact decaying solution.
+
+\begin{center}\small
+\begin{tabular}{lcccccc}
+\toprule
+$N$ & 8 & 16 & 32 & 64 & 128 & 256 \\
+\midrule
+D2Q9  & $1.106\e{-1}$ & $2.566\e{-2}$ & $6.259\e{-3}$ & $1.444\e{-3}$ & $2.427\e{-4}$ & $6.010\e{-5}$ \\
+D3Q27 & $1.106\e{-1}$ & $2.566\e{-2}$ & $6.259\e{-3}$ & $1.444\e{-3}$ & $2.427\e{-4}$ & $6.010\e{-5}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent Fitted rate $2.186$ on both lattices. The paper
+reports an optimal rate of $2$ at its lowest $u_0$.
+
+\paragraph{A correction to the published initial condition.} Reference
+\cite{derosis2020} prints
+\begin{equation*}
+  \uu_0 = u_0[\cos\gamma x\,\sin\gamma y,\;\sin\gamma x\,\cos\gamma y,\;0],
+\end{equation*}
+whose divergence is $-2u_0\gamma\sin\gamma x\sin\gamma y \neq 0$. Almost certainly a lost minus
+sign in typesetting; the standard solenoidal field, with $-\cos\gamma x
+\sin\gamma y$ in the first component, is used here. The printed density
+likewise carries a leading factor $3$ that would give $\rho\approx 3$, and the
+standard form is used instead.
+
+%------------------------------------------------------------------------------
+\subsubsection{Double shear layer}
+
+$L=256$, $\mathrm{Re}=30\,000$, $\tau=0.500512$ --- a stability test rather than
+an accuracy one, run to $t/t_0=1$. All three lattices complete without
+divergence at that $\tau$, and the normalised invariants agree closely:
+
+\begin{center}\small
+\begin{tabular}{lcc}
+\toprule
+ & $E/E_0$ & $\Psi/\Psi_0$ \\
+\midrule
+D2Q9  & 0.986436 & 0.622701 \\
+D3Q27 & 0.986436 & 0.622701 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%------------------------------------------------------------------------------
+\begin{figure}[htbp]
+\centering
+\begin{tabular}{cc}
+\includegraphics[width=0.40\textwidth]{sl_zeta_L512_t05.png} &
+\includegraphics[width=0.40\textwidth]{sl_zeta_L512_t10.png} \\[1mm]
+\small (a) $t/t_0 = 0.5$ & \small (b) $t/t_0 = 1$ \\
+\end{tabular}
+\caption{\textbf{Double shear layer}, vorticity, $L=512$,
+$\mathrm{Re}=30\,000$, D2Q9 central moments (\S\ref{sec:campaign}). By (a) the
+perturbation has begun to distort the two layers; by (b) each has rolled into a
+vortex, and the two are joined by a single unbroken braid. That the braid stays
+thin and connected is the whole test: at $\tau = 0.50102$ the flow is barely
+resolved, and an under-dissipative or unstable scheme shows it here first, by
+fragmenting the braid into secondary vortices that are numerical rather than
+physical. Doubling the resolution from the $L=256$ of the campaign table sharpens the
+structure and, more usefully, quantifies the numerical dissipation: the
+enstrophy retained at $t/t_0=1$ rises from $0.6227$ to $0.6432$, and the energy
+from $0.98644$ to $0.98696$. The physical dissipation at this Reynolds number is
+negligible over one turnover, so nearly all of that difference is the scheme's
+own, and it shrinks with resolution as it should. Colour saturates at the 99th
+percentile of $|\zeta|$.}
+\label{fig:shear}
+\end{figure}
+\subsubsection{Lid-driven cavity}
+
+$129^2$, $u_{\rm lid}=0.02$, against Ghia, Ghia and Shin~\cite{ghia1982}.
+Reported as the largest absolute deviation over the 17 tabulated stations, in
+lid-velocity units.
+
+\begin{center}\small
+\begin{tabular}{lcccccc}
+\toprule
+ & \multicolumn{2}{c}{$\mathrm{Re}=100$} & \multicolumn{2}{c}{$\mathrm{Re}=400$}
+ & \multicolumn{2}{c}{$\mathrm{Re}=1000$} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+ & $\max|\Delta u|$ & $\max|\Delta v|$ & $\max|\Delta u|$ & $\max|\Delta v|$
+ & $\max|\Delta u|$ & $\max|\Delta v|$ \\
+\midrule
+D2Q9  & 0.0049 & 0.0067 & 0.0069 & 0.0071$^\ast$ & 0.0094 & 0.0099 \\
+D3Q27 & 0.0049 & 0.0067 & 0.0069 & 0.0071$^\ast$ & 0.0094 & 0.0099 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent $^\ast$\,\emph{One published reference value is anomalous, and it is
+Ghia's, not a transcription error here.} All three tables in
+\code{validation/cavity\_cm.cpp} have been checked entry-for-entry against an
+independent digitisation of \cite{ghia1982} and they match. But the $v$ entry at
+$\mathrm{Re}=400$, $x = 0.9063$ reads $-0.23827$, and three things say it cannot
+be right:
+
+\begin{itemize}\itemsep1pt
+\item Ghia's own extremum table gives $\min v = -0.44993$ at $x = 0.8594$ for
+      this Reynolds number. The three tabulated neighbours are then $-0.44993$
+      $(0.8594)$, $-0.23827$ $(0.9063)$, $-0.22847$ $(0.9453)$: essentially the
+      whole recovery from the minimum happens in one interval, after which the
+      profile is flat.
+\item The same three stations are smooth at $\mathrm{Re}=100$ ($-0.22445$,
+      $-0.16914$, $-0.10313$) and at $\mathrm{Re}=1000$ ($-0.42665$, $-0.51550$,
+      $-0.39188$). Only $\mathrm{Re}=400$ kinks, and at exactly one point.
+\item Every other station agrees here to $0.0071$ or better; this one disagrees
+      by $0.1415$, a factor of twenty. The value computed here, $-0.37974$, is
+      what a smooth profile through Ghia's own minimum would give.
+\end{itemize}
+
+\noindent The entry is left in the table --- it is what the paper prints, and
+quietly substituting a number nobody published would be worse --- but it is
+excluded from the headline score above and reported separately by the run. It
+could not be checked against the original paper, which is not among the
+references to hand. An earlier draft of this document blamed the discrepancy on
+a faulty transcription on this side; that was wrong, and the correction is
+recorded here rather than silently applied.
+
+%------------------------------------------------------------------------------
+\begin{figure}[htbp]
+\centering
+\begin{tabular}{cc}
+\includegraphics[width=0.34\textwidth]{cav_speed_re400.png} &
+\includegraphics[width=0.34\textwidth]{cav_zeta_re400.png} \\[1mm]
+\small (a) speed $|\uu|/u_{\rm lid}$ & \small (b) vorticity \\
+\end{tabular}
+\caption{\textbf{Lid-driven cavity} at $\mathrm{Re}=400$, $129^2$, D2Q9 central
+moments, the run scored against Ghia \emph{et al.}\ in \S\ref{sec:campaign}
+($\max|\Delta u| = 0.0069$). The primary vortex sits above and right of centre
+and both downstream corner eddies are resolved. The vorticity is clipped hard,
+at the 88th percentile against a peak twenty times larger, because it is
+concentrated in the lid boundary layer; without that the interior is blank.}
+\label{fig:cavity}
+\end{figure}
+\subsubsection{Dipole--wall collision}
+
+$D_{\rm lb}=512$ (a $1025^2$ grid), walls regularised, corners on the
+finite-difference closure --- the only test in the campaign where the corner
+treatment matters, since III.A, III.B and III.E are periodic. Against Table II
+of \cite{derosis2020}, which reproduces the lattice Boltzmann results of
+Mohammed, Graham and Reis~\cite{mohammed2018} and the spectral reference of
+Clercx and Bruneau~\cite{clercx2006}:
+
+\begin{center}\small
+\begin{tabular}{clccc|ccc}
+\toprule
+ & & \multicolumn{3}{c|}{energy $E$} & \multicolumn{3}{c}{enstrophy $\Psi$} \\
+$\mathrm{Re}$ & $t$ & here & \cite{mohammed2018} & \cite{clercx2006}
+              & here & \cite{mohammed2018} & \cite{clercx2006} \\
+\midrule
+     & 0.25 & 1.4976 & 1.494 & 1.501 & 466.3 & 467.2 & 472.1 \\
+625  & 0.5  & 1.0167 & 1.010 & 1.013 & 387.2 & 374.0 & 382.6 \\
+     & 0.75 & 0.7702 & 0.765 & 0.767 & 251.3 & 244.8 & 256.0 \\
+\midrule
+     & 0.25 & 1.8355 & 1.838 & 1.848 & 689.6 & 705.3 & 725.6 \\
+2500 & 0.5  & 1.5379 & 1.534 & 1.540 & 889.1 & 898.1 & 917.6 \\
+     & 0.75 & 1.3274 & 1.320 & 1.325 & 790.3 & 790.2 & 809.9 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Energy agrees to between $0.1\%$ and $0.7\%$ everywhere. Enstrophy is
+the more demanding invariant and the agreement is between $0.01\%$ and $3.5\%$;
+in most rows the value computed here falls \emph{between} the published lattice
+Boltzmann result and the spectral one, and at $\mathrm{Re}=2500$, $t=0.75$ it
+matches the published lattice Boltzmann enstrophy to four significant figures
+($790.3$ against $790.2$). D2Q9 and D3Q27 are identical to every digit shown.
+
+\paragraph{An error of ours, and how it was caught.} The published initial
+condition is written in physical units with $|\omega_e| = 299.56$, which makes
+$E(0)=2$ and $\Psi(0)=800$ exactly. It was first scaled so that the \emph{peak}
+speed was $u_0$, which is wrong: the Reynolds number is built on the rms
+velocity, and for this field the peak-to-rms ratio is $11.019$. The nominal
+Reynolds number and the elapsed physical time were both a factor eleven out, the
+flow dissipated far too slowly, and the discrepancy grew with $t$ --- a
+signature that pointed at the time scale rather than at the wall. Verifying
+Eq.~(32) numerically ($E(0)=2.0004$, $\Psi(0)=799.96$, $U_{\rm rms}=1.0001$)
+settled it. The results above are from the corrected normalisation.
+
+%------------------------------------------------------------------------------
+\subsubsection{Three-dimensional Taylor--Green vortex}
+
+$D=64$, run to $t^\ast = t u_0/D = 10$. There is no exact solution; the
+comparison is between lattices. At the campaign's fixed $u_0=0.02$ the Mach
+number is $0.035$ rather than the paper's $0.2$--$0.6$, so a unit of physical
+time costs up to seventeen times more steps than in the paper.
+
+\begin{center}\small
+\begin{tabular}{lcc}
+\toprule
+ & $\mathrm{Re}=1600$ & $\mathrm{Re}=30\,000$ \\
+\midrule
+D3Q27 & completes, $E/E_0=0.0145$ at $t^\ast=10$ & completes, $E/E_0=0.0399$ at $t^\ast=10$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent At $\mathrm{Re}=30\,000$ and this Mach number $\tau=0.50026$. That
+case was initially judged infeasible on the available hardware; the judgement
+was wrong, and D3Q27 runs it to $t^\ast=10$ without difficulty.
+
+%------------------------------------------------------------------------------
+\subsubsection{Inlet-driven Poiseuille flow}
+\label{sec:poisinlet}
+
+Sec.~III.A of \cite{derosis2017pre}. Laminar flow along $x$; no-slip on the two
+$y$-normal planes; the parabolic profile $u_x(0,y) = 4U_0\,(y/L_y)(1-y/L_y)$
+with $U_0 = 0.005$ imposed at the west face; outflow opposite; $L_x = 21$;
+$\mathrm{Re} = U_0 L_y/\nu = 10$; started from rest and run to steady state. The
+error is the relative $L_2$ norm, Eq.~(15) there, between the analytic profile
+--- which equals the inlet profile, the flow being fully developed --- and a
+$y$-aligned cross section at mid-domain. $L_z=1$ rather than the paper's $21$;
+the flow has no $z$ dependence and $z$ is periodic either way. The outflow is
+the constant back-pressure condition of \S\ref{sec:outflow}.
+
+This test is worth having precisely because it is driven by the inlet and not by
+a body force, so it is free of both the Guo half-force interaction and the
+curvature slip \eqref{eq:curvslip} that dominate the forced channel of
+\S\ref{sec:poiseuille}.
+
+\begin{center}\small
+\begin{tabular}{lccccc|c}
+\toprule
+$L_y$ & 41 & 81 & 161 & 321 & 641 & fitted rate \\
+\midrule
+D2Q9  & $1.160\e{-3}$ & $3.251\e{-4}$ & $7.261\e{-5}$ & $1.558\e{-5}$ & $6.192\e{-6}$ & 1.964 \\
+D3Q27 & $1.160\e{-3}$ & $3.251\e{-4}$ & $7.261\e{-5}$ & $1.558\e{-5}$ & $6.192\e{-6}$ & 1.964 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Against the published $2.063$ that is $4.8\%$ low.
+The shortfall is entirely in the last refinement, where the pairwise rate drops
+from $2.231$ to $1.334$, and it is understood --- see below. It is worth noting
+first that the paper states its error at the finest grid, $L_y = 1281$, is of
+order $10^{-5}$; the error here at $L_y=641$ is $6.2\e{-6}$, already below that.
+
+\paragraph{What limits the order --- three falsified hypotheses.} The outlet was
+the obvious suspect, and it is not the cause.
+
+\begin{enumerate}\itemsep2pt
+\item \emph{Per-station error.} Breaking the error down by $x$ at $L_y=641$
+      makes the outlet look guilty: against $L_y=161$ the inlet station
+      converges at $1.99$ and the bulk minimum at $1.92$, both clean second
+      order, while the outlet station converges at $0.70$.
+\item \emph{Moving the outlet away does not help.} Repeating at $L_x=41$ and
+      $L_x=81$ makes the last pairwise rate \emph{worse}, not better:
+      $1.334 \to 0.885 \to 0.007$. At $L_x=81$ the error stops responding to
+      refinement altogether --- $5.974\e{-6}$ at $L_y=321$ against
+      $5.945\e{-6}$ at $L_y=641$.
+\item \emph{A second-order outlet does not help.} Replacing the zero-gradient
+      tangential extrapolation by a linear one (\S\ref{sec:outflow}) is worse on
+      the coarse grids and indistinguishable on the finest.
+\end{enumerate}
+
+\noindent What it actually is: a non-refining, velocity-dependent error.
+Sweeping $U_0$ at fixed $\mathrm{Re}=10$ moves the onset of the degradation, and
+always toward \emph{coarser} grids as $U_0$ rises.
+
+\begin{center}\small
+\begin{tabular}{ccccccc}
+\toprule
+$U_0$ & $\mathrm{Ma}$ & fitted rate & \multicolumn{4}{c}{pairwise rates} \\
+\midrule
+0.0025 & 0.0043 & \textbf{2.067} & 1.720 & 2.026 & 2.205 & 2.263 \\
+0.005  & 0.0087 & 1.964 & 1.868 & 2.182 & 2.231 & 1.334 \\
+0.01   & 0.0173 & 1.523 & 2.091 & 2.179 & 0.974 & 0.812 \\
+0.02   & 0.0346 & 0.844 & 2.097 & 0.150 & 0.644 & 0.947 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent At $U_0 = 0.0025$ the velocity-dependent term stays below the
+discretisation error across the whole range and the fitted rate is $2.067$,
+against the published $2.063$ --- agreement to $0.2\%$. The scheme is second
+order; the shortfall at $U_0=0.005$ is an artefact of the test's Mach number,
+not a defect of the wall or the outlet.
+
+This is not a novel observation. Reference \cite{derosis2020} reports the same
+behaviour on its own Taylor--Green convergence study --- ``for the lowest value
+of $u_0$, an optimal convergence value equal to 2 is found. As $u_0$ increases,
+the accuracy and convergence properties of the method deteriorate as well'' ---
+and attributes it to the cubic aliasing defect $c_{i\zeta}^3 = c_{i\zeta}$,
+which prevents the diagonal terms $u_\zeta^3$ from entering the third-order
+equilibrium moments and can only be removed by explicit correction terms. The
+paper on this Poiseuille case~\cite{derosis2017pre} instead asserts that
+$U_0=0.005$ gives a Mach number ``sufficiently low to annihilate detrimental
+compressibility effects''; at the accuracy reached here that assertion does not
+hold, which is unsurprising given that the error here at $L_y=641$ is already
+below the error there at $L_y=1281$.
+
+Fitting $\varepsilon = A/L_y^2 + B$ to the two finest grids gives $B<0$ at
+$U_0=0.0025$ --- no floor reached --- and $B = 3.1\e{-6}$, $9.2\e{-6}$,
+$2.1\e{-5}$ at $U_0 = 0.005$, $0.01$, $0.02$. That is growth somewhere between
+linear and quadratic in $U_0$, but a two-point extraction is far too noisy to
+pin the exponent and none is claimed.
+
+%------------------------------------------------------------------------------
+\subsubsection{A finding that cuts across the campaign}
+
+\paragraph{D2Q9 and D3Q27 with one point in $z$ are bit-identical.} Not merely
+close: identical to every digit printed, in the Taylor--Green convergence, the
+shear layer, the dipole, the cavity and the inlet Poiseuille --- five
+independent tests. The reduction of D3Q27 to D2Q9 under a single periodic $z$
+point is exact, which is a useful correctness check in both directions: it
+exercises the 3D code path against the 2D one on every one of these flows.
+
+%------------------------------------------------------------------------------
+
+%------------------------------------------------------------------------------
+\subsection{Multiphase flows}
+\label{sec:val:multi}
+
+The immiscible models of \S\ref{sec:multiphase} carry three tests here: the one
+law with a closed form (Laplace's), one flow with an exact profile across a
+viscosity and density jump, and one coupled fluid--body equilibrium. The free
+surface is validated in its own section (\S\ref{sec:gravitywave}), because its
+one quantitative test is a dispersion relation rather than a field comparison.
+\subsubsection{Laplace's law}
 \label{sec:laplace}
 
 A static droplet is the first two-phase validation and deliberately so: it has an
@@ -3975,8 +3938,7 @@ $\sigma$ independent of $\rho_H/\rho_L$ & $8\%$      & $5.59\e{-2}$ \\
 \noindent The tolerance on $\sigma$ is deliberately loose because
 \code{-refine} asserts the order that the absolute value at any one resolution
 cannot.
-
-\subsection{Layered Poiseuille flow}
+\subsubsection{Layered Poiseuille flow}
 \label{sec:layered}
 
 \code{ViscousInterfaceForce} sat in the tree from the moment the pressure form
@@ -4154,8 +4116,7 @@ best ratio being $13.8$ against a threshold of $3$; and $\phi$ is conserved to
 $1.19\e{-11}$ against a tolerance of $10^{-9}$. The non-convergence at a density
 ratio is printed with the results and deliberately not asserted, because it is a
 known property of the formulation rather than a regression to be guarded.
-
-\subsection{A floating body: Archimedes and the metacentre}
+\subsubsection{A floating body: Archimedes and the metacentre}
 \label{sec:floating}
 
 Water entry has no closed form to check against, which is why it is a
@@ -4342,521 +4303,229 @@ standard way of making a tall body float upright that this cannot express. And
 any of it in three dimensions, where the rigid-body solve would be a $6\times6$
 with a rotating inertia tensor and a quaternion; the fluid side would not change.
 
-
-%==============================================================================
-\section{Validation campaign}
-\label{sec:campaign}
-
-The tests of \S\ref{sec:validation} were written alongside the features they
-exercise. This section is different: it works through a published test suite
-without modification, so that the numbers can be put beside someone else's.
-
-The suite is Sec.~III of De Rosis and Coreixas~\cite{derosis2020}, tests III.A
-to III.E, plus the inlet-driven Poiseuille flow of Sec.~III.A of De
-Rosis~\cite{derosis2017pre}. Test III.F is out of scope: the campaign was
-specified to exclude applied body forces, and III.F has one.
-
-\paragraph{Settings, and where they depart from the papers.} Everything runs on
-the central-moments operator with the highest-order equilibrium each lattice
-admits (\S\ref{sec:eqsummary}) --- sixth order on D2Q9 and D3Q27. BGK and MRT
-were deliberately not run. The two-dimensional cases are run on D2Q9 and on
-D3Q27 with a single periodic point in $z$; III.E is genuinely
-three-dimensional and uses D3Q27. Fixed $u_0=0.02$
-throughout rather than the papers' sweeps, and reduced resolutions where cost
-demanded: $D=64$ rather than $128$ in III.E, $D_{\rm lb}=512$ only in III.D,
-$N=129$ rather than $201$ in III.C. These are stated per test below because in
-two cases they change what the number means.
-
 %------------------------------------------------------------------------------
-\subsection{Taylor--Green vortex}
+\subsection{Thermal flows}
+\label{sec:val:thermal}
+\subsubsection{Thermal transport}
 
-Periodic square of side $2\pi$, $N^2$ points, $\mathrm{Re}=1000$, error measured
-at $t=T$ against the exact decaying solution.
+Two exact solutions of the advection--diffusion equation, with amplitude and
+Peclet number both scaled diffusively ($U\sim1/N$) so that the comparison is a
+convergence study rather than a measurement of how far the wave travelled:
 
 \begin{center}\small
-\begin{tabular}{lcccccc}
+\begin{tabular}{lcccc}
 \toprule
-$N$ & 8 & 16 & 32 & 64 & 128 & 256 \\
+case & order (FP64) & order (FP32) & $D_{\rm eff}$ rel.\ err & phase err \\
 \midrule
-D2Q9  & $1.106\e{-1}$ & $2.566\e{-2}$ & $6.259\e{-3}$ & $1.444\e{-3}$ & $2.427\e{-4}$ & $6.010\e{-5}$ \\
-D3Q27 & $1.106\e{-1}$ & $2.566\e{-2}$ & $6.259\e{-3}$ & $1.444\e{-3}$ & $2.427\e{-4}$ & $6.010\e{-5}$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-\noindent Fitted rate $2.186$ on both lattices. The paper
-reports an optimal rate of $2$ at its lowest $u_0$.
-
-\paragraph{A correction to the published initial condition.} Reference
-\cite{derosis2020} prints
-\begin{equation*}
-  \uu_0 = u_0[\cos\gamma x\,\sin\gamma y,\;\sin\gamma x\,\cos\gamma y,\;0],
-\end{equation*}
-whose divergence is $-2u_0\gamma\sin\gamma x\sin\gamma y \neq 0$. Almost certainly a lost minus
-sign in typesetting; the standard solenoidal field, with $-\cos\gamma x
-\sin\gamma y$ in the first component, is used here. The printed density
-likewise carries a leading factor $3$ that would give $\rho\approx 3$, and the
-standard form is used instead.
-
-%------------------------------------------------------------------------------
-\subsection{Double shear layer}
-
-$L=256$, $\mathrm{Re}=30\,000$, $\tau=0.500512$ --- a stability test rather than
-an accuracy one, run to $t/t_0=1$. All three lattices complete without
-divergence at that $\tau$, and the normalised invariants agree closely:
-
-\begin{center}\small
-\begin{tabular}{lcc}
-\toprule
- & $E/E_0$ & $\Psi/\Psi_0$ \\
-\midrule
-D2Q9  & 0.986436 & 0.622701 \\
-D3Q27 & 0.986436 & 0.622701 \\
+D2Q5 diffusion            & 2.00 & 2.03 & $1.5\times10^{-3}$ & $4.5\times10^{-14}$ \\
+D3Q7 diffusion            & 2.00 & 2.00 & $1.3\times10^{-3}$ & $2.8\times10^{-14}$ \\
+D2Q5 advection--diffusion & 2.00 & 2.02 & $1.1\times10^{-3}$ & $2.5\times10^{-4}$ \\
+D3Q7 advection--diffusion & 1.99 & 2.00 & $7.2\times10^{-4}$ & $2.3\times10^{-4}$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-%------------------------------------------------------------------------------
-\subsection{Lid-driven cavity}
+\noindent The phase is measured as well as the amplitude: an error in the
+coupling term puts the wave in the wrong \emph{place}, which an amplitude check
+alone would not detect.
+\subsubsection{Open boundaries: the Gaussian plume}
+\label{sec:plume}
 
-$129^2$, $u_{\rm lid}=0.02$, against Ghia, Ghia and Shin~\cite{ghia1982}.
-Reported as the largest absolute deviation over the 17 tabulated stations, in
-lid-velocity units.
+The open boundary of \S\ref{sec:scalaroutflow} is validated against the
+classical plume solution. A continuous point source of strength $Q$ at the
+origin in a uniform wind $U$ along $x$, with isotropic diffusivity $D$,
+satisfies $U\,\partial_x C = D(\partial_{yy}C + \partial_{zz}C)$ once
+streamwise diffusion is neglected. That is the two-dimensional diffusion
+equation with $x/U$ in place of time, so
+\begin{equation}
+  C(x,y,z) = \frac{Q}{4\pi D x}\,
+             \exp\!\left(-\frac{U(y^2+z^2)}{4Dx}\right),
+  \qquad \sigma(x) = \sqrt{\frac{2Dx}{U}} ,
+  \label{eq:plume}
+\end{equation}
+and integrating across the plume gives $U\!\iint C\,{\rm d}y\,{\rm d}z = Q$ at
+\emph{every} station --- which is the property the boundary condition has to
+preserve.
 
-\begin{center}\small
-\begin{tabular}{lcccccc}
+Two tests are run, and they are deliberately of different kinds.
+
+\paragraph{Uniform-state invariance.} A constant field under a constant wind is
+an exact fixed point of equilibrium, collision, streaming and
+\eqref{eq:scalarout} alike, so this needs no analytic solution and no judgement
+about what ``close'' means. On $24^3$ with every face open, after $6\times10^4$
+steps:
+\begin{center}
+\begin{tabular}{lccc}
 \toprule
- & \multicolumn{2}{c}{$\mathrm{Re}=100$} & \multicolumn{2}{c}{$\mathrm{Re}=400$}
- & \multicolumn{2}{c}{$\mathrm{Re}=1000$} \\
-\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
- & $\max|\Delta u|$ & $\max|\Delta v|$ & $\max|\Delta u|$ & $\max|\Delta v|$
- & $\max|\Delta u|$ & $\max|\Delta v|$ \\
+ & $\max|C-\bar{C}|$ & $\max|\Delta C|$ over $2000$ steps & $|\bar{C}-1|$ \\
 \midrule
-D2Q9  & 0.0049 & 0.0067 & 0.0069 & 0.0071$^\ast$ & 0.0094 & 0.0099 \\
-D3Q27 & 0.0049 & 0.0067 & 0.0069 & 0.0071$^\ast$ & 0.0094 & 0.0099 \\
+$u=0$    & $0$ & $0$ & $0$ \\
+$u=0.05$ & $3.1\times10^{-13}$ & $1.4\times10^{-15}$ & $6.8\times10^{-3}$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\noindent $^\ast$\,\emph{One published reference value is anomalous, and it is
-Ghia's, not a transcription error here.} All three tables in
-\code{validation/cavity\_cm.cpp} have been checked entry-for-entry against an
-independent digitisation of \cite{ghia1982} and they match. But the $v$ entry at
-$\mathrm{Re}=400$, $x = 0.9063$ reads $-0.23827$, and three things say it cannot
-be right:
+\noindent The first two columns are the criterion and are round-off. The third
+is a diagnostic, not a failure: with every face zero-gradient the problem is
+pure Neumann, so no constant is preferred and the level is not determined. The
+offset is D3Q7's first-order equilibrium, the $O(u^2)$ defect of
+\S\ref{sec:eqscalar}, and it scales accordingly --- $5.0\times10^{-4}$,
+$1.9\times10^{-3}$, $6.8\times10^{-3}$, $2.2\times10^{-2}$ at $u=0.0125$,
+$0.025$, $0.05$, $0.1$, i.e.\ as $u^{1.9}$. It is \emph{not} the initialiser
+laying down equilibrium at zero velocity, which was the obvious first
+suspicion: attaching the wind only after the field is laid down and settled
+reproduces the offset to six significant figures. Any problem with a Dirichlet
+cell in it, the plume below included, does not see this at all.
 
-\begin{itemize}\itemsep1pt
-\item Ghia's own extremum table gives $\min v = -0.44993$ at $x = 0.8594$ for
-      this Reynolds number. The three tabulated neighbours are then $-0.44993$
-      $(0.8594)$, $-0.23827$ $(0.9063)$, $-0.22847$ $(0.9453)$: essentially the
-      whole recovery from the minimum happens in one interval, after which the
-      profile is flat.
-\item The same three stations are smooth at $\mathrm{Re}=100$ ($-0.22445$,
-      $-0.16914$, $-0.10313$) and at $\mathrm{Re}=1000$ ($-0.42665$, $-0.51550$,
-      $-0.39188$). Only $\mathrm{Re}=400$ kinks, and at exactly one point.
-\item Every other station agrees here to $0.0071$ or better; this one disagrees
-      by $0.1415$, a factor of twenty. The value computed here, $-0.37974$, is
-      what a smooth profile through Ghia's own minimum would give.
-\end{itemize}
+\paragraph{The plume.} On $128\times64\times64$ with $U=0.05$, $D=0.01$
+($\omega=1.852$, $\mathrm{Pe}=640$), a source at $x=8$ and $Q=1$ per step,
+$x=0$ held at $C=0$ and the five remaining faces open:
 
-\noindent The entry is left in the table --- it is what the paper prints, and
-quietly substituting a number nobody published would be worse --- but it is
-excluded from the headline score above and reported separately by the run. It
-could not be checked against the original paper, which is not among the
-references to hand. An earlier draft of this document blamed the discrepancy on
-a faulty transcription on this side; that was wrong, and the correction is
-recorded here rather than silently applied.
-
-%------------------------------------------------------------------------------
-\subsection{Dipole--wall collision}
-
-$D_{\rm lb}=512$ (a $1025^2$ grid), walls regularised, corners on the
-finite-difference closure --- the only test in the campaign where the corner
-treatment matters, since III.A, III.B and III.E are periodic. Against Table II
-of \cite{derosis2020}, which reproduces the lattice Boltzmann results of
-Mohammed, Graham and Reis~\cite{mohammed2018} and the spectral reference of
-Clercx and Bruneau~\cite{clercx2006}:
-
-\begin{center}\small
-\begin{tabular}{clccc|ccc}
+\begin{center}
+\begin{tabular}{rcccccc}
 \toprule
- & & \multicolumn{3}{c|}{energy $E$} & \multicolumn{3}{c}{enstrophy $\Psi$} \\
-$\mathrm{Re}$ & $t$ & here & \cite{mohammed2018} & \cite{clercx2006}
-              & here & \cite{mohammed2018} & \cite{clercx2006} \\
+$x$ & $\sigma$ & $\sqrt{2Dx/U}$ & err & $C_{\max}$ & $Q/4\pi Dx$ & flux$/Q$ \\
 \midrule
-     & 0.25 & 1.4976 & 1.494 & 1.501 & 466.3 & 467.2 & 472.1 \\
-625  & 0.5  & 1.0167 & 1.010 & 1.013 & 387.2 & 374.0 & 382.6 \\
-     & 0.75 & 0.7702 & 0.765 & 0.767 & 251.3 & 244.8 & 256.0 \\
-\midrule
-     & 0.25 & 1.8355 & 1.838 & 1.848 & 689.6 & 705.3 & 725.6 \\
-2500 & 0.5  & 1.5379 & 1.534 & 1.540 & 889.1 & 898.1 & 917.6 \\
-     & 0.75 & 1.3274 & 1.320 & 1.325 & 790.3 & 790.2 & 809.9 \\
+ 20 & 2.370 & 2.191 & $+8.2\%$ & $5.386\times10^{-1}$ & $6.632\times10^{-1}$ & $0.99962$ \\
+ 44 & 3.901 & 3.795 & $+2.8\%$ & $2.048\times10^{-1}$ & $2.211\times10^{-1}$ & $0.99962$ \\
+ 68 & 4.982 & 4.899 & $+1.7\%$ & $1.266\times10^{-1}$ & $1.326\times10^{-1}$ & $0.99962$ \\
+ 92 & 5.867 & 5.797 & $+1.2\%$ & $9.158\times10^{-2}$ & $9.474\times10^{-2}$ & $0.99962$ \\
+122 & 6.813 & 6.753 & $+0.9\%$ & $6.807\times10^{-2}$ & $6.981\times10^{-2}$ & $0.99963$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\noindent Energy agrees to between $0.1\%$ and $0.7\%$ everywhere. Enstrophy is
-the more demanding invariant and the agreement is between $0.01\%$ and $3.5\%$;
-in most rows the value computed here falls \emph{between} the published lattice
-Boltzmann result and the spectral one, and at $\mathrm{Re}=2500$, $t=0.75$ it
-matches the published lattice Boltzmann enstrophy to four significant figures
-($790.3$ against $790.2$). D2Q9 and D3Q27 are identical to every digit shown.
+\noindent \textbf{The flux column is the boundary-condition test}, and it is
+flat to five decimal places from $x=20$ to the last interior cell: worst
+deviation $0.038\%$. A reflecting exit would pile concentration up and make it
+climb; an over-draining one would make it fall. Neither happens, and nothing
+propagates back upstream. This is the same measurement as the aorta's
+inlet/outlet balance of \S\ref{sec:aortabc}, for the same reason.
 
-\paragraph{An error of ours, and how it was caught.} The published initial
-condition is written in physical units with $|\omega_e| = 299.56$, which makes
-$E(0)=2$ and $\Psi(0)=800$ exactly. It was first scaled so that the \emph{peak}
-speed was $u_0$, which is wrong: the Reynolds number is built on the rms
-velocity, and for this field the peak-to-rms ratio is $11.019$. The nominal
-Reynolds number and the elapsed physical time were both a factor eleven out, the
-flow dissipated far too slowly, and the discrepancy grew with $t$ --- a
-signature that pointed at the time scale rather than at the wall. Verifying
-Eq.~(32) numerically ($E(0)=2.0004$, $\Psi(0)=799.96$, $U_{\rm rms}=1.0001$)
-settled it. The results above are from the corrected normalisation.
+The width column tests something the uniform-state test cannot see at all,
+namely $D = c_s^2(1/\omega - 1/2)$ with $c_s^2 = 1/4$: a wrong speed of sound
+appears immediately as a slope error. The agreement improves monotonically
+downstream, from $+8.2\%$ at $x=20$ to $+0.9\%$ at $x=122$, which is the
+signature of the finite source: \eqref{eq:plume} is a \emph{point} source and
+the code releases from a $3^3$ box, so the two can only agree once the plume is
+much wider than the box. The residual near $1\%$ is consistent with the
+$O(1/\mathrm{Pe}) \approx 0.2\%$ error of neglecting streamwise diffusion in
+\eqref{eq:plume} together with D3Q7's $O(u^2)$ equilibrium defect.
+\subsubsection{Natural convection}
+\label{sec:natconv}
 
-%------------------------------------------------------------------------------
-\subsection{Three-dimensional Taylor--Green vortex}
-
-$D=64$, run to $t^\ast = t u_0/D = 10$. There is no exact solution; the
-comparison is between lattices. At the campaign's fixed $u_0=0.02$ the Mach
-number is $0.035$ rather than the paper's $0.2$--$0.6$, so a unit of physical
-time costs up to seventeen times more steps than in the paper.
+Differentially heated square cavity, hot and cold vertical walls, adiabatic
+horizontal walls, no-slip throughout, against the benchmark of de Vahl Davis
+\cite{devahldavis1983} at $\mathrm{Pr}=0.71$. Fixing the characteristic velocity
+$u_c=\sqrt{g\beta\,\Delta T\,H}$ sets the Mach number, and then
+$\nu = H u_c\sqrt{\mathrm{Pr}/\mathrm{Ra}}$ follows.
 
 \begin{center}\small
-\begin{tabular}{lcc}
+\begin{tabular}{llcccccc}
 \toprule
- & $\mathrm{Re}=1600$ & $\mathrm{Re}=30\,000$ \\
+$\mathrm{Ra}$ & $N$ & op & $\mathrm{Nu}$ & benchmark & dev. & $u_{\max}$ & reference \\
 \midrule
-D3Q27 & completes, $E/E_0=0.0145$ at $t^\ast=10$ & completes, $E/E_0=0.0399$ at $t^\ast=10$ \\
+$10^3$ & 64 & BGK & 1.1176 & 1.118 & $-0.04\%$ & 3.65 & 3.649 \\
+       &    & TRT & 1.1179 & 1.118 & $-0.01\%$ & 3.65 & \\
+$10^4$ & 64 & BGK & 2.2431 & 2.243 & $+0.00\%$ & 16.14 & 16.178 \\
+       &    & TRT & 2.2479 & 2.243 & $+0.22\%$ & 16.14 & \\
+$10^5$ & 96 & BGK & 4.5169 & 4.519 & $-0.05\%$ & 34.47 & 34.730 \\
+       &    & TRT & 4.5323 & 4.519 & $+0.29\%$ & 34.52 & \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\noindent At $\mathrm{Re}=30\,000$ and this Mach number $\tau=0.50026$. That
-case was initially judged infeasible on the available hardware; the judgement
-was wrong, and D3Q27 runs it to $t^\ast=10$ without difficulty.
+\noindent Within $0.3\%$ everywhere. Note that BGK slightly edges TRT here,
+contrary to the expectation that the magic parameter would help: the wall
+placement it fixes is a \emph{momentum} boundary, whereas what limits this case is
+the thermal boundary layer, resolved by the scalar lattice.
+\subsubsection{Rayleigh--B\'enard convection}
+\label{sec:rbconv}
+\label{sec:rb}
 
-%------------------------------------------------------------------------------
-\subsection{Inlet-driven Poiseuille flow}
-\label{sec:poisinlet}
+A layer of depth $H$ heated from below and cooled from above, periodic
+horizontally, no-slip and isothermal on both plates. This exercises the scalar
+Dirichlet condition in the configuration it was designed for, and couples it to
+the buoyancy force of \S\ref{sec:boussinesq}.
 
-Sec.~III.A of \cite{derosis2017pre}. Laminar flow along $x$; no-slip on the two
-$y$-normal planes; the parabolic profile $u_x(0,y) = 4U_0\,(y/L_y)(1-y/L_y)$
-with $U_0 = 0.005$ imposed at the west face; outflow opposite; $L_x = 21$;
-$\mathrm{Re} = U_0 L_y/\nu = 10$; started from rest and run to steady state. The
-error is the relative $L_2$ norm, Eq.~(15) there, between the analytic profile
---- which equals the inlet profile, the flow being fully developed --- and a
-$y$-aligned cross section at mid-domain. $L_z=1$ rather than the paper's $21$;
-the flow has no $z$ dependence and $z$ is periodic either way. The outflow is
-the constant back-pressure condition of \S\ref{sec:outflow}.
+\paragraph{Wall pairing.} The scalar uses anti-bounce-back and the fluid halfway
+bounce-back, so \emph{both} wall planes sit at $y=0.5$ and $y=H+0.5$ and the
+layer is exactly $H$ lattice units deep. Pairing an on-node condition for one
+field with a midway condition for the other would place the thermal and viscous
+boundaries half a spacing apart, which corrupts $\mathrm{Ra}$ itself rather than
+merely adding an error. The box is one critical wavelength wide,
+$2\pi/k_c = 2.0158\,H$.
 
-This test is worth having precisely because it is driven by the inlet and not by
-a body force, so it is free of both the Guo half-force interaction and the
-curvature slip \eqref{eq:curvslip} that dominate the forced channel of
-\S\ref{sec:poiseuille}.
-
+\paragraph{Onset.} Linear stability of a rigid--rigid layer gives
+$\mathrm{Ra}_c = 1707.762$ at $k_cH = 3.117$. This is the sharpest single number
+this configuration can be asked for: the buoyancy coupling, both boundary
+conditions, the diffusivity calibration and the wall placement all feed into it,
+and an error in any one moves it. It is measured here by bisecting on the sign of
+the growth rate of the critical mode.
 \begin{center}\small
-\begin{tabular}{lccccc|c}
+\begin{tabular}{rllll}
 \toprule
-$L_y$ & 41 & 81 & 161 & 321 & 641 & fitted rate \\
+& \multicolumn{2}{c}{bounce-back $+$ anti-bounce-back} & \multicolumn{2}{c}{regularised $+$ moment} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+$H$ & $\mathrm{Ra}_c$ & deviation & $\mathrm{Ra}_c$ & deviation \\
 \midrule
-D2Q9  & $1.160\e{-3}$ & $3.251\e{-4}$ & $7.261\e{-5}$ & $1.558\e{-5}$ & $6.192\e{-6}$ & 1.964 \\
-D3Q27 & $1.160\e{-3}$ & $3.251\e{-4}$ & $7.261\e{-5}$ & $1.558\e{-5}$ & $6.192\e{-6}$ & 1.964 \\
+16 & 1764.0 & $+3.29\%$ & 1769.5 & $+3.61\%$ \\
+24 & 1730.5 & $+1.33\%$ & 1737.4 & $+1.73\%$ \\
+32 & 1718.9 & $+0.65\%$ & 1725.7 & $+1.05\%$ \\
+48 & 1712.1 & $\bm{+0.25\%}$ & 1716.8 & $+0.53\%$ \\
 \bottomrule
 \end{tabular}
 \end{center}
+\noindent Both families converge on $1707.762$, the midway pair at
+$O(h^{2.3})$ and the on-node pair at $O(h^{1.6})$.
 
-\noindent Against the published $2.063$ that is $4.8\%$ low.
-The shortfall is entirely in the last refinement, where the pairwise rate drops
-from $2.231$ to $1.334$, and it is understood --- see below. It is worth noting
-first that the paper states its error at the finest grid, $L_y = 1281$, is of
-order $10^{-5}$; the error here at $L_y=641$ is $6.2\e{-6}$, already below that.
+\paragraph{Measuring the growth rate.} The obvious estimator --- the total
+kinetic energy --- does not work. Seeded at $10^{-6}$ it sits near round-off, and
+the resulting ``growth rate'' is not even monotonic in $\mathrm{Ra}$, which is
+impossible for a linear instability; it put $\mathrm{Ra}_c$ at 1749 rather than
+1719 at $H=32$. Projecting the vertical velocity onto the critical mode
+$\sin(kx)\sin(\pi y)$ instead rejects acoustic transients, round-off and the
+spurious currents of the initial state, and recovers a growth rate that varies
+smoothly and crosses zero cleanly.
 
-\paragraph{What limits the order --- three falsified hypotheses.} The outlet was
-the obvious suspect, and it is not the cause.
-
-\begin{enumerate}\itemsep2pt
-\item \emph{Per-station error.} Breaking the error down by $x$ at $L_y=641$
-      makes the outlet look guilty: against $L_y=161$ the inlet station
-      converges at $1.99$ and the bulk minimum at $1.92$, both clean second
-      order, while the outlet station converges at $0.70$.
-\item \emph{Moving the outlet away does not help.} Repeating at $L_x=41$ and
-      $L_x=81$ makes the last pairwise rate \emph{worse}, not better:
-      $1.334 \to 0.885 \to 0.007$. At $L_x=81$ the error stops responding to
-      refinement altogether --- $5.974\e{-6}$ at $L_y=321$ against
-      $5.945\e{-6}$ at $L_y=641$.
-\item \emph{A second-order outlet does not help.} Replacing the zero-gradient
-      tangential extrapolation by a linear one (\S\ref{sec:outflow}) is worse on
-      the coarse grids and indistinguishable on the finest.
-\end{enumerate}
-
-\noindent What it actually is: a non-refining, velocity-dependent error.
-Sweeping $U_0$ at fixed $\mathrm{Re}=10$ moves the onset of the degradation, and
-always toward \emph{coarser} grids as $U_0$ rises.
-
+\paragraph{Nusselt number.} At $H=48$, $\mathrm{Pr}=0.71$. Two independent
+estimators are reported --- the wall gradient and the volume-averaged convective
+flux $1+\langle vT\rangle H/(D\,\Delta T)$. They measure different things, so
+their agreement is a convergence check and not a tautology.
 \begin{center}\small
-\begin{tabular}{ccccccc}
+\begin{tabular}{rrlllr}
 \toprule
-$U_0$ & $\mathrm{Ma}$ & fitted rate & \multicolumn{4}{c}{pairwise rates} \\
+$\mathrm{Ra}$ & $\mathrm{Ra}/\mathrm{Ra}_c$ & $Nu$ (wall) & $Nu$ (volume) & spread & $|u|_{\max}$ \\
 \midrule
-0.0025 & 0.0043 & \textbf{2.067} & 1.720 & 2.026 & 2.205 & 2.263 \\
-0.005  & 0.0087 & 1.964 & 1.868 & 2.182 & 2.231 & 1.334 \\
-0.01   & 0.0173 & 1.523 & 2.091 & 2.179 & 0.974 & 0.812 \\
-0.02   & 0.0346 & 0.844 & 2.097 & 0.150 & 0.644 & 0.947 \\
+$1\,500$   & 0.88 & $1.0000$ & $1.0000$ & $6.0\e{-13}$ & $0.0000$ \\
+$2\,500$   & 1.46 & $1.4692$ & $1.4690$ & $1.3\e{-4}$  & $0.0038$ \\
+$5\,000$   & 2.93 & $2.1079$ & $2.1073$ & $3.0\e{-4}$  & $0.0059$ \\
+$10^{4}$   & 5.86 & $2.6490$ & $2.6475$ & $5.7\e{-4}$  & $0.0073$ \\
+$3\times10^{4}$ & 17.6 & $3.6144$ & $3.6089$ & $1.5\e{-3}$ & $0.0090$ \\
+$5\times10^{4}$ & 29.3 & $4.1523$ & $4.1424$ & $2.4\e{-3}$ & $0.0096$ \\
+$10^{5}$   & 58.6 & $4.9869$ & $4.9659$ & $4.2\e{-3}$  & $0.0103$ \\
 \bottomrule
 \end{tabular}
 \end{center}
+\noindent Below onset the result is exact: $Nu = 1.0000$ with the two estimators
+agreeing to $6\e{-13}$ and $|u|_{\max}$ identically zero, so the conductive state
+is a fixed point of the coupled system to round-off. Above onset the estimators
+agree to better than $0.1\%$ up to $\mathrm{Ra}=10^4$ and to $0.42\%$ at
+$10^5$; the growth of that spread is the honest indicator that the top of the
+table is the least settled part. A power-law fit gives
+$Nu = 0.132\,\mathrm{Ra}^{0.319}$ overall and an exponent of $0.267$ for
+$\mathrm{Ra}\ge3\times10^4$.
 
-\noindent At $U_0 = 0.0025$ the velocity-dependent term stays below the
-discretisation error across the whole range and the fitted rate is $2.067$,
-against the published $2.063$ --- agreement to $0.2\%$. The scheme is second
-order; the shortfall at $U_0=0.005$ is an artefact of the test's Mach number,
-not a defect of the wall or the outlet.
-
-This is not a novel observation. Reference \cite{derosis2020} reports the same
-behaviour on its own Taylor--Green convergence study --- ``for the lowest value
-of $u_0$, an optimal convergence value equal to 2 is found. As $u_0$ increases,
-the accuracy and convergence properties of the method deteriorate as well'' ---
-and attributes it to the cubic aliasing defect $c_{i\zeta}^3 = c_{i\zeta}$,
-which prevents the diagonal terms $u_\zeta^3$ from entering the third-order
-equilibrium moments and can only be removed by explicit correction terms. The
-paper on this Poiseuille case~\cite{derosis2017pre} instead asserts that
-$U_0=0.005$ gives a Mach number ``sufficiently low to annihilate detrimental
-compressibility effects''; at the accuracy reached here that assertion does not
-hold, which is unsurprising given that the error here at $L_y=641$ is already
-below the error there at $L_y=1281$.
-
-Fitting $\varepsilon = A/L_y^2 + B$ to the two finest grids gives $B<0$ at
-$U_0=0.0025$ --- no floor reached --- and $B = 3.1\e{-6}$, $9.2\e{-6}$,
-$2.1\e{-5}$ at $U_0 = 0.005$, $0.01$, $0.02$. That is growth somewhere between
-linear and quadratic in $U_0$, but a two-point extraction is far too noisy to
-pin the exponent and none is claimed.
-
-%------------------------------------------------------------------------------
-\subsection{Orszag--Tang vortex in three dimensions}
-\label{sec:ot3d}
-
-Section III.D and Fig.~6 of \cite{derosis2017pre}, with the initial condition
-from Mininni, Pouquet and Montgomery~\cite{mininni2006}, that paper's Ref.~[38].
-Cubic periodic box of side $2\pi$ on $M^3$ points, $\delta=2\pi/M$:
-\begin{align}
-  \uu(\xx,0) &= v_0\left[-2\sin(\delta y),\; 2\sin(\delta x),\; 0\right], \\
-  \bb(\xx,0) &= 0.8\,b_0\left[-2\sin(2\delta y)+\sin(\delta z),\;
-                              2\sin(\delta x)+\sin(\delta z),\;
-                              \sin(\delta x)+\sin(\delta y)\right].
-\end{align}
-Both are solenoidal: each component depends only on coordinates it is not
-differentiated by, so every term of the divergence vanishes identically.
-$\mathrm{Re}=100$ on the lattice definition $\mathrm{Re}=v_0M/\nu$, $\Pr_m=1$,
-D3Q27 for the fluid and D3Q7 for the field, central moments throughout.
-
-\paragraph{Three things the paper leaves open.} Stated here because they change
-the numbers, not buried in the code.
-\begin{itemize}[leftmargin=1.4em,itemsep=2pt]
-\item \emph{A sign.} Equation~(28) as printed has $+2\sin(\delta y)$ in the first
-      velocity component; Ref.~\cite{mininni2006} has $-2\sin y$, which is what
-      is used here. Unlike the two-dimensional Taylor--Green case in the same
-      paper, the divergence does \emph{not} discriminate --- both forms are
-      solenoidal --- so this rests on the cited source rather than on a
-      consistency check. It is a genuine ambiguity, not a demonstrated typo.
-\item \emph{$v_0$.} The paper says only that ``the values of $v_0$ and $b_0$ lead
-      to a Mach number, $\mathrm{Ma}\sim0.034$'', and that depends on which speed
-      $\mathrm{Ma}$ is built on. Taken here on the peak initial speed
-      $2\sqrt2\,v_0$, giving $v_0=6.94\e{-3}$.
-\item \emph{$b_0$.} Not given; set to $v_0$, the usual equipartition choice.
-\end{itemize}
-
-\paragraph{What can be checked.} Figure~6 is a plot against a high-resolution
-pseudospectral run and those values are not available numerically, so no
-per-point comparison is possible. What the figure \emph{does} supply is its axes
---- panel (a) plots the volume-averaged kinetic energy $\Gamma$ normalised from
-$1$, panel (b) runs from $5$ to $25$ in $J_{\max}$ --- and the text states that
-``the current shows a maximum at about $t=1$''.
-
-\begin{center}\small
-\begin{tabular}{rccc}
-\toprule
-$M$ & $J_{\max}$ peak & at $t$ & $\Gamma(4)$ \\
-\midrule
-32  & 15.71 & 1.194 & 0.1240 \\
-64  & 19.19 & 1.198 & 0.1356 \\
-128 & 20.43 & 1.200 & 0.1374 \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\noindent Every check the figure permits comes out right. The peak time
-converges to $t=1.200$ against the stated $t\approx1$; $J_{\max}$ reaches $20.4$
-on the finest grid, inside the $5$--$25$ axis; $\Gamma$ falls from $1$ to
-$0.137$, inside the $0$--$1$ axis; and the curves converge monotonically upward
-with $M$, the finer grids resolving the current sheet better, which is the trend
-the figure reports.
-
-\begin{figure}[htbp]
-\centering
-\begin{tikzpicture}
-\begin{axis}[width=7.4cm, height=6.0cm,
-  xlabel={time}, ylabel={$J_{\max}$},
-  xmin=0, xmax=4, ymin=0, ymax=22,
-  grid=both, grid style={line width=.2pt, draw=gray!25},
-  major grid style={line width=.3pt, draw=gray!45},
-  tick label style={font=\scriptsize}, label style={font=\small},
-  legend style={font=\scriptsize, cells={anchor=west}, draw=gray!50,
-                at={(0.98,0.98)}, anchor=north east, fill=white},
-  every axis plot/.append style={line width=0.9pt, mark size=1.6pt},
-  title={\small (a) peak current}]
-  \addplot[opBGK, mark=*]        table[x=t,y=j] {ot3d_M32.dat};
-  \addplot[opMRT, mark=square*]  table[x=t,y=j] {ot3d_M64.dat};
-  \addplot[opCM,  mark=diamond*] table[x=t,y=j] {ot3d_M128.dat};
-  \addplot[black, dashed, line width=0.6pt, forget plot] coordinates {(1,0) (1,22)};
-  \node[font=\scriptsize, anchor=west, text=gray!70!black]
-    at (axis cs:1.08,2.4) {paper: max at $t\approx1$};
-  \legend{$32^3$, $64^3$, $128^3$}
-\end{axis}
-\end{tikzpicture}\hfill
-\begin{tikzpicture}
-\begin{axis}[width=7.4cm, height=6.0cm,
-  xlabel={time}, ylabel={$\Gamma(t)/\Gamma(0)$},
-  xmin=0, xmax=4, ymin=0, ymax=1.05,
-  grid=both, grid style={line width=.2pt, draw=gray!25},
-  major grid style={line width=.3pt, draw=gray!45},
-  tick label style={font=\scriptsize}, label style={font=\small},
-  legend style={font=\scriptsize, cells={anchor=west}, draw=gray!50,
-                at={(0.98,0.98)}, anchor=north east, fill=white},
-  every axis plot/.append style={line width=0.9pt, mark size=1.6pt},
-  title={\small (b) volume-averaged kinetic energy}]
-  \addplot[opBGK, mark=*]        table[x=t,y=gamma] {ot3d_M32.dat};
-  \addplot[opMRT, mark=square*]  table[x=t,y=gamma] {ot3d_M64.dat};
-  \addplot[opCM,  mark=diamond*] table[x=t,y=gamma] {ot3d_M128.dat};
-  \legend{$32^3$, $64^3$, $128^3$}
-\end{axis}
-\end{tikzpicture}
-\caption{Three-dimensional Orszag--Tang vortex, D3Q27 with central moments, to
-be read against Fig.~6 of \cite{derosis2017pre}. (a) The peak current magnitude
-rises with resolution as the current sheet is resolved, and its maximum
-converges to $t=1.200$ against the paper's stated $t\approx1$; the value on the
-finest grid, $20.4$, sits inside that figure's $5$--$25$ axis. (b) The energy,
-normalised as the paper normalises it, falls from $1$ to $0.137$. Both panels
-use a linear time axis; the published figure uses a logarithmic one.}
-\label{fig:ot3d}
-\end{figure}
-
-\paragraph{Convergence, and what it does and does not establish.} Equation~(30)
-of \cite{derosis2017pre} defines $\chi$ as the $L_\infty$ norm of the relative
-discrepancy against the spectral reference, quoted there as of order $10^{-2}$
-for the finest grid. With no reference values to hand, the same measure is
-computed against $M=128$ as a stand-in:
-\begin{center}\small
-\begin{tabular}{lcc}
-\toprule
-against $M=128$ & $\Gamma$ & $J_{\max}$ \\
-\midrule
-$M=32$ & $1.56\e{-2}$ & $2.31\e{-1}$ \\
-$M=64$ & $1.9\e{-3}$  & $6.05\e{-2}$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-\noindent The successive differences in the $J_{\max}$ peak are $0.171$ and
-$0.061$, a ratio of $2.83$ --- close to second order on a quantity that is a
-derivative of the field and therefore the hardest thing here to converge. The
-$M=64$ figures, $6.1\e{-2}$ on $J_{\max}$ and $1.9\e{-3}$ on $\Gamma$, bracket
-the $10^{-2}$ the paper quotes.
-
-\emph{This is self-convergence, not agreement.} Substituting our own finest grid
-for the spectral reference flatters systematically, because it cannot see any
-error common to all three grids. It establishes that the scheme converges and
-roughly how fast; it does not independently establish that it converges to the
-right answer. Read the table above as a consistency check, not as a score.
-
-\medskip
-\noindent One incidental result worth recording: at $M=32$ this runs at
-$\tau=0.507$, close enough to $1/2$ that BGK ghost modes are normally a problem,
-and it completes the full $t\in[0,4]$ without difficulty --- consistent with the
-stability advantage \cite{derosis2017pre} claims for central moments.
-
-%------------------------------------------------------------------------------
-\subsection{A finding that cuts across the campaign}
-
-\paragraph{D2Q9 and D3Q27 with one point in $z$ are bit-identical.} Not merely
-close: identical to every digit printed, in the Taylor--Green convergence, the
-shear layer, the dipole, the cavity and the inlet Poiseuille --- five
-independent tests. The reduction of D3Q27 to D2Q9 under a single periodic $z$
-point is exact, which is a useful correctness check in both directions: it
-exercises the 3D code path against the 2D one on every one of these flows.
-
-%------------------------------------------------------------------------------
-\subsection{Field snapshots}
-\label{sec:snapshots}
-
-The tables elsewhere in this section say whether a number is right. These say
-whether the \emph{flow} is right, which is a different question and one a norm
-cannot answer: a scheme can hit an integral quantity while getting the structure
-wrong. Every panel below is the field the corresponding test actually converged
-to, dumped from the run that produced the numbers quoted for it.
-
-Signed quantities --- vorticity, current --- use a diverging map centred on
-zero; quantities with no meaningful zero --- temperature, speed --- use a
-sequential one. Where the colour saturates below the peak, the caption says so:
-these fields are strongly localised, and scaling by the maximum leaves the
-structure that matters invisible.
-
-\begin{figure}[htbp]
-\centering
-\begin{tabular}{cc}
-\includegraphics[width=0.40\textwidth]{sl_zeta_L512_t05.png} &
-\includegraphics[width=0.40\textwidth]{sl_zeta_L512_t10.png} \\[1mm]
-\small (a) $t/t_0 = 0.5$ & \small (b) $t/t_0 = 1$ \\
-\end{tabular}
-\caption{\textbf{Double shear layer}, vorticity, $L=512$,
-$\mathrm{Re}=30\,000$, D2Q9 central moments (\S\ref{sec:campaign}). By (a) the
-perturbation has begun to distort the two layers; by (b) each has rolled into a
-vortex, and the two are joined by a single unbroken braid. That the braid stays
-thin and connected is the whole test: at $\tau = 0.50102$ the flow is barely
-resolved, and an under-dissipative or unstable scheme shows it here first, by
-fragmenting the braid into secondary vortices that are numerical rather than
-physical. Doubling the resolution from the $L=256$ of the campaign table sharpens the
-structure and, more usefully, quantifies the numerical dissipation: the
-enstrophy retained at $t/t_0=1$ rises from $0.6227$ to $0.6432$, and the energy
-from $0.98644$ to $0.98696$. The physical dissipation at this Reynolds number is
-negligible over one turnover, so nearly all of that difference is the scheme's
-own, and it shrinks with resolution as it should. Colour saturates at the 99th
-percentile of $|\zeta|$.}
-\label{fig:shear}
-\end{figure}
-
-\begin{figure}[htbp]
-\centering
-\begin{tabular}{cc}
-\includegraphics[width=0.34\textwidth]{cav_speed_re400.png} &
-\includegraphics[width=0.34\textwidth]{cav_zeta_re400.png} \\[1mm]
-\small (a) speed $|\uu|/u_{\rm lid}$ & \small (b) vorticity \\
-\end{tabular}
-\caption{\textbf{Lid-driven cavity} at $\mathrm{Re}=400$, $129^2$, D2Q9 central
-moments, the run scored against Ghia \emph{et al.}\ in \S\ref{sec:campaign}
-($\max|\Delta u| = 0.0069$). The primary vortex sits above and right of centre
-and both downstream corner eddies are resolved. The vorticity is clipped hard,
-at the 88th percentile against a peak twenty times larger, because it is
-concentrated in the lid boundary layer; without that the interior is blank.}
-\label{fig:cavity}
-\end{figure}
-
-\begin{figure}[htbp]
-\centering
-\begin{tabular}{cc}
-\includegraphics[width=0.40\textwidth]{hm_ux.png} &
-\includegraphics[width=0.40\textwidth]{hm_bx.png} \\[1mm]
-\small (a) velocity $u_x$ & \small (b) induced field $b_x$ \\
-\end{tabular}
-\caption{\textbf{Inlet-driven Hartmann flow}, $\mathrm{Ha}=10$, $L_y=65$,
-D2Q9 fluid with D2Q5 induction, central moments
-(\S\ref{sec:hartmanninlet}). The velocity shows the flat Hartmann core with
-boundary layers of thickness $L/\mathrm{Ha}$; the induced field is antisymmetric
-about the centreline, vanishing there and at both walls. Both are visibly
-independent of the streamwise coordinate, which is the property the exact
-solution has and which the convergence table depends on --- any $x$ structure
-here would be boundary error, and it is how the magnetic outflow defect
-(\S\ref{sec:momentbc}) was found.}
-\label{fig:hartmann}
-\end{figure}
-
+\paragraph{What is not claimed.} These $Nu$ have \emph{not} been compared against
+published tables. Values for two-dimensional rolls depend on aspect ratio and
+Prandtl number, and no reference set has been verified here, so no deviation
+column is given. What is verified is internal: the subcritical exactness, the
+agreement of two independent estimators, and $\mathrm{Ra}_c$ itself. Two further
+caveats apply to the highest rows: the box is one critical wavelength wide, which
+is the right choice for onset but restricts the roll structure at large
+$\mathrm{Ra}$, and above $\mathrm{Ra}\sim10^5$ two-dimensional convection may
+become time-dependent, in which case a single final-state $Nu$ should be replaced
+by a time average.
 \begin{figure}[htbp]
 \centering
 \begin{tabular}{ccc}
@@ -4882,42 +4551,10 @@ mechanism behind $Nu$ rising to $4.99$, since $Nu$ is precisely the wall
 gradient normalised by the conductive one. All three share a colour scale.}
 \label{fig:rb}
 \end{figure}
-
-\begin{figure}[htbp]
-\centering
-\begin{tabular}{cc}
-\includegraphics[width=0.40\textwidth]{ot3d_vol_t1.png} &
-\includegraphics[width=0.40\textwidth]{ot3d_vol_t2.png} \\[1mm]
-\small (a) $t = 1$, peak current & \small (b) $t = 2$ \\
-\end{tabular}
-\caption{\textbf{Three-dimensional Orszag--Tang vortex}, current magnitude
-$|\nabla\times\bb|$ through the whole $128^3$ box, D3Q27 with D3Q7 induction
-(\S\ref{sec:ot3d}). Volume rendered rather than sliced: a cut plane shows the
-sheets only where they happen to intersect it and says nothing about how they
-are oriented, which for this flow is the point. The current organises into
-curved sheets wrapping the box, and (a) is the instant the peak is reached ---
-the same $t\approx1$ the $J_{\max}$ curve of Fig.~\ref{fig:ot3d} locates.
-\emph{Both panels share one colour scale}, set by the $t=1$ peak, so the visible
-dimming from (a) to (b) is the real decay: $J_{\max}$ falls from $19.1$ to
-$8.32$, less than half, in the same units as Fig.~\ref{fig:ot3d}. Normalising
-each panel to its own maximum --- the default in most rendering tools --- would
-have made the later, weaker field the brighter of the two. The reference is
-recomputed at this resolution rather than carried over from the $64^3$ volumes:
-the raw lattice values differ between the two by the factor $\Delta t \propto
-1/M$ alone, so reusing the coarse-grid number would have rescaled the pair by
-about two. Orthographic view, azimuth $38^\circ$, elevation
-$24^\circ$; emission--absorption compositing with the weak field left
-transparent, the local gradient used as a surface normal for a diffuse term so
-the sheets read as surfaces rather than fog, and $2\times$ supersampling.
-Rendered by \code{doc/fig/vol3d.py}, which is self-contained.}
-\label{fig:ot3dfield}
-\end{figure}
-
-%==============================================================================
-\section{Thermal benchmarks of Zhou, De Rosis and Revell (2026)}
+\subsubsection{A published thermal suite: Zhou, De Rosis and Revell (2026)}
 \label{sec:zhou}
 
-The suite of \S\ref{sec:campaign} is a fluid-only campaign. This section works
+The campaign of \S\ref{sec:campaign} is fluid-only. The tests that follow work
 through a second published suite, this time a thermal one: Sec.~3 of Zhou, De
 Rosis and Revell~\cite{zhou2026}, five of its seven cases. Sections 3.3 (a
 side-open cavity packed with conductive blocks) and 3.7 (Rayleigh--B\'enard with
@@ -4958,6 +4595,7 @@ case~3.4 below confirms rather than assumes.
 The five cases are taken out of the paper's order and in two groups: 3.1 and 3.4
 first, because both have exact solutions and so measure the scheme rather than a
 comparison, then 3.2, 3.5 and 3.6, where the answer is somebody else's number.
+Their headings below carry the paper's own case number in parentheses.
 
 \paragraph{Wall conventions, which are the trap in every coupled case.} There
 are two consistent families, and mixing them puts the viscous and the thermal
@@ -4973,7 +4611,7 @@ too; its two adiabatic flanks are the one unavoidable exception, since the scala
 module has no on-node zero-flux condition.
 
 %------------------------------------------------------------------------------
-\subsection{A convergence criterion that was wrong by two orders of magnitude}
+\subsubsection{A convergence criterion that was wrong by two orders of magnitude}
 \label{sec:zhoudrift}
 
 Every case here declares steady state on the whole-field relative change over a
@@ -5004,7 +4642,7 @@ falls back to $\mathrm{drift}=\mathrm{res}$ so that a run still growing can neve
 be declared converged.
 
 %------------------------------------------------------------------------------
-\subsection{3.1 Conjugate heat conduction: exact}
+\subsubsection{Conjugate heat conduction (their 3.1): exact}
 
 A layer of length $L=1$, solid over $0\le x\le 0.2$ and fluid beyond it, held at
 $\theta=1$ and $\theta=0$ at the two ends and periodic elsewhere. With
@@ -5063,7 +4701,7 @@ longer at $\kappa=100$ --- or to tens, where the closures whose error grows as
 $(1/\omega - 1/2)^2$ stop being accurate.
 
 %------------------------------------------------------------------------------
-\subsection{3.4 Normal plate velocity: second order, and a hypothesis that died}
+\subsubsection{Normal plate velocity (their 3.4): second order, and a hypothesis that died}
 
 A uniform stream $u_y$ crosses an isothermal layer, injected at the cold bottom
 and withdrawn at the hot top, with periodic flanks. The steady solution is the
@@ -5136,7 +4774,7 @@ coupled framework's $3.65\%$ at $H=200$ marked for scale. Rendered by
 \end{figure}
 
 %------------------------------------------------------------------------------
-\subsection{3.2 Natural convection in a square cavity}
+\subsubsection{Natural convection in a square cavity (their 3.2)}
 \label{sec:zhounat2d}
 
 The differentially heated square cavity again, but this time on D3Q27 and D3Q7
@@ -5280,7 +4918,7 @@ however it is normalised, and nothing here sits above round-off at all.
 
 
 %------------------------------------------------------------------------------
-\subsection{3.5 Thermal lid-driven cavity, and two conclusions drawn too early}
+\subsubsection{Thermal lid-driven cavity (their 3.5), and two conclusions drawn too early}
 \label{sec:zhoulid}
 
 A square cavity with the lid sliding right, the other three walls no-slip, the
@@ -5435,7 +5073,7 @@ primary vortex with three corner vortices at $\mathrm{Ri}=0.1$. Rendered by
 \end{figure}
 
 %------------------------------------------------------------------------------
-\subsection{3.6 Natural convection in a cubic cavity}
+\subsubsection{Natural convection in a cubic cavity (their 3.6)}
 \label{sec:zhounat3d}
 
 The same problem in three dimensions: hot at $x=0$, cold at $x=L$, the other four
@@ -5504,6 +5142,383 @@ without needing the reference. Rendered by \code{doc/fig/zhou\_natural3d.py}.}
 \label{fig:zhounat3d}
 \end{figure}
 
+%------------------------------------------------------------------------------
+\subsection{Magnetohydrodynamics}
+\label{sec:val:mhd}
+
+The magnetic walls themselves are validated in the boundary-condition survey
+(\S\ref{sec:bcvalid}), where Hartmann flow appears as the test that exercises
+Dellar's moment condition against an exact solution; what follows is the
+physics rather than the boundary.
+\subsubsection{Exact solutions: resistive decay and the shear Alfv\'en wave}
+\label{sec:mhdexact}
+
+\begin{center}\small
+\begin{tabular}{lccc}
+\toprule
+case & order & recovered & rel.\ error \\
+\midrule
+resistive decay, $L_2$              & 2.00 & $\eta = 0.050110$   & $2.2\times10^{-3}$ \\
+shear Alfv\'en wave, phase speed    & 2.00 & $v_A = 0.050017$    & $3.4\times10^{-4}$ \\
+shear Alfv\'en wave, damping        & ---  & $(\nu+\eta)/2$      & $5.3\times10^{-3}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The shear Alfv\'en wave is an exact solution of the \emph{full nonlinear}
+equations, not merely the linearised ones: with $\uu\perp\bb_0$ and everything
+depending only on $x$, $(\uu\!\cdot\!\nabla)\uu$ vanishes identically while
+$(\bb\!\cdot\!\nabla)\bb$ does not, so the Lorentz coupling and the induction
+equation are both driven and both must be correct. Phase is measured as well as
+amplitude, because an error in the coupling produces the wrong wave \emph{speed}
+rather than the wrong amplitude.
+
+\paragraph{On $\nabla\!\cdot\!\bb$.} The two wave cases report
+$|\nabla\!\cdot\!\bb|$ at round-off, and \emph{this is meaningless}: in both,
+$b_x$ depends only on $y$ and $b_y$ only on $x$, so the divergence is structurally
+zero whatever the scheme does. Orszag--Tang is the only case in the suite that
+exercises the property, and there $\nabla\!\cdot\!\bb$ is \emph{not} preserved to
+machine precision: measured against the field's own gradient scale $k|\bb|$ it
+sits at truncation level and converges away at order 1.65. That is the honest
+claim, and it is stated here in place of the stronger one.
+\subsubsection{Orszag--Tang vortex}
+\label{sec:orszag}
+
+The Orszag--Tang vortex \cite{orszag1979} has no closed-form solution, so it is
+not validated against a formula. It is validated against published reference data
+and against structural properties. Initial conditions on a periodic box of side
+$L$:
+\begin{equation}
+  \uu(\xx,0) = u_0\big[-\sin y,\ \sin x\big], \qquad
+  \bb(\xx,0) = b_0\big[-\sin y,\ \sin 2x\big].
+\end{equation}
+
+
+\begin{figure}[htbp]
+\centering
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{cc}
+\includegraphics[width=0.40\textwidth]{ot_zeta_t05.png} &
+\includegraphics[width=0.40\textwidth]{ot_zeta_t1.png} \\[1mm]
+{\small (a) vorticity $\zeta$, $t=0.5$\,s} & {\small (b) vorticity $\zeta$, $t=1$\,s} \\[3mm]
+\includegraphics[width=0.40\textwidth]{ot_j_t05.png} &
+\includegraphics[width=0.40\textwidth]{ot_j_t1.png} \\[1mm]
+{\small (c) current $j$, $t=0.5$\,s} & {\small (d) current $j$, $t=1$\,s} \\
+\end{tabular}
+\caption{Orszag--Tang vortex at $\mathrm{Re}\approx628$, $\mathrm{Pr}_m=1$, on a
+$512^2$ grid with the hybrid central-moment operator. Diverging colour scale,
+blue negative, red positive. The scale \emph{saturates at the 99th percentile of
+$|v|$} --- $6.16$ and $11.13$ for $\zeta$, $12.88$ and $22.67$ for $j$ --- because
+the current sheets are strongly localised: at $t=1$ the peak $|j|$ is $46.4$
+against a 99th percentile of $22.7$, so scaling by the maximum would leave the
+whole field pale. Between $t=0.5$ and $t=1$ the smooth initial vortex steepens
+into the thin diagonal current sheet visible in panel (d), which is the feature
+this benchmark exists to resolve and the reason $j_{\max}$ is the more
+grid-sensitive of the two reported peaks.}
+\label{fig:ot}
+\end{figure}
+
+\paragraph{Comparison with published data.}
+Reproducing the setup of \cite{derosis2018}: $L=2\pi$\,m, $u_0=b_0=2$,
+$\rho=1$\,kg\,m$^{-3}$, $N=1024$, $\Delta t=5\times10^{-5}$\,s. The derived lattice
+parameters reproduce the published values exactly
+($u_{0,\rm lat}=1.6297\times10^{-2}$, $\mathrm{Ma}=0.0282$), with
+$\mathrm{Re}=u_0N/\nu$ in lattice units and $\mathrm{Pr}_m=1$. The reference
+column is the high-resolution pseudo-spectral data quoted there.
+
+\begin{center}\small
+\begin{tabular}{llcccc}
+\toprule
+ & $t$ (s) & spectral & published LB & here, BGK & here, hybrid CM \\
+\midrule
+$j_{\max}$    & 0.5 & 18.24 & 18.24 & 18.23 & 18.23 \\
+$j_{\max}$    & 1.0 & 46.59 & 46.65 & 46.55 & 46.55 \\
+$\zeta_{\max}$& 0.5 & 6.758 & 6.756 & 6.756 & \textbf{6.756} \\
+$\zeta_{\max}$& 1.0 & 14.20 & 14.18 & 14.182 & \textbf{14.180} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Errors against the spectral reference are
+$0.07 / 0.09 / 0.03 / 0.14\,\%$, where the published LB errors are
+$0 / 0.13 / 0.03 / 0.14\,\%$: the same accuracy from an independent
+implementation, with the hybrid scheme landing on the published vorticity values
+to every quoted digit. Convergence toward the reference is second order, $j_{\max}$
+at $t=1$ going $-1.92\%$ ($N=256$), $-0.46\%$ ($N=512$), $-0.09\%$ ($N=1024$).
+
+The one residual is $j_{\max}$ at $t=1$, $0.22\%$ below the published value. That
+is the quantity in which to expect it: the reference computes the current locally
+from the distributions whereas this code uses second-order central differences,
+and $j$ is the more gradient-sensitive of the two peaks. Vorticity agreeing
+exactly while the current is $0.2\%$ low points at the derivative operator rather
+than at the scheme.
+
+\paragraph{Stability at high Reynolds number.}
+At $\mathrm{Re}=5000$ the lattice viscosity gives $\tau=0.510$ on the $1024^2$
+grid, close enough to $1/2$ that the BGK ghost modes go unstable. Runs are
+terminated at the first non-finite field or at $\mathrm{Ma}>0.5$.
+
+\begin{center}\small
+\begin{tabular}{lccccc}
+\toprule
+grid & $\tau$ & BGK & hybrid CM & published BGK \\
+\midrule
+$512^2$  & 0.505 & blow-up $t=0.38$\,s & stable to $t=1.00$\,s & --- \\
+$1024^2$ & 0.510 & blow-up $\bm{t=0.54}$\,s & stable to $\bm{t=1.20}$\,s & $t\approx0.52$\,s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The BGK failure reproduces the published behaviour quantitatively --- within one
+probe interval ($0.02$\,s) --- and shows the correct resolution dependence. Its
+signature is instructive: $j_{\max}$ grows smoothly to $24.0$ at $t=0.50$, triples
+to $73.7$ at $t=0.52$, then overflows, while the Mach number is $0.055$ at the
+last clean sample. This is a collision instability, not a gradual compressibility
+breakdown.
+
+The hybrid central-moment scheme runs $2.2\times$ longer on the same grid and
+passes the $t\approx0.99$\,s mark that defeated BGK even on a finer grid in
+\cite{derosis2018}. Its $j_{\max}$ peaks at $166.2$ near $t=1.00$ and then
+\emph{decays} smoothly to $155.4$ by $t=1.18$, with the Mach number bounded at
+$0.069$ throughout. That turnover is the clearest evidence the run is genuinely
+resolved rather than merely not-yet-diverged: an unstable run grows
+monotonically, it does not turn over.
+
+\paragraph{Quasi-two-dimensional reduction: 3D lattices with $n_z=1$.}
+\label{sec:reduction}
+
+The Orszag--Tang vortex is a two-dimensional problem, so running it on a 3D
+lattice with a \emph{single} cell in $z$ is a reduction test: with $n_z=1$ and
+periodic $z$ the neighbour wrap sends the out-of-plane neighbour back to the node
+itself, the corresponding populations stream in place, and the answer must agree
+with the native 2D lattice. No code change was required --- the wrap of
+\S\ref{sec:periodic} and the pair swap of Table~\ref{tab:esopull} handle it.
+
+The magnetic field follows the fluid's dimensionality by default (D2Q5 beside
+D2Q9, D3Q7 beside D3Q27), but since $b_z\equiv0$ for this flow a 2D
+magnetic lattice is a legitimate pairing and isolates its contribution.
+Error against the spectral reference, per cent:
+
+\begin{center}\small
+\begin{tabular}{llcccc}
+\toprule
+fluid & magnetic & $j_{\max}(0.5)$ & $j_{\max}(1)$ & $\zeta_{\max}(0.5)$ & $\zeta_{\max}(1)$ \\
+\midrule
+\multicolumn{6}{l}{\emph{$N=256$}}\\
+D2Q9  & D2Q5 & $-0.89$ & $-1.92$ & $-0.25$ & $-1.57$ \\
+\textbf{D3Q27} & \textbf{D2Q5} & $\bm{-0.89}$ & $\bm{-1.92}$ & $\bm{-0.25}$ & $\bm{-1.57}$ \\
+D3Q27 & D3Q7 & $-0.77$ & $-1.66$ & $-0.24$ & $-1.51$ \\
+\midrule
+\multicolumn{6}{l}{\emph{$N=512$}}\\
+D2Q9  & D2Q5 & $-0.25$ & $-0.46$ & $-0.07$ & $-0.48$ \\
+D3Q27 & D3Q7 & $-0.22$ & $-0.39$ & $-0.07$ & $-0.46$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two results, one exact and one asymptotic.
+
+\paragraph{D3Q27 reduces to D2Q9 exactly.} Not approximately: the agreement in
+the highlighted row is structural, and both conditions for it can be checked in
+exact arithmetic. First, summing the D3Q27 weights over $z$ reproduces the D2Q9
+weights term for term,
+\begin{equation}
+  \tfrac{8}{27}+2\cdot\tfrac{2}{27} = \tfrac49, \qquad
+  \tfrac{2}{27}+2\cdot\tfrac{1}{54} = \tfrac19, \qquad
+  \tfrac{1}{54}+2\cdot\tfrac{1}{216} = \tfrac1{36},
+\end{equation}
+so for a $z$-invariant field the projected equilibrium and the projected BGK
+update are exactly D2Q9's. Second --- and this is the part that is not automatic
+--- the out-of-plane Maxwell-stress contribution cancels within every in-plane
+group:
+\begin{equation}
+  \sum_{c_z} w_i\,\big(c_z^2-\cs^2\big) = 0
+  \qquad\text{for each } (c_x,c_y) \ \text{on D3Q27}.
+\end{equation}
+
+\paragraph{The spread converges away.} Between $N=256$ and $N=512$ the
+lattice-to-lattice spread falls from $0.12$, $0.26$ and $0.06$ percentage points
+(on $j_{\max}(0.5)$, $j_{\max}(1)$, $\zeta_{\max}(1)$) to $0.03$, $0.07$ and
+$0.02$ --- factors of $4.0$, $3.7$ and $3.0$, i.e.\ second order. The lattice
+pairings are therefore converging to the same answer, and what separates them at finite
+resolution is truncation error rather than different physics. Of the two
+choices, the magnetic lattice matters more than the fluid one: swapping D2Q5 for
+D3Q7 moves $j_{\max}$ by about $0.25$ percentage points at $N=256$, which is
+unsurprising given $\cs^2=1/3$ against $1/4$ and correspondingly different
+truncation in the induction equation.
+
+%------------------------------------------------------------------------------
+\subsubsection{Orszag--Tang vortex in three dimensions}
+\label{sec:ot3d}
+
+Section III.D and Fig.~6 of \cite{derosis2017pre}, with the initial condition
+from Mininni, Pouquet and Montgomery~\cite{mininni2006}, that paper's Ref.~[38].
+Cubic periodic box of side $2\pi$ on $M^3$ points, $\delta=2\pi/M$:
+\begin{align}
+  \uu(\xx,0) &= v_0\left[-2\sin(\delta y),\; 2\sin(\delta x),\; 0\right], \\
+  \bb(\xx,0) &= 0.8\,b_0\left[-2\sin(2\delta y)+\sin(\delta z),\;
+                              2\sin(\delta x)+\sin(\delta z),\;
+                              \sin(\delta x)+\sin(\delta y)\right].
+\end{align}
+Both are solenoidal: each component depends only on coordinates it is not
+differentiated by, so every term of the divergence vanishes identically.
+$\mathrm{Re}=100$ on the lattice definition $\mathrm{Re}=v_0M/\nu$, $\Pr_m=1$,
+D3Q27 for the fluid and D3Q7 for the field, central moments throughout.
+
+\paragraph{Three things the paper leaves open.} Stated here because they change
+the numbers, not buried in the code.
+\begin{itemize}[leftmargin=1.4em,itemsep=2pt]
+\item \emph{A sign.} Equation~(28) as printed has $+2\sin(\delta y)$ in the first
+      velocity component; Ref.~\cite{mininni2006} has $-2\sin y$, which is what
+      is used here. Unlike the two-dimensional Taylor--Green case in the same
+      paper, the divergence does \emph{not} discriminate --- both forms are
+      solenoidal --- so this rests on the cited source rather than on a
+      consistency check. It is a genuine ambiguity, not a demonstrated typo.
+\item \emph{$v_0$.} The paper says only that ``the values of $v_0$ and $b_0$ lead
+      to a Mach number, $\mathrm{Ma}\sim0.034$'', and that depends on which speed
+      $\mathrm{Ma}$ is built on. Taken here on the peak initial speed
+      $2\sqrt2\,v_0$, giving $v_0=6.94\e{-3}$.
+\item \emph{$b_0$.} Not given; set to $v_0$, the usual equipartition choice.
+\end{itemize}
+
+\paragraph{What can be checked.} Figure~6 is a plot against a high-resolution
+pseudospectral run and those values are not available numerically, so no
+per-point comparison is possible. What the figure \emph{does} supply is its axes
+--- panel (a) plots the volume-averaged kinetic energy $\Gamma$ normalised from
+$1$, panel (b) runs from $5$ to $25$ in $J_{\max}$ --- and the text states that
+``the current shows a maximum at about $t=1$''.
+
+\begin{center}\small
+\begin{tabular}{rccc}
+\toprule
+$M$ & $J_{\max}$ peak & at $t$ & $\Gamma(4)$ \\
+\midrule
+32  & 15.71 & 1.194 & 0.1240 \\
+64  & 19.19 & 1.198 & 0.1356 \\
+128 & 20.43 & 1.200 & 0.1374 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Every check the figure permits comes out right. The peak time
+converges to $t=1.200$ against the stated $t\approx1$; $J_{\max}$ reaches $20.4$
+on the finest grid, inside the $5$--$25$ axis; $\Gamma$ falls from $1$ to
+$0.137$, inside the $0$--$1$ axis; and the curves converge monotonically upward
+with $M$, the finer grids resolving the current sheet better, which is the trend
+the figure reports.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=7.4cm, height=6.0cm,
+  xlabel={time}, ylabel={$J_{\max}$},
+  xmin=0, xmax=4, ymin=0, ymax=22,
+  grid=both, grid style={line width=.2pt, draw=gray!25},
+  major grid style={line width=.3pt, draw=gray!45},
+  tick label style={font=\scriptsize}, label style={font=\small},
+  legend style={font=\scriptsize, cells={anchor=west}, draw=gray!50,
+                at={(0.98,0.98)}, anchor=north east, fill=white},
+  every axis plot/.append style={line width=0.9pt, mark size=1.6pt},
+  title={\small (a) peak current}]
+  \addplot[opBGK, mark=*]        table[x=t,y=j] {ot3d_M32.dat};
+  \addplot[opMRT, mark=square*]  table[x=t,y=j] {ot3d_M64.dat};
+  \addplot[opCM,  mark=diamond*] table[x=t,y=j] {ot3d_M128.dat};
+  \addplot[black, dashed, line width=0.6pt, forget plot] coordinates {(1,0) (1,22)};
+  \node[font=\scriptsize, anchor=west, text=gray!70!black]
+    at (axis cs:1.08,2.4) {paper: max at $t\approx1$};
+  \legend{$32^3$, $64^3$, $128^3$}
+\end{axis}
+\end{tikzpicture}\hfill
+\begin{tikzpicture}
+\begin{axis}[width=7.4cm, height=6.0cm,
+  xlabel={time}, ylabel={$\Gamma(t)/\Gamma(0)$},
+  xmin=0, xmax=4, ymin=0, ymax=1.05,
+  grid=both, grid style={line width=.2pt, draw=gray!25},
+  major grid style={line width=.3pt, draw=gray!45},
+  tick label style={font=\scriptsize}, label style={font=\small},
+  legend style={font=\scriptsize, cells={anchor=west}, draw=gray!50,
+                at={(0.98,0.98)}, anchor=north east, fill=white},
+  every axis plot/.append style={line width=0.9pt, mark size=1.6pt},
+  title={\small (b) volume-averaged kinetic energy}]
+  \addplot[opBGK, mark=*]        table[x=t,y=gamma] {ot3d_M32.dat};
+  \addplot[opMRT, mark=square*]  table[x=t,y=gamma] {ot3d_M64.dat};
+  \addplot[opCM,  mark=diamond*] table[x=t,y=gamma] {ot3d_M128.dat};
+  \legend{$32^3$, $64^3$, $128^3$}
+\end{axis}
+\end{tikzpicture}
+\caption{Three-dimensional Orszag--Tang vortex, D3Q27 with central moments, to
+be read against Fig.~6 of \cite{derosis2017pre}. (a) The peak current magnitude
+rises with resolution as the current sheet is resolved, and its maximum
+converges to $t=1.200$ against the paper's stated $t\approx1$; the value on the
+finest grid, $20.4$, sits inside that figure's $5$--$25$ axis. (b) The energy,
+normalised as the paper normalises it, falls from $1$ to $0.137$. Both panels
+use a linear time axis; the published figure uses a logarithmic one.}
+\label{fig:ot3d}
+\end{figure}
+
+\paragraph{Convergence, and what it does and does not establish.} Equation~(30)
+of \cite{derosis2017pre} defines $\chi$ as the $L_\infty$ norm of the relative
+discrepancy against the spectral reference, quoted there as of order $10^{-2}$
+for the finest grid. With no reference values to hand, the same measure is
+computed against $M=128$ as a stand-in:
+\begin{center}\small
+\begin{tabular}{lcc}
+\toprule
+against $M=128$ & $\Gamma$ & $J_{\max}$ \\
+\midrule
+$M=32$ & $1.56\e{-2}$ & $2.31\e{-1}$ \\
+$M=64$ & $1.9\e{-3}$  & $6.05\e{-2}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent The successive differences in the $J_{\max}$ peak are $0.171$ and
+$0.061$, a ratio of $2.83$ --- close to second order on a quantity that is a
+derivative of the field and therefore the hardest thing here to converge. The
+$M=64$ figures, $6.1\e{-2}$ on $J_{\max}$ and $1.9\e{-3}$ on $\Gamma$, bracket
+the $10^{-2}$ the paper quotes.
+
+\emph{This is self-convergence, not agreement.} Substituting our own finest grid
+for the spectral reference flatters systematically, because it cannot see any
+error common to all three grids. It establishes that the scheme converges and
+roughly how fast; it does not independently establish that it converges to the
+right answer. Read the table above as a consistency check, not as a score.
+
+\medskip
+\noindent One incidental result worth recording: at $M=32$ this runs at
+$\tau=0.507$, close enough to $1/2$ that BGK ghost modes are normally a problem,
+and it completes the full $t\in[0,4]$ without difficulty --- consistent with the
+stability advantage \cite{derosis2017pre} claims for central moments.
+
+%------------------------------------------------------------------------------
+\begin{figure}[htbp]
+\centering
+\begin{tabular}{cc}
+\includegraphics[width=0.40\textwidth]{ot3d_vol_t1.png} &
+\includegraphics[width=0.40\textwidth]{ot3d_vol_t2.png} \\[1mm]
+\small (a) $t = 1$, peak current & \small (b) $t = 2$ \\
+\end{tabular}
+\caption{\textbf{Three-dimensional Orszag--Tang vortex}, current magnitude
+$|\nabla\times\bb|$ through the whole $128^3$ box, D3Q27 with D3Q7 induction
+(\S\ref{sec:ot3d}). Volume rendered rather than sliced: a cut plane shows the
+sheets only where they happen to intersect it and says nothing about how they
+are oriented, which for this flow is the point. The current organises into
+curved sheets wrapping the box, and (a) is the instant the peak is reached ---
+the same $t\approx1$ the $J_{\max}$ curve of Fig.~\ref{fig:ot3d} locates.
+\emph{Both panels share one colour scale}, set by the $t=1$ peak, so the visible
+dimming from (a) to (b) is the real decay: $J_{\max}$ falls from $19.1$ to
+$8.32$, less than half, in the same units as Fig.~\ref{fig:ot3d}. Normalising
+each panel to its own maximum --- the default in most rendering tools --- would
+have made the later, weaker field the brighter of the two. The reference is
+recomputed at this resolution rather than carried over from the $64^3$ volumes:
+the raw lattice values differ between the two by the factor $\Delta t \propto
+1/M$ alone, so reusing the coarse-grid number would have rescaled the pair by
+about two. Orthographic view, azimuth $38^\circ$, elevation
+$24^\circ$; emission--absorption compositing with the weak field left
+transparent, the local gradient used as a surface normal for a diffuse term so
+the sheets read as surfaces rather than fog, and $2\times$ supersampling.
+Rendered by \code{doc/fig/vol3d.py}, which is self-contained.}
+\label{fig:ot3dfield}
+\end{figure}
 %==============================================================================
 \section{Demonstrator: flow in a patient-specific aorta}
 \label{sec:aorta}
