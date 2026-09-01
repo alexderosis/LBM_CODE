@@ -58,32 +58,57 @@
 //  source, so any difference between them is the collision and nothing else.
 //
 //  WHAT IT COSTS, AND WHERE IT LOSES. Two three-pass transforms per node
-//  against BGK's single loop. It does NOT dominate BGK, and the crossover is
-//  sharp. On their Table II translation (L0 = 100, R = 25, xi = 3, U0 = 0.02,
-//  10T) with only the mobility varied -- which is the only honest way to
-//  compare two collisions, since M fixes omega and omega is the whole question:
+//  against BGK's single loop. It does NOT dominate BGK, and the variable that
+//  decides which wins is RUN LENGTH, not omega. On their Table II translation
+//  (L0 = 100, R = 25, xi = 3, U0 = 0.02, Pe = 60) with only the number of
+//  cycles varied -- one cycle is 5000 steps:
+//
+//      cycles   steps    BGK        this
+//      1        5k       0.00814    0.01593
+//      2        10k      0.00803    0.01671
+//      5        25k      0.00804    0.02276
+//      10       50k      0.00817    0.03968
+//
+//  BGK is FLAT to within 2 % across a tenfold change in run length: its
+//  translation error saturates in the first cycle and stays there. This
+//  operator's compounds. Two separable components, then -- it starts 2x worse
+//  and it also grows -- and the second is what makes the published 10-cycle
+//  row look like a collapse.
+//
+//  That is why the case-by-case picture reads as inconsistent until run length
+//  is accounted for. On their Zalesak disk, 10 000 steps, this operator wins
+//  every row and beats the paper's own column at all four Peclet numbers,
+//  including the three where BGK reaches 1e300. On the two translation cases,
+//  50 000 and 100 000 steps of uniform advection, it loses. The rotation tests
+//  never run long enough for the compounding to show.
+//
+//  A second measurement, at fixed 10 cycles and varying the mobility, because
+//  M fixes omega and omega is the other half of the question:
 //
 //      M       omega     BGK        this
-//      0.2     0.909     0.0609     0.0112      CM 5.4x better
-//      0.05    1.539     0.0097     0.0066      CM 1.5x better
-//      0.001   1.988     0.0082     0.0397      CM 4.8x WORSE
+//      0.2     0.909     0.0609     0.0112
+//      0.05    1.539     0.0097     0.0066
+//      0.001   1.988     0.0082     0.0397
 //
-//  Pe = 60 is the paper's own operating point and is the last row, so on that
-//  case as published this operator is the worse of the two on D3Q27 -- and
-//  also 3x worse than the paper's own D3Q19 CM result of 0.0134, which is not
-//  explained here and should not be written up as though it were.
+//  So BGK's saturated error is large at low omega and small at high omega,
+//  while this operator's compounding gets worse as omega approaches 2. The two
+//  effects together account for every row measured. Neither operator is buggy:
+//  both put IDENTICAL zeroth and first moments into the post-collision state,
+//  which tests/test_phase_field.cpp block 6 checks to 3e-18, so every moment
+//  that enters the Allen-Cahn equation at leading order is shared and the whole
+//  difference between them is the ghost modes.
 //
-//  The reversal is not a defect in either operator. Both put IDENTICAL zeroth
-//  and first moments into the post-collision state -- tests/test_phase_field
-//  block 6 checks that to 3e-18 -- so every difference between them is the
-//  ghost modes, which BGK relaxes at omega and this sends to equilibrium. At
-//  omega near 2 BGK's ghosts are nearly reflected rather than damped, and on a
-//  pure-advection test that evidently helps; resetting them each step does not.
+//  WHAT IT IS FOR is therefore the stability ceiling. The mobility fixes the
+//  relaxation rate and the Peclet number fixes the mobility, so a high Pe is an
+//  omega approaching 2 with nothing to trade against it; BGK relaxes every
+//  moment at that rate, ghost modes included, and dies. This relaxes only the
+//  first three. Their Table III is completed here at Pe = 80, 400, 800 and
+//  4000 -- errors 0.0131, 0.0237, 0.0284, 0.0336 against their 0.0593, 0.0590,
+//  0.0558, 0.0505 -- where BGK manages only Pe = 80.
 //
-//  What this operator is FOR is therefore the stability ceiling, not accuracy
-//  at a shared omega: the reachable Peclet number is in the table written by
-//  validation/enan_interface (the operator is named in its lat column), against
-//  BGK's NaN rows at Pe = 400, 800 and 4000 on the Zalesak disk.
+//  Still unexplained, and not to be written up as though it were: on the
+//  translation case this operator is also 3x worse than the paper's own D3Q19
+//  central-moment result of 0.0134 at the same Pe.
 //
 //  PRODUCT LATTICES ONLY. The transform is three one-dimensional passes, which
 //  needs the velocity set to be a tensor product: D2Q9 and D3Q27, not D3Q19 and

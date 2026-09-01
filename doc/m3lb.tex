@@ -4304,6 +4304,194 @@ any of it in three dimensions, where the rigid-body solve would be a $6\times6$
 with a rotating inertia tensor and a quaternion; the fluid side would not change.
 
 %------------------------------------------------------------------------------
+\subsubsection{A published multiphase campaign: De Rosis and Enan (2021)}
+\label{sec:enan}
+
+De Rosis and Enan \cite{derosis2021} is the source paper for this tree's phase-field
+formulation (\S\ref{sec:multiphase}), and its Sec.~III is nine test cases with
+tabulated numbers. That makes it the same kind of target as
+\S\ref{sec:campaign}: not one benchmark but a campaign, where the interesting
+result is the pattern across the cases rather than any single row.
+
+The nine split into three groups, and only the first two are run here.
+
+\begin{itemize}
+  \item \textbf{Interface capture} (their III.A--III.F, Tables I--VII). The
+    velocity field is \emph{prescribed}; only the order parameter is solved.
+    No fluid collision operator is exercised at all, so these isolate the
+    Allen--Cahn discretisation from everything else.
+  \item \textbf{Rayleigh--Taylor instability} (their III.H--III.I,
+    Tables VIII--X). Fully coupled, and the only quantitative check is the
+    trajectory of the spike.
+  \item \textbf{Vertical penetration of a wedge} (their III.G). Not run --- see
+    the end of this section for why, which is a missing capability rather than
+    a missing run.
+\end{itemize}
+
+\paragraph{What is compared, and to which column.} The paper computes
+$\bm{\nabla}\phi$ two ways --- finite differences, its Eq.~(20), and directly
+from the first-order central moments, its Eq.~(70) --- and tabulates both. This
+tree implements the finite-difference route only, and the reason is structural:
+Eq.~(70) reads the phase field's own populations at the node, and under Esoteric
+Pull the slots a node reads are the slots it is about to write
+(\S\ref{sec:esopull}), so the gradient would be taken from a mixture of
+pre- and post-collision states. Every comparison below is therefore against the
+paper's FD column.
+
+Two further differences are deliberate and are stated here once rather than
+repeated per case. The paper's phase field is D3Q19 with a written-out
+$19\times19$ transform; this tree runs D3Q27, because the central-moment
+transform here is three one-dimensional passes and needs a product lattice
+(\S\ref{sec:eqprod}). And a two-dimensional case is run as D3Q27 with a
+single periodic cell in $z$, which is exact rather than approximate: D3Q27 is a
+product lattice, so at $n_z=1$ it reduces to D2Q9 identically.
+
+\paragraph{The six interface-capture cases.} Table~\ref{tab:enan} collects them.
+It is generated from \code{results/L\_enan/enan\_interface.dat} by
+\code{doc/fig/enan\_interface\_table.py} rather than transcribed, so the
+document cannot drift from the data behind it.
+
+\begin{table}[htbp]
+  \centering
+  \caption{De Rosis and Enan's Sec.~III interface-capture cases, D3Q27, FP64,
+  compared against their finite-difference column. The velocity is prescribed
+  in all of them. \textit{diverged} is a run that reached a non-finite state,
+  not one that finished badly.}
+  \label{tab:enan}
+  \input{fig/enan_interface_table.tex}
+\end{table}
+
+Read the BGK column against the last one first, because that is the like-for-like
+comparison and it is favourable in four cases out of six. The two it loses ---
+the circular interface in a shear flow and the swirling sphere --- are the two
+that stretch the interface into a filament a few cells across before returning
+it, so they are the cases where the reconstruction, rather than the transport,
+is being measured. That the same code wins on translation and on the Zalesak
+disk and loses on the two filament tests is a coherent pattern rather than
+scatter, and it is worth stating as a limitation rather than averaging away.
+
+\paragraph{The central-moment collision does not dominate BGK, and what it
+buys is the stability ceiling rather than accuracy.} This is the least expected
+result in the section, and two explanations were attempted for it here before
+one survived contact with the data. Both failures are recorded because each was
+a plausible reading of a real measurement.
+
+The first was a crossover in $\omega_\phi$. The mobility ladder below is a
+genuine measurement and it looks exactly like one --- until the Zalesak disk is
+run at $\omega_\phi = 1.991$ against translation's 1.988 and the ordering
+reverses. The second was run length, on the strength of the cycle scan below,
+which is also a genuine measurement; that one survived until the spherical
+interface came in 1.48 times worse at 5000 steps while the Zalesak disk was
+0.46 times at 10\,000. Table~\ref{tab:enanratio} is the evidence that no single
+variable orders the two operators.
+
+\begin{table}[htbp]
+  \centering
+  \caption{The two collisions on the cases where both complete, ordered by run
+  length. Neither run length nor $\omega_\phi$ orders the last column.}
+  \label{tab:enanratio}
+  \input{fig/enan_interface_ratio.tex}
+\end{table}
+
+What \emph{is} established, and is the reason the operator exists, is the
+stability ceiling. The mobility fixes the relaxation rate,
+$M = c_s^2(1/\omega_\phi - \tfrac{1}{2})$, and the Peclet number fixes the
+mobility, $Pe = U_0\xi/M$; so a high Peclet number \emph{is} an $\omega_\phi$
+approaching 2, with nothing to trade against it. BGK relaxes every moment at
+that rate, ghost modes included, and dies. This operator relaxes only the first
+three. Their Table~III is therefore completed here at all four published
+Peclet numbers --- 80, 400, 800 and 4000 --- with errors of 0.0131, 0.0237,
+0.0284 and 0.0336 against their 0.0593, 0.0590, 0.0558 and 0.0505, where BGK
+manages $Pe=80$ alone and reaches $10^{300}$ on the other three. Every one of
+those rows is better than the published column, and the drift in $\sum\phi$
+stays at $3\e{-13}$ across all of them.
+
+\paragraph{Two measurements that stand on their own.} The first is the cycle
+scan, on their Table~II translation with only the number of cycles varied and
+$\omega_\phi$ held --- one cycle is 5000 steps:
+
+\begin{center}
+\begin{tabular}{rrrr}
+  \toprule
+  Cycles & Steps & BGK & CM \\
+  \midrule
+  1  & 5\,000  & 0.00814 & 0.01593 \\
+  2  & 10\,000 & 0.00803 & 0.01671 \\
+  5  & 25\,000 & 0.00804 & 0.02276 \\
+  10 & 50\,000 & 0.00817 & 0.03968 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+BGK is flat to within 2\% across a tenfold change in run length: on this case
+its error saturates within the first cycle and stays there. The central-moment
+error compounds, and there are two separable components --- it starts twice as
+bad and it also grows. That is a property of \emph{this} case, sustained uniform
+advection, and the ratio table above is why it is not offered as the general
+explanation.
+
+The second is the mobility ladder, at fixed ten cycles:
+
+\begin{center}
+\begin{tabular}{rrrr}
+  \toprule
+  $M$ & $\omega_\phi$ & BGK & CM \\
+  \midrule
+  0.2   & 0.909 & 0.0609 & 0.0112 \\
+  0.05  & 1.539 & 0.0097 & 0.0066 \\
+  0.001 & 1.988 & 0.0082 & 0.0397 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+BGK's saturated error is large at low $\omega_\phi$ and small near 2. Note that
+$Pe=60$, the paper's own operating point, is the last row: on that case as
+published, on this lattice, the central-moment collision is the worse of the two.
+
+Neither operator is at fault, and the reason it cannot be either of them is that
+both put identical zeroth and first moments into the post-collision state.
+\code{tests/test\_phase\_field.cpp} checks that directly and it holds to
+$3\e{-18}$, which is round-off; every moment entering the Allen--Cahn equation
+at leading order is therefore shared, and the entire difference between them is
+the ghost modes --- which BGK relaxes at $\omega_\phi$ and the central-moment
+operator sends to equilibrium.
+
+One thing is left unexplained rather than resolved: on the translation case the
+central-moment collision here is also three times worse than the paper's own
+D3Q19 central-moment result of 0.0134 at the same Peclet number. The setup was
+checked against the source for the five things that could have made that
+artificial --- the initial profile is their Eq.~(72), the gradient is their
+isotropic Eq.~(20) stencil, the error is their Eq.~(71), and $L_0$, $R$, $\xi$,
+$U_0$ and the cycle count all match --- so it is a real disagreement, and it is
+recorded as one.
+
+\paragraph{The wedge, and why it is absent.} Their III.G drives a symmetric
+wedge of deadrise angle $\varphi$ into quiescent water at a constant
+$v=1\,$m\,s$^{-1}$ with a Peskin immersed boundary, and compares the resultant
+against Wagner's potential-flow slamming force,
+\[
+  F_W(t) = \rho_H \frac{\pi^2 v^2 a(t)}{4\tan\varphi},
+  \qquad a(t) = \frac{\pi v t}{2\tan\varphi},
+\]
+$a(t)$ being the wetted length. Three things would have to be built for that
+number to mean anything here. There is no immersed boundary in this tree at all:
+rigid bodies are handled by volume penalisation
+(\S\ref{sec:penalisation}), which is a different discretisation of a different
+boundary condition. The rigid body is two-dimensional and \emph{falls} --- the
+reaction is fed back into Newton's equations --- whereas Wagner's result is for
+prescribed constant-velocity entry, so the comparison would need a driven-body
+mode that does not exist. And the body machinery is wired to the free-surface
+solver, not to the phase field, so it is the wrong two-phase model for this
+case.
+
+\code{demonstrator/water\_entry} is the nearest thing in the tree and is
+deliberately \emph{not} this test: it drops a flat-bottomed square, whose impact
+pressure is singular at first contact and has no closed form, so it is
+registered as a demonstrator and reports a force history whose shape is
+physical rather than a number to quote. Presenting it as a reproduction of
+III.G would be exactly the kind of claim this document warns about throughout.
+
+%------------------------------------------------------------------------------
 \subsection{Thermal flows}
 \label{sec:val:thermal}
 \subsubsection{Thermal transport}
@@ -7914,6 +8102,11 @@ the fitted rate is blamed on the scheme.
 \bibitem{clercx2006} H.~J.~H.~Clercx and C.-H.~Bruneau,
   \emph{The normal and oblique collision of a dipole with a no-slip boundary},
   Comput. Fluids \textbf{35}, 245--279 (2006).
+
+\bibitem{derosis2021} A.~De Rosis and E.~Enan,
+  \emph{A three-dimensional phase-field lattice Boltzmann method for
+  incompressible two-components flows}, Physics of Fluids \textbf{33},
+  043315 (2021).
 
 \bibitem{zhou2026} Y.~Zhou, A.~De Rosis and A.~Revell,
   \emph{Coupling finite volume-lattice Boltzmann methods for advanced heat

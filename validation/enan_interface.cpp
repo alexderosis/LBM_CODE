@@ -386,7 +386,14 @@ int main(int argc, char** argv) {
   // A -mob run is a diagnostic at a Peclet number no table covers, so it must
   // not append: the file's ref column would show the Pe = 60 reference beside
   // an error measured somewhere else entirely.
-  const bool   diag      = std::fabs(mob - 0.001) > 1e-15;
+  const bool   diag      = std::fabs(mob - 0.001) > 1e-15 ||
+                           arg_num(argc, argv, "-cycles", 0.0) > 0.0;
+  // Second diagnostic knob: shorten the run. The two cases where the
+  // central-moment collision loses are also the two longest (50k and 100k
+  // steps against the Zalesak disk's 10k), so whether the error compounds per
+  // step or saturates is the question that separates a per-step bias from a
+  // wrong steady profile. Overrides s.cycles when positive.
+  const double cyc       = arg_num(argc, argv, "-cycles", 0.0);
 
   Kokkos::initialize(argc, argv);
   int status = 0;
@@ -455,14 +462,16 @@ int main(int argc, char** argv) {
         char tag[128];
         std::snprintf(tag, sizeof tag, "%s_%s_pe%g", s.name,
                       op == "cm" ? "cm" : lat.c_str(), Pe);
-        const Result r = go(s, Pe, dump ? tag : "");
+        Spec sc = s;
+      if (cyc > 0.0) sc.cycles = cyc;
+      const Result r = go(sc, Pe, dump ? tag : "");
         std::printf("  %8.0f %11.4e %9.5f %11.5f %11.4f %+8.1f%% "
                     "[%.3f,%.3f] %11.2e\n",
                     Pe, r.M, r.omega, r.err, ref,
                     100.0 * (r.err / ref - 1.0), r.phi_min, r.phi_max,
                     r.mass_drift);
         std::fflush(stdout);
-        if (!diag) emit(s, Pe, r, ref);
+        if (!diag) emit(sc, Pe, r, ref);
         if (!std::isfinite(r.err)) status = 1;
       }
     }

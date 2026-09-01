@@ -195,9 +195,19 @@ These produce plausible, converged, wrong answers rather than crashes.
   and needs `TwoLattice`, because it reads a neighbour's post-collision state
   while writing its own.
 - **D3Q19 is not a product lattice.** It is D3Q27 minus its corners, so it uses a
-  generated monomial basis. The multiphase central-moment operator does not run
-  on it at all, and its MHD Maxwell sum leaves a ghost-mode residual. Prefer
-  D3Q27 for anything above second order.
+  generated monomial basis. Neither `MultiphaseCentralMoments` nor
+  `PhaseFieldCentralMoments` runs on it at all (both `static_assert` on
+  `ProductBasis::enabled`, so it is a compile error rather than a wrong answer),
+  and its MHD Maxwell sum leaves a ghost-mode residual. Prefer D3Q27 for
+  anything above second order.
+- **A published moment list belongs to a basis.** `ProductBasis` is *shifted*,
+  phi_2 = C^2 - cs2; most papers tabulate *monomial* central moments, and the
+  same physics occupies different slots in the two. De Rosis & Enan's Eq. (61)
+  lists nine nonzero phase-field source entries; in the shifted basis six of
+  them are identically zero, because the (a,a,b) slot gets
+  `cs4 A_b - cs2*cs2 A_b = 0`. Transcribing such a list slot-for-slot
+  double-counts; deleting terms from a monomial implementation loses them.
+  Neither crashes. `tests/test_phase_field.cpp` block 8 pins both directions.
 - **Wall conventions.** Wall-bounded cases size the domain as `ny = H + 2`: `H`
   fluid nodes plus one solid row each side. Getting this wrong shifts the
   Reynolds or Rayleigh number silently.
