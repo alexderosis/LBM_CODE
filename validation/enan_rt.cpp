@@ -107,6 +107,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -162,7 +163,8 @@ struct RT {
 };
 
 static RT run(Index W, bool three_d, double At, double Re, double Ca, double Pe,
-              double U, double iw, double tmax, const char* dump) {
+              double U, double iw, double tmax, const char* dump,
+              const char* field) {
   const Index nx = W, ny = 4 * W, nz = three_d ? W : Index(1);
   const double g     = U * U / double(W);           // so sqrt(gW) = U
   const double nu    = double(W) * U / Re;
@@ -274,6 +276,29 @@ static RT run(Index W, bool three_d, double At, double Re, double Ca, double Pe,
         if (cnt >= need && y < spike_pop) spike_pop = y;
         if (double(hp(d.id(xc, y, zc))) > 0.5 && y < spike_ax) spike_ax = y;
       }
+      // The order parameter itself, for the figures their Figs. 12, 13 and 15
+      // show. Written to doc/fig as raw float32 with the two dimensions in
+      // front, because doc/fig/*.bin is gitignored: a snapshot is regenerable
+      // output, not tracked reference data, and seven of them on a 256 x 1024
+      // grid would be 7 MB of it. In 3-D the plane at z = nz/2 is written --
+      // the finger forms on the diagonal of the box, and that plane cuts
+      // through it.
+      if (field && *field) {
+        char fp[256];
+        std::snprintf(fp, sizeof fp, "doc/fig/rtphi_%s_t%d.bin", field, int(next));
+        if (std::FILE* bf = std::fopen(fp, "wb")) {
+          const std::int32_t dims[2] = {std::int32_t(nx), std::int32_t(ny)};
+          std::fwrite(dims, sizeof(std::int32_t), 2, bf);
+          std::vector<float> plane(std::size_t(nx) * std::size_t(ny));
+          const Index zc = three_d ? nz / 2 : 0;
+          for (Index yy = 0; yy < ny; ++yy)
+            for (Index xx = 0; xx < nx; ++xx)
+              plane[std::size_t(yy) * std::size_t(nx) + std::size_t(xx)] =
+                  float(hp(d.id(xx, yy, zc)));
+          std::fwrite(plane.data(), sizeof(float), plane.size(), bf);
+          std::fclose(bf);
+        }
+      }
       r.t_star.push_back(T_STAR[next]);
       r.y_spike.push_back(double(spike) / double(W));
       r.y_bubble.push_back(double(bubble) / double(W));
@@ -326,6 +351,8 @@ int main(int argc, char** argv) {
   const double iw   = arg_num(argc, argv, "-iw", 3.0);
   const double tmax = arg_num(argc, argv, "-tmax", 3.0);
   const bool   dump = arg_flag(argc, argv, "-dump");
+  // Order-parameter snapshots for the figures, into doc/fig as raw float32.
+  const bool   fieldflag = arg_flag(argc, argv, "-field");
 
   Kokkos::initialize(argc, argv);
   int status = 0;
@@ -345,7 +372,8 @@ int main(int argc, char** argv) {
     char tag[128];
     std::snprintf(tag, sizeof tag, "rt%s_w%d_re%.0f_iw%g",
                   td ? "3d" : "2d", int(W), Re, iw);
-    const RT r = run(W, td, At, Re, Ca, Pe, U, iw, tmax, dump ? tag : "");
+    const RT r = run(W, td, At, Re, Ca, Pe, U, iw, tmax, dump ? tag : "",
+                     fieldflag ? tag : "");
 
     std::printf("\n  nu = %.4e   tau = %.5f   sigma = %.4e   M = %.4e   "
                 "rho_H = %.2f\n", r.nu, r.tau, r.sigma, r.M, r.rho_h);
