@@ -36,7 +36,12 @@
     using Scalar   = lbm::ScalarSolver;
     using Magnetic = lbm::MagneticSolver;
     using Colour   = lbm::ColourSolver;
-    using PhaseField = lbm::PhaseFieldSolver;
+    // The phase lattice is a template parameter. `PhaseField` keeps D3Q7,
+    // which is what every existing driver wants; `PhaseFieldOn<D3Q27>` is the
+    // product lattice the central-moment operator needs.
+    template <class PL = lbm::DefaultPhaseLattice>
+    using PhaseFieldOn = lbm::PhaseFieldSolver<PL>;
+    using PhaseField   = PhaseFieldOn<lbm::DefaultPhaseLattice>;
     inline constexpr bool on_device = true;
 
     // Kernel launches are asynchronous. Without this either side of a timed
@@ -85,7 +90,9 @@
     using Scalar   = lbm::host::Scalar;
     using Magnetic = lbm::host::Magnetic;
     using Colour   = lbm::host::Colour;
-    using PhaseField = lbm::host::PhaseField;
+    template <class PL = lbm::DefaultPhaseLattice>
+    using PhaseFieldOn = lbm::host::PhaseField<PL>;
+    using PhaseField   = PhaseFieldOn<lbm::DefaultPhaseLattice>;
     inline constexpr bool on_device = false;
 
     inline void sync() {}                  // the host loop is already ordered

@@ -121,7 +121,7 @@ int main(int argc, char** argv) {
 
   backend::PhaseField pf(n, n, n);
   pf.phase.width = Real(W);
-  pf.phase.omega = Real(PhaseModel::omega_from_mobility(Real(mobility)));
+  pf.set_mobility(Real(mobility));   // through the solver, so cs^2 is the phase lattice's
   pf.fluid.rho_L = Real(1);      pf.fluid.rho_H = Real(gamma);
   pf.fluid.mu_L  = Real(mu_L);   pf.fluid.mu_H  = Real(mu_H);
   pf.fluid.beta  = Real(MultiphaseModel::beta_from_sigma(Real(sigma), Real(W)));

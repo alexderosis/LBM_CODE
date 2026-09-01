@@ -17,8 +17,13 @@
 //  THREE DISTRIBUTIONS' WORTH OF WORK, ON TWO LATTICES:
 //
 //    f_i on D3Q27   the fluid, carrying a normalised PRESSURE
-//    h_i on D3Q7    the phase field, carrying phi in [0, 1]
+//    h_i on PL      the phase field, carrying phi in [0, 1]; PL is D3Q7 by
+//                   default and D3Q27 when the central-moment operator is
+//                   wanted, since that needs a product velocity set
 //    grad phi and lap phi on D3Q27, by stencil from the phi FIELD
+//
+//  TWO OPERATORS FOR EACH DISTRIBUTION, chosen independently: PhaseOp and
+//  MultiOp, both BGK by default. See the block above PhaseModel.
 //
 //  WHY THE ZEROTH MOMENT CARRIES PRESSURE. At a density ratio rho is no longer
 //  a small perturbation about 1 and a density-carrying distribution stops being
@@ -94,18 +99,22 @@
 //
 //  WHAT IS NOT HERE, and absent rather than untested:
 //
-//   * CENTRAL MOMENTS for the fluid. The parent has
-//     MultiphaseCentralMoments.hpp; this is the BGK potential form only.
 //   * WETTING. A phase wall is zero-flux on the populations, which is right for
 //     the transport, but sets no contact angle: that needs a condition on
 //     grad phi at the wall. Do not put an interface against a wall.
-//   * AN EXTERNAL FORCE FIELD. The parent carries Ex/Ey/Ez for a penalised
-//     solid to write into. Nothing on this side writes one.
 //   * OPEN BOUNDARIES for phi.
+//   * D3Q19, on either distribution. It is not a product lattice, so the
+//     factorised transform does not apply to it at all; the paper's own scheme
+//     is D3Q19 and gets there by writing out a 19x19, which is a different
+//     piece of work and is not done here or in the parent.
 //
-//  MEMORY. f at 27 Real, h at 7, plus phi, grad phi (3), lap, u (3) and, when
-//  used, the viscous force (3) and grad p~ (3). At FP32 that is 108 + 28 + 32 =
-//  168 bytes per node in the common case, 192 with both optional fields.
+//  MEMORY. f at 27 Real, h at 7 (D3Q7) or 27 (D3Q27), plus phi, grad phi (3),
+//  lap, u (3) and, when used, the viscous force (3) and grad p~ (3). At FP32
+//  that is 108 + 28 + 32 = 168 bytes per node with the D3Q7 phase field, 192
+//  with both optional fields, and 248 with the D3Q27 phase field -- so the
+//  product lattice costs about 1.5x the footprint and, being bandwidth bound,
+//  close to that in time. That is the price of the central-moment operator and
+//  it is paid at allocation, not at the switch.
 //
 //  MEASURED ON A T4, FP32, 64^3: 354.6 MLUPS, against the colour gradient's
 //  252.5 and the single-phase core's 950 -- six passes and two distributions for
@@ -128,7 +137,22 @@
 
 namespace lbm {
 
-using PhaseLattice = D3Q7;     // transport
+// THE PHASE LATTICE IS A TEMPLATE PARAMETER, D3Q7 BY DEFAULT.
+//
+// D3Q7 is enough for BGK: the phase field carries only its zeroth moment and a
+// first-order equilibrium, so the fourth-order isotropy D3Q27 provides is never
+// used, and seven populations against twenty-seven is a 3.9x saving in the
+// traffic that dominates the kernel.
+//
+// It is NOT enough for central moments. The transform in core.cuh is three
+// one-dimensional passes over the triple at c = -1, 0, +1 on each axis, which
+// needs the velocity set to be a tensor product; D3Q7 is a star, not a cube. So
+// PhaseFieldSolver<D3Q7> runs BGK only, PhaseFieldSolver<D3Q27> runs either, and
+// the cost of the choice is exact and worth stating: the phase populations go
+// from 7 to 27 per node, so a multiphase step's population traffic rises from 34
+// slots to 54 -- about 1.6x. That is what a central-moment phase field costs on a
+// bandwidth-bound device, and it is paid whether or not the operator is on.
+using DefaultPhaseLattice = D3Q7;    // transport, when the caller says nothing
 using FluidLattice = D3Q27;    // flow, and the gradient stencil
 
 LBM_HD LBM_INLINE Real pf_sqrt(Real x) {
@@ -149,6 +173,19 @@ enum PhaseCell : std::uint8_t {
   PhaseExcluded = 2,   // not part of the simulation
 };
 
+//------------------------------------------------------------------------------
+// Which collision each of the two distributions runs.
+//
+// They are INDEPENDENT choices. De Rosis & Enan use central moments for both,
+// but the two operators answer different questions -- the phase field's is
+// about the mobility driving omega toward 2 at a high Peclet number, the
+// fluid's about the non-hydrodynamic modes at a high Reynolds number -- and
+// being able to switch one at a time is what makes a measured difference
+// attributable to one of them.
+//------------------------------------------------------------------------------
+enum class PhaseOp : int { BGK = 0, CentralMoments = 1 };
+enum class MultiOp : int { BGK = 0, CentralMoments = 1 };
+
 //==============================================================================
 //  The conservative Allen-Cahn operator for the phase field.
 //==============================================================================
@@ -156,27 +193,46 @@ struct PhaseModel {
   Real omega = Real(1);      // sets the mobility
   Real width = Real(4);      // interface width W, in lattice units
 
-  // Eq. (13): tau_phi = M / cs2, omega = 1/(tau_phi + 1/2). NOTE cs2 here is
-  // D3Q7's 1/4, not the fluid lattice's 1/3.
+  // Eq. (13): tau_phi = M / cs2, omega = 1/(tau_phi + 1/2).
+  //
+  // THE LATTICE ARGUMENT HAS NO DEFAULT, ON PURPOSE. cs^2 is 1/4 on D3Q7 and
+  // 1/3 on D3Q27, so one mobility maps to two different rates on the two
+  // lattices, off by 4/3. A default here would let a D3Q27 case silently pick
+  // up the D3Q7 conversion; a wrong mobility is a wrong Peclet number, and that
+  // is a converged, plausible, wrong interface rather than a crash. Making the
+  // caller name the lattice turns it into a compile error. (This is the same
+  // trap the parent's CLAUDE.md records against `tau = 3 nu + 1/2` on D3Q7.)
+  template <class PL>
   static Real omega_from_mobility(Real m) {
-    return Real(1) / (m * PhaseLattice::inv_cs2() + Real(0.5));
+    return Real(1) / (m * PL::inv_cs2() + Real(0.5));
   }
+  template <class PL>
   static Real mobility_from_omega(Real w) {
-    return (Real(1) / w - Real(0.5)) * PhaseLattice::cs2();
+    return (Real(1) / w - Real(0.5)) * PL::cs2();
   }
+  template <class PL>
   LBM_HD LBM_INLINE Real mobility() const {
-    return (Real(1) / omega - Real(0.5)) * PhaseLattice::cs2();
+    return (Real(1) / omega - Real(0.5)) * PL::cs2();
   }
 
-  // g_i^eq = w_i phi (1 + c.u/cs2). FIRST order, because D3Q7 has no isotropic
-  // fourth-order moment and every velocity has a single non-zero component, so
-  // (c.u)^2 collapses to c_a^2 u_a^2 and the cross terms of uu cannot be
-  // represented at all. A second-order term there adds anisotropy, not accuracy.
+  // FIRST order on D3Q7, SECOND order on D3Q27 -- not a refinement offered where
+  // it is affordable, but the only form each lattice admits. Every non-rest
+  // D3Q7 velocity has a single nonzero component, so (c.u)^2 collapses to
+  // c_a^2 u_a^2 and the cross terms of uu cannot be represented at all: a
+  // second-order term there would add anisotropy, not accuracy. D3Q27 has the
+  // isotropic fourth-order moment and takes the full form. The parent splits
+  // the same way for the same reason (DefaultPhaseEqOf in PhaseFieldBGK.hpp).
+  template <class PL>
   static LBM_HD LBM_INLINE Real eq(int i, Real phi, Real ux, Real uy, Real uz) {
-    const Real cu = Real(PhaseLattice::cx(i)) * ux
-                  + Real(PhaseLattice::cy(i)) * uy
-                  + Real(PhaseLattice::cz(i)) * uz;
-    return PhaseLattice::w(i) * phi * (Real(1) + PhaseLattice::inv_cs2() * cu);
+    const Real cu = Real(PL::cx(i)) * ux + Real(PL::cy(i)) * uy + Real(PL::cz(i)) * uz;
+    const Real ics2 = PL::inv_cs2();
+    if (PL::Q == 27) {
+      const Real uu = ux * ux + uy * uy + uz * uz;
+      return PL::w(i) * phi * (Real(1) + ics2 * cu
+                               + Real(0.5) * ics2 * ics2 * cu * cu
+                               - Real(0.5) * ics2 * uu);
+    }
+    return PL::w(i) * phi * (Real(1) + ics2 * cu);
   }
 
   // A = theta n = (4/W) phi (1 - phi) G/|G|. Purely geometric: no mobility and
@@ -206,6 +262,10 @@ struct MultiphaseModel {
   Real mu_L  = Real(0.1), mu_H = Real(0.1);        // DYNAMIC viscosities
   Real beta = Real(0), kappa = Real(0);
   Real bx = Real(0), by = Real(0), bz = Real(0);   // body acceleration
+  // The trace of the second moment, sent to equilibrium at 1 by the paper.
+  // Exposed because it IS the bulk viscosity and nothing else in the scheme
+  // pins it. Ignored by the BGK operator, which has only one rate to give.
+  Real omega_bulk = Real(1);
 
   // The pair consistent with the tanh profile of width W that the conservative
   // Allen-Cahn equation maintains.
@@ -256,11 +316,161 @@ LBM_HD LBM_INLINE Real pf_phi_eq(int i, Real ux, Real uy, Real uz) {
 }
 
 //==============================================================================
+//  CENTRAL MOMENTS, both distributions. De Rosis & Enan Sec. II.C (the fluid,
+//  Eqs. 31-36) and Sec. II.D (the phase field, Eqs. 50-67). Ports of
+//  ../src/collision/MultiphaseCentralMoments.hpp and
+//  ../src/collision/PhaseFieldCentralMoments.hpp.
+//
+//  BOTH USE core.cuh's to_moments/to_populations UNCHANGED, and that is the
+//  whole reason these are short. That transform is the SHIFTED product basis --
+//  phi_2(C) = C^2 - cs^2, three one-dimensional passes -- which is exactly
+//  ProductBasis in the parent. Everything below is a statement about which
+//  slots get what; none of it is a new transform.
+//
+//  A PUBLISHED MOMENT LIST BELONGS TO A BASIS, and this is where that bites.
+//  The paper tabulates its equilibrium and source central moments in the
+//  MONOMIAL basis. In the shifted one they are far sparser, because the two
+//  bases put the same physics in different slots:
+//
+//    * equilibrium, phase field: the paper's five nonzero entries (k0 = phi,
+//      k4 = phi, k16 = k17 = k18 = phi cs^4) collapse to ONE, k^eq = (phi, 0,
+//      ..., 0), since k4' = k4 - 3 cs2 k0 = 0 and likewise for the rest.
+//    * source, phase field: their Eq. (61) lists nine nonzero entries -- three
+//      at first order and six at third. The six are identically zero here: the
+//      (a,a,b) slot is (C_a^2 - cs2) C_b and the same source contributes
+//      cs4 A_b - cs2 cs2 A_b = 0. Adding them would DOUBLE COUNT; deleting
+//      them from a monomial implementation would LOSE them. Neither crashes.
+//
+//  AND THE SPARSITY IS A REST-FRAME PROPERTY. Transform the source at a general
+//  u and 26 of the 27 shifted moments are nonzero, not 3. Their drivers add a
+//  u-independent source and so does this: a shared approximation, not an
+//  identity. The parent measures the difference on an advected flat slab at
+//  50 000 steps -- 1.3% and 0.3% of the width drift -- so it is not what limits
+//  the operator, but it is an approximation and is named as one.
+//==============================================================================
+
+//------------------------------------------------------------------------------
+// The phase field. Eq. (51) with the relaxation matrix of Eq. (55):
+//
+//     k*_0        = phi                                 conserved
+//     k*_{1,2,3}  = (1 - omega) k + (1 - omega/2) cs2 A
+//     k*_rest     = 0                        straight to equilibrium
+//
+// THE cs2 IS NOT DECORATION. BGK adds S_i = (1 - omega/2) w_i (c_i . A), whose
+// first moment is (1 - omega/2) cs2 A because sum_i w_i c_ia c_ib = cs2 d_ab.
+// Dropping it makes the anti-diffusion three times too weak on a cs2 = 1/3
+// lattice, which neither blows up nor looks wrong -- the interface simply
+// spreads.
+//
+// WHY IT NEEDS D3Q27. Three 1D passes over c = -1, 0, +1 need a product
+// velocity set. The signature says so: it takes h[27], not h[PL::Q].
+//------------------------------------------------------------------------------
+LBM_HD LBM_INLINE void collide_phase_cm(Real h[27], Real phi, const Real u[3],
+                                        const Real A[3], Real omega) {
+  Real k[27];
+  to_moments(h, u, k);
+
+  constexpr Real cs2v = Real(1) / Real(3);
+  const Real keep = Real(1) - omega;
+  const Real pref = (Real(1) - Real(0.5) * omega) * cs2v;
+
+  const Real k1 = k[mi(1, 0, 0)] * keep + pref * A[0];
+  const Real k2 = k[mi(0, 1, 0)] * keep + pref * A[1];
+  const Real k3 = k[mi(0, 0, 1)] * keep + pref * A[2];
+
+  for (int n = 0; n < 27; ++n) k[n] = Real(0);
+  k[mi(0, 0, 0)] = phi;
+  k[mi(1, 0, 0)] = k1;  k[mi(0, 1, 0)] = k2;  k[mi(0, 0, 1)] = k3;
+
+  to_populations(k, u, h);
+}
+
+//------------------------------------------------------------------------------
+// The fluid. The equilibrium central moments FACTORISE, and that derivation is
+// the one worth keeping:
+//
+//     f^eq = w_i [p~ + Phi_i(u)] = [w_i (1 + Phi_i)] + (p~ - 1) w_i
+//          = (Maxwellian at rho = 1) + (p~ - 1) (the weights).
+//
+// The first bracket is diagonal in this basis -- {1, 0, 0, ...} exactly. The
+// second is (p~ - 1) times the central moments of the WEIGHTS about u, and on a
+// product lattice those factorise into the 1D triple {1, -u, u^2}. So
+//
+//     k_eq(p,q,r) = [pqr == 000] + (p~ - 1) A(p,ux) A(q,uy) A(r,uz).
+//
+// No dense 27x27, no stored equilibrium vector.
+//
+// THE FORCE IS AN ASSIGNMENT AT ORDER 1, NOT A RELAXATION. With
+// u = sum_i c_i f_i + F/(2 rho) the pre-collision first moment is
+// k_eq(1,0,0) - F_x/(2 rho), and the post-collision one has to be
+// k_eq(1,0,0) + F_x/(2 rho) for the next step to recover the right velocity.
+// The rate-1 entry in the paper's K IS that assignment.
+//
+// And note what is absent: the source of Eq. (14), F_i = w_i (c_i.F)/(rho cs2),
+// is odd in c_i and has NO second moment, so unlike Guo's there is no
+// second-order force term to add here in any basis.
+//------------------------------------------------------------------------------
+LBM_HD LBM_INLINE void mp_weight_factors(const Real u[3], Real Aw[3][3]) {
+  for (int a = 0; a < 3; ++a) {
+    Aw[a][0] = Real(1);  Aw[a][1] = -u[a];  Aw[a][2] = u[a] * u[a];
+  }
+}
+
+LBM_HD LBM_INLINE Real mp_eq_moment(int n, Real p_tilde, const Real Aw[3][3]) {
+  return ((n == 0) ? Real(1) : Real(0))
+       + (p_tilde - Real(1)) * Aw[0][p_of(n)] * Aw[1][q_of(n)] * Aw[2][r_of(n)];
+}
+
+LBM_HD LBM_INLINE void collide_multiphase_cm(Real f[27], Real p_tilde, const Real u[3],
+                                             const Real F[3], Real rho,
+                                             Real omega, Real omega_bulk) {
+  Real Aw[3][3];
+  mp_weight_factors(u, Aw);
+
+  Real k[27];
+  to_moments(f, u, k);
+
+  // order 0 is left exactly as the transform produced it: sum_i f_i = p~.
+
+  // ---- order 1: exact assignment, the force included ----
+  const Real hr = Real(0.5) / rho;
+  constexpr int I1[3] = {mi(1, 0, 0), mi(0, 1, 0), mi(0, 0, 1)};
+  for (int a = 0; a < 3; ++a) k[I1[a]] = mp_eq_moment(I1[a], p_tilde, Aw) + hr * F[a];
+
+  // ---- order 2: trace at omega_bulk, deviatoric and shear at omega ----
+  constexpr int I2D[3] = {mi(2, 0, 0), mi(0, 2, 0), mi(0, 0, 2)};
+  constexpr int I2S[3] = {mi(1, 1, 0), mi(1, 0, 1), mi(0, 1, 1)};
+  Real d[3], e[3];
+  Real tr = Real(0), tre = Real(0);
+  for (int a = 0; a < 3; ++a) {
+    d[a] = k[I2D[a]];
+    e[a] = mp_eq_moment(I2D[a], p_tilde, Aw);
+    tr += d[a];  tre += e[a];
+  }
+  const Real invD = Real(1) / Real(3);
+  const Real tr_post = (Real(1) - omega_bulk) * tr + omega_bulk * tre;
+  for (int a = 0; a < 3; ++a)
+    k[I2D[a]] = (Real(1) - omega) * (d[a] - tr * invD)
+              + omega * (e[a] - tre * invD) + tr_post * invD;
+  for (int a = 0; a < 3; ++a)
+    k[I2S[a]] = (Real(1) - omega) * k[I2S[a]]
+              + omega * mp_eq_moment(I2S[a], p_tilde, Aw);
+
+  // ---- order >= 3: straight to equilibrium, which is the whole point ----
+  for (int n = 0; n < 27; ++n)
+    if (order_of(n) >= 3) k[n] = mp_eq_moment(n, p_tilde, Aw);
+
+  to_populations(k, u, f);
+}
+
+//==============================================================================
 //  Kernel parameters. One struct for all six passes.
 //==============================================================================
-struct PfParams {
+template <class PL = DefaultPhaseLattice>
+struct PfParamsT {
+  using PhaseLat = PL;
   Real* f = nullptr;                 // fluid populations, D3Q27
-  Real* h = nullptr;                 // phase populations, D3Q7
+  Real* h = nullptr;                 // phase populations, PL
   Real* phi = nullptr;
   Real* gx = nullptr;  Real* gy = nullptr;  Real* gz = nullptr;
   Real* lap = nullptr;
@@ -268,11 +478,17 @@ struct PfParams {
   Real* pt = nullptr;                // p~, the normalised pressure
   Real* vx = nullptr;  Real* vy = nullptr;  Real* vz = nullptr;   // F_nu, optional
   Real* px = nullptr;  Real* py = nullptr;  Real* pz = nullptr;   // grad p~, optional
+  // An arbitrary EXTERNAL force field, per node. Null means none. This is the
+  // slot a penalised solid writes into, and it is kept separate from vx so the
+  // two owners never have to agree about who clears the array.
+  const Real* ex = nullptr;  const Real* ey = nullptr;  const Real* ez = nullptr;
   const std::uint8_t* pflags = nullptr;    // phase cell roles
   const std::uint8_t* fflags = nullptr;    // fluid cell roles
   int nx = 0, ny = 0, nz = 0;
   PhaseModel pm;
   MultiphaseModel fm;
+  PhaseOp pop = PhaseOp::BGK;
+  MultiOp fop = MultiOp::BGK;
 };
 
 //------------------------------------------------------------------------------
@@ -283,8 +499,9 @@ struct PfParams {
 // single coefficient on one vector rather than two vectors added. In the
 // constant-rho_0 form F_p follows grad p~ instead and is carried separately.
 //------------------------------------------------------------------------------
+template <class PL>
 LBM_HD LBM_INLINE
-void pf_force(const PfParams& p, long n, const MultiphaseModel::Local& l,
+void pf_force(const PfParamsT<PL>& p, long n, const MultiphaseModel::Local& l,
               Real p_tilde, Real F[3]) {
   const Real cs2v = FluidLattice::cs2();
   const MultiphaseModel& m = p.fm;
@@ -297,12 +514,13 @@ void pf_force(const PfParams& p, long n, const MultiphaseModel::Local& l,
   const Real dr   = cref ? cs2v * (l.rho - m.rho_0) : Real(0);
   const bool have_p = cref && p.px != nullptr;
   const bool have_v = p.vx != nullptr;
+  const bool have_e = p.ex != nullptr;
   F[0] = coef * p.gx[n] + (have_p ? dr * p.px[n] : Real(0))
-       + (have_v ? p.vx[n] : Real(0)) + l.rho * m.bx;
+       + (have_v ? p.vx[n] : Real(0)) + (have_e ? p.ex[n] : Real(0)) + l.rho * m.bx;
   F[1] = coef * p.gy[n] + (have_p ? dr * p.py[n] : Real(0))
-       + (have_v ? p.vy[n] : Real(0)) + l.rho * m.by;
+       + (have_v ? p.vy[n] : Real(0)) + (have_e ? p.ey[n] : Real(0)) + l.rho * m.by;
   F[2] = coef * p.gz[n] + (have_p ? dr * p.pz[n] : Real(0))
-       + (have_v ? p.vz[n] : Real(0)) + l.rho * m.bz;
+       + (have_v ? p.vz[n] : Real(0)) + (have_e ? p.ez[n] : Real(0)) + l.rho * m.bz;
 }
 
 //------------------------------------------------------------------------------
@@ -315,17 +533,17 @@ void pf_force(const PfParams& p, long n, const MultiphaseModel::Local& l,
 // WETTING -- so it is left at its initialised value rather than given a
 // meaningless one.
 //------------------------------------------------------------------------------
-template <int Parity, bool HasGeometry>
-LBM_HD LBM_INLINE void pf_field_node(const PfParams& p, long N, long n) {
+template <int Parity, bool HasGeometry, class PL>
+LBM_HD LBM_INLINE void pf_field_node(const PfParamsT<PL>& p, long N, long n) {
   const std::uint8_t fl = HasGeometry ? p.pflags[n] : std::uint8_t(PhaseBulk);
   if (fl == PhaseExcluded) { p.phi[n] = Real(0); return; }
   if (fl == PhaseWall) return;
   int x, y, z;
   coords(n, p.nx, p.ny, x, y, z);
-  Real h[PhaseLattice::Q];
-  gather<Parity, PhaseLattice>(p.h, N, x, y, z, p.nx, p.ny, p.nz, h);
+  Real h[PL::Q];
+  gather<Parity, PL>(p.h, N, x, y, z, p.nx, p.ny, p.nz, h);
   Real s = Real(0);
-  for (int i = 0; i < PhaseLattice::Q; ++i) s += h[i];
+  for (int i = 0; i < PL::Q; ++i) s += h[i];
   p.phi[n] = s;
 }
 
@@ -335,8 +553,8 @@ LBM_HD LBM_INLINE void pf_field_node(const PfParams& p, long N, long n) {
 // The i = 0 term contributes nothing to either -- c_0 is zero and the
 // Laplacian's summand is phi(x) - phi(x) -- so the loop starts at 1 for both.
 //------------------------------------------------------------------------------
-template <bool HasGeometry>
-LBM_HD LBM_INLINE void pf_derivatives_node(const PfParams& p, long n) {
+template <bool HasGeometry, class PL>
+LBM_HD LBM_INLINE void pf_derivatives_node(const PfParamsT<PL>& p, long n) {
   if (HasGeometry && p.pflags[n] == PhaseExcluded) {
     p.gx[n] = Real(0); p.gy[n] = Real(0); p.gz[n] = Real(0); p.lap[n] = Real(0);
     return;
@@ -368,8 +586,8 @@ LBM_HD LBM_INLINE void pf_derivatives_node(const PfParams& p, long n) {
 // vanishes identically at a matched density, because grad rho does, and it is
 // not a correction one may drop at a ratio.
 //------------------------------------------------------------------------------
-template <bool HasGeometry>
-LBM_HD LBM_INLINE void pf_viscous_node(const PfParams& p, long n) {
+template <bool HasGeometry, class PL>
+LBM_HD LBM_INLINE void pf_viscous_node(const PfParamsT<PL>& p, long n) {
   if (HasGeometry && p.pflags[n] == PhaseExcluded) {
     p.vx[n] = Real(0); p.vy[n] = Real(0); p.vz[n] = Real(0); return;
   }
@@ -407,7 +625,8 @@ LBM_HD LBM_INLINE void pf_viscous_node(const PfParams& p, long n) {
 //------------------------------------------------------------------------------
 // PASS 4. grad p~, for the constant-reference normalisation only.
 //------------------------------------------------------------------------------
-LBM_HD LBM_INLINE void pf_pgrad_node(const PfParams& p, long n) {
+template <class PL>
+LBM_HD LBM_INLINE void pf_pgrad_node(const PfParamsT<PL>& p, long n) {
   int x, y, z;
   coords(n, p.nx, p.ny, x, y, z);
   Real g[3] = {Real(0), Real(0), Real(0)};
@@ -426,8 +645,8 @@ LBM_HD LBM_INLINE void pf_pgrad_node(const PfParams& p, long n) {
 // PASS 5. The fluid: stream, collide against Eq. (8) with the source of
 // Eq. (14), stream. Writes u(t) and p~(t) for the phase step and the diagnostics.
 //------------------------------------------------------------------------------
-template <int Parity, bool HasGeometry>
-LBM_HD LBM_INLINE void pf_fluid_node(const PfParams& p, long N, long n) {
+template <int Parity, bool HasGeometry, class PL>
+LBM_HD LBM_INLINE void pf_fluid_node(const PfParamsT<PL>& p, long N, long n) {
   const std::uint8_t fl = HasGeometry ? p.fflags[n] : std::uint8_t(Fluid);
   if (fl != Fluid) return;
   int x, y, z;
@@ -451,14 +670,19 @@ LBM_HD LBM_INLINE void pf_fluid_node(const PfParams& p, long N, long n) {
   const Real uy = my + hh * F[1];
   const Real uz = mz + hh * F[2];
 
-  const Real w    = l.omega;
-  const Real pref = (Real(1) - Real(0.5) * w) * FluidLattice::inv_cs2() / l.rho;
-  for (int i = 0; i < 27; ++i) {
-    const Real feq = FluidLattice::w(i) * (s + pf_phi_eq(i, ux, uy, uz));
-    const Real cF = Real(FluidLattice::cx(i)) * F[0]
-                  + Real(FluidLattice::cy(i)) * F[1]
-                  + Real(FluidLattice::cz(i)) * F[2];
-    f[i] += w * (feq - f[i]) + pref * FluidLattice::w(i) * cF;
+  const Real w = l.omega;
+  if (p.fop == MultiOp::CentralMoments) {
+    const Real u[3] = {ux, uy, uz};
+    collide_multiphase_cm(f, s, u, F, l.rho, w, p.fm.omega_bulk);
+  } else {
+    const Real pref = (Real(1) - Real(0.5) * w) * FluidLattice::inv_cs2() / l.rho;
+    for (int i = 0; i < 27; ++i) {
+      const Real feq = FluidLattice::w(i) * (s + pf_phi_eq(i, ux, uy, uz));
+      const Real cF = Real(FluidLattice::cx(i)) * F[0]
+                    + Real(FluidLattice::cy(i)) * F[1]
+                    + Real(FluidLattice::cz(i)) * F[2];
+      f[i] += w * (feq - f[i]) + pref * FluidLattice::w(i) * cF;
+    }
   }
   scatter<Parity, FluidLattice>(p.f, N, x, y, z, p.nx, p.ny, p.nz, f);
   p.ux[n] = ux;  p.uy[n] = uy;  p.uz[n] = uz;  p.pt[n] = s;
@@ -470,15 +694,15 @@ LBM_HD LBM_INLINE void pf_fluid_node(const PfParams& p, long N, long n) {
 // Bounce-back is the identity on Esoteric Pull's storage, so a zero-flux wall
 // needs no work at all.
 //------------------------------------------------------------------------------
-template <int Parity, bool HasGeometry>
-LBM_HD LBM_INLINE void pf_phase_node(const PfParams& p, long N, long n) {
+template <int Parity, bool HasGeometry, class PL>
+LBM_HD LBM_INLINE void pf_phase_node(const PfParamsT<PL>& p, long N, long n) {
   const std::uint8_t fl = HasGeometry ? p.pflags[n] : std::uint8_t(PhaseBulk);
   if (fl != PhaseBulk) return;
   int x, y, z;
   coords(n, p.nx, p.ny, x, y, z);
-  constexpr int Q = PhaseLattice::Q;
+  constexpr int Q = PL::Q;
   Real h[Q];
-  gather<Parity, PhaseLattice>(p.h, N, x, y, z, p.nx, p.ny, p.nz, h);
+  gather<Parity, PL>(p.h, N, x, y, z, p.nx, p.ny, p.nz, h);
 
   Real ph = Real(0);
   for (int i = 0; i < Q; ++i) ph += h[i];
@@ -487,52 +711,67 @@ LBM_HD LBM_INLINE void pf_phase_node(const PfParams& p, long N, long n) {
   p.pm.anti_diffusion(ph, G, A);
   const Real ux = p.ux[n], uy = p.uy[n], uz = p.uz[n];
 
-  const Real om   = p.pm.omega;
+  const Real om = p.pm.omega;
+  // The central-moment branch exists only on a product lattice. On D3Q7 the
+  // `if constexpr` removes it entirely, so the runtime test folds away and the
+  // D3Q7 kernel is byte for byte the one it was before this was added; the
+  // solver refuses the combination at the setter, with a message, rather than
+  // letting it reach here (see set_phase_op).
+  if constexpr (Q == 27) {
+    if (p.pop == PhaseOp::CentralMoments) {
+      const Real u[3] = {ux, uy, uz};
+      collide_phase_cm(h, ph, u, A, om);
+      scatter<Parity, PL>(p.h, N, x, y, z, p.nx, p.ny, p.nz, h);
+      p.phi[n] = ph;
+      return;
+    }
+  }
   const Real pref = Real(1) - Real(0.5) * om;
   for (int i = 0; i < Q; ++i) {
-    const Real cA = Real(PhaseLattice::cx(i)) * A[0]
-                  + Real(PhaseLattice::cy(i)) * A[1]
-                  + Real(PhaseLattice::cz(i)) * A[2];
-    h[i] += om * (PhaseModel::eq(i, ph, ux, uy, uz) - h[i])
-          + pref * PhaseLattice::w(i) * cA;
+    const Real cA = Real(PL::cx(i)) * A[0]
+                  + Real(PL::cy(i)) * A[1]
+                  + Real(PL::cz(i)) * A[2];
+    h[i] += om * (PhaseModel::eq<PL>(i, ph, ux, uy, uz) - h[i])
+          + pref * PL::w(i) * cA;
   }
-  scatter<Parity, PhaseLattice>(p.h, N, x, y, z, p.nx, p.ny, p.nz, h);
+  scatter<Parity, PL>(p.h, N, x, y, z, p.nx, p.ny, p.nz, h);
   p.phi[n] = ph;
 }
 
 #if defined(__CUDACC__)
 
-template <int Parity, bool HasGeometry>
-__global__ void pf_field_kernel(PfParams p, long N) {
+template <int Parity, bool HasGeometry, class PL>
+__global__ void pf_field_kernel(PfParamsT<PL> p, long N) {
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
   pf_field_node<Parity, HasGeometry>(p, N, n);
 }
-template <bool HasGeometry>
-__global__ void pf_derivatives_kernel(PfParams p, long N) {
+template <bool HasGeometry, class PL>
+__global__ void pf_derivatives_kernel(PfParamsT<PL> p, long N) {
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
   pf_derivatives_node<HasGeometry>(p, n);
 }
-template <bool HasGeometry>
-__global__ void pf_viscous_kernel(PfParams p, long N) {
+template <bool HasGeometry, class PL>
+__global__ void pf_viscous_kernel(PfParamsT<PL> p, long N) {
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
   pf_viscous_node<HasGeometry>(p, n);
 }
-__global__ void pf_pgrad_kernel(PfParams p, long N) {
+template <class PL>
+__global__ void pf_pgrad_kernel(PfParamsT<PL> p, long N) {
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
   pf_pgrad_node(p, n);
 }
-template <int Parity, bool HasGeometry>
-__global__ void pf_fluid_kernel(PfParams p, long N) {
+template <int Parity, bool HasGeometry, class PL>
+__global__ void pf_fluid_kernel(PfParamsT<PL> p, long N) {
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
   pf_fluid_node<Parity, HasGeometry>(p, N, n);
 }
-template <int Parity, bool HasGeometry>
-__global__ void pf_phase_kernel(PfParams p, long N) {
+template <int Parity, bool HasGeometry, class PL>
+__global__ void pf_phase_kernel(PfParamsT<PL> p, long N) {
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
   pf_phase_node<Parity, HasGeometry>(p, N, n);
@@ -548,7 +787,7 @@ __global__ void pf_phase_kernel(PfParams p, long N) {
 // and is NOT a pure gauge on the lattice, because f^eq = w_i[p~ + Phi] carries
 // (p~ - 1) into its higher moments.
 //------------------------------------------------------------------------------
-template <class Init>
+template <class PL, class Init>
 __global__ void pf_initialise(Real* __restrict__ f, Real* __restrict__ h,
                               Real* __restrict__ phi, Real* __restrict__ pt,
                               int nx, int ny, int nz, Init init) {
@@ -562,22 +801,26 @@ __global__ void pf_initialise(Real* __restrict__ f, Real* __restrict__ h,
   Real g[27];
   for (int i = 0; i < 27; ++i) g[i] = FluidLattice::w(i) * p_tilde;
   init_scatter<0, FluidLattice>(f, N, x, y, z, nx, ny, nz, g);
-  Real e[PhaseLattice::Q];
-  for (int i = 0; i < PhaseLattice::Q; ++i) e[i] = PhaseLattice::w(i) * ph;
-  init_scatter<0, PhaseLattice>(h, N, x, y, z, nx, ny, nz, e);
+  Real e[PL::Q];
+  for (int i = 0; i < PL::Q; ++i) e[i] = PL::w(i) * ph;
+  init_scatter<0, PL>(h, N, x, y, z, nx, ny, nz, e);
   phi[n] = ph;  pt[n] = p_tilde;
 }
 
 //==============================================================================
 //  Host-side driver. Owns both distributions and the coupling ORDER.
 //==============================================================================
+template <class PL = DefaultPhaseLattice>
 class PhaseFieldSolver {
  public:
+  using PhaseLat = PL;
+  using Params   = PfParamsT<PL>;
+
   PhaseFieldSolver(int nx, int ny, int nz) : nx_(nx), ny_(ny), nz_(nz) {
     N_ = long(nx) * ny * nz;
     const std::size_t fld = sizeof(Real) * std::size_t(N_);
     LBM_CUDA_CHECK(cudaMalloc(&f_, sizeof(Real) * 27 * std::size_t(N_)));
-    LBM_CUDA_CHECK(cudaMalloc(&h_, sizeof(Real) * PhaseLattice::Q * std::size_t(N_)));
+    LBM_CUDA_CHECK(cudaMalloc(&h_, sizeof(Real) * PL::Q * std::size_t(N_)));
     for (int k = 0; k < NFIELD; ++k) LBM_CUDA_CHECK(cudaMalloc(&field_[k], fld));
     LBM_CUDA_CHECK(cudaMalloc(&pflags_, sizeof(std::uint8_t) * std::size_t(N_)));
     LBM_CUDA_CHECK(cudaMalloc(&fflags_, sizeof(std::uint8_t) * std::size_t(N_)));
@@ -599,6 +842,42 @@ class PhaseFieldSolver {
   // costs a 27-neighbour gather when it is on.
   void enable_viscous_force(bool on) { viscous_ = on; }
 
+  //--------------------------------------------------------------------------
+  // Which collision each distribution runs. Independent, and BOTH default to
+  // BGK so that an existing case keeps its numbers.
+  //
+  // The phase field's central-moment operator needs a product lattice, which
+  // is a property of PL and therefore known at compile time -- but the OPERATOR
+  // is a runtime value, so the two cannot be reconciled by a static_assert.
+  // Refusing it here, at the call that sets it, is the next best thing: the
+  // program stops at setup with a message naming the fix, rather than running
+  // a D3Q7 case that silently ignored the request.
+  //--------------------------------------------------------------------------
+  void set_phase_op(PhaseOp op) {
+    if (op == PhaseOp::CentralMoments && PL::Q != 27) {
+      std::fprintf(stderr,
+                   "PhaseFieldSolver: central moments need a product lattice; "
+                   "this one is D3Q%d. Use PhaseFieldSolver<D3Q27>.\n", PL::Q);
+      std::exit(1);
+    }
+    phase_op_ = op;
+  }
+  void set_fluid_op(MultiOp op) { fluid_op_ = op; }
+  // An external per-node force, owned by the caller -- a penalised solid, say.
+  // Kept separate from the viscous term so the two owners never have to agree
+  // about who clears the array; this class only reads it.
+  void couple_external_force(const Real* fx, const Real* fy, const Real* fz) {
+    ex_ = fx;  ey_ = fy;  ez_ = fz;
+  }
+  PhaseOp phase_op() const { return phase_op_; }
+  MultiOp fluid_op() const { return fluid_op_; }
+
+  // The mobility conversion, through the solver so the LATTICE cannot be got
+  // wrong -- see PhaseModel::omega_from_mobility on why cs^2 = 1/4 against 1/3
+  // makes that a live trap rather than a tidiness point.
+  void set_mobility(Real m) { phase.omega = PhaseModel::omega_from_mobility<PL>(m); }
+  Real mobility() const { return phase.template mobility<PL>(); }
+
   void set_geometry(const std::vector<std::uint8_t>& pflags,
                     const std::vector<std::uint8_t>& fflags) {
     LBM_CUDA_CHECK(cudaMemcpy(pflags_, pflags.data(),
@@ -614,8 +893,8 @@ class PhaseFieldSolver {
   template <class Init>
   void initialise_with(Init init) {
     const int B = 128;
-    pf_initialise<<<int((N_ + B - 1) / B), B>>>(f_, h_, field_[0], field_[8],
-                                                nx_, ny_, nz_, init);
+    pf_initialise<PL><<<int((N_ + B - 1) / B), B>>>(f_, h_, field_[0], field_[8],
+                                                   nx_, ny_, nz_, init);
     LBM_CUDA_CHECK(cudaGetLastError());
     LBM_CUDA_CHECK(cudaDeviceSynchronize());
     t_ = 0;
@@ -657,31 +936,31 @@ class PhaseFieldSolver {
 
   void derivatives() {
     const int B = 128, G = int((N_ + B - 1) / B);
-    if (has_geometry_) pf_derivatives_kernel<true><<<G, B>>>(params(), N_);
-    else               pf_derivatives_kernel<false><<<G, B>>>(params(), N_);
+    if (has_geometry_) pf_derivatives_kernel<true, PL><<<G, B>>>(params(), N_);
+    else               pf_derivatives_kernel<false, PL><<<G, B>>>(params(), N_);
     LBM_CUDA_CHECK(cudaGetLastError());
   }
 
   template <int P> void run() {
     const int B = 128, G = int((N_ + B - 1) / B);
-    const PfParams p = params();
-    if (has_geometry_) pf_field_kernel<P, true><<<G, B>>>(p, N_);
-    else               pf_field_kernel<P, false><<<G, B>>>(p, N_);
+    const Params p = params();
+    if (has_geometry_) pf_field_kernel<P, true, PL><<<G, B>>>(p, N_);
+    else               pf_field_kernel<P, false, PL><<<G, B>>>(p, N_);
     derivatives();
     if (viscous_) {
-      if (has_geometry_) pf_viscous_kernel<true><<<G, B>>>(p, N_);
-      else               pf_viscous_kernel<false><<<G, B>>>(p, N_);
+      if (has_geometry_) pf_viscous_kernel<true, PL><<<G, B>>>(p, N_);
+      else               pf_viscous_kernel<false, PL><<<G, B>>>(p, N_);
     }
-    if (fluid.constant_reference()) pf_pgrad_kernel<<<G, B>>>(p, N_);
-    if (has_geometry_) pf_fluid_kernel<P, true><<<G, B>>>(p, N_);
-    else               pf_fluid_kernel<P, false><<<G, B>>>(p, N_);
-    if (has_geometry_) pf_phase_kernel<P, true><<<G, B>>>(p, N_);
-    else               pf_phase_kernel<P, false><<<G, B>>>(p, N_);
+    if (fluid.constant_reference()) pf_pgrad_kernel<PL><<<G, B>>>(p, N_);
+    if (has_geometry_) pf_fluid_kernel<P, true, PL><<<G, B>>>(p, N_);
+    else               pf_fluid_kernel<P, false, PL><<<G, B>>>(p, N_);
+    if (has_geometry_) pf_phase_kernel<P, true, PL><<<G, B>>>(p, N_);
+    else               pf_phase_kernel<P, false, PL><<<G, B>>>(p, N_);
     LBM_CUDA_CHECK(cudaGetLastError());
   }
 
-  PfParams params() const {
-    PfParams p;
+  Params params() const {
+    Params p;
     p.f = f_;  p.h = h_;
     p.phi = field_[0];
     p.gx = field_[1];  p.gy = field_[2];  p.gz = field_[3];
@@ -692,9 +971,11 @@ class PhaseFieldSolver {
     if (fluid.constant_reference()) {
       p.px = field_[12]; p.py = field_[13]; p.pz = field_[14];
     }
+    p.ex = ex_;  p.ey = ey_;  p.ez = ez_;
     p.pflags = pflags_;  p.fflags = fflags_;
     p.nx = nx_; p.ny = ny_; p.nz = nz_;
     p.pm = phase;  p.fm = fluid;
+    p.pop = phase_op_;  p.fop = fluid_op_;
     return p;
   }
 
@@ -705,8 +986,11 @@ class PhaseFieldSolver {
   Real* field_[NFIELD] = {};
   std::uint8_t* pflags_ = nullptr;
   std::uint8_t* fflags_ = nullptr;
+  const Real *ex_ = nullptr, *ey_ = nullptr, *ez_ = nullptr;
   bool has_geometry_ = false;
   bool viscous_ = false;
+  PhaseOp phase_op_ = PhaseOp::BGK;
+  MultiOp fluid_op_ = MultiOp::BGK;
   std::size_t t_ = 0;
 };
 

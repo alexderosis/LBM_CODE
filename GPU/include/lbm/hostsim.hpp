@@ -517,12 +517,16 @@ class Colour {
 //  The ORDER is the point -- see the banner in phasefield.cuh -- so it lives
 //  here, in step(), rather than in a driver.
 //==============================================================================
+template <class PL = DefaultPhaseLattice>
 class PhaseField {
  public:
+  using PhaseLat = PL;
+  using Params   = PfParamsT<PL>;
+
   PhaseField(int nx, int ny, int nz) : nx_(nx), ny_(ny), nz_(nz) {
     N_ = long(nx) * ny * nz;
     f_.assign(std::size_t(27 * N_), Real(0));
-    h_.assign(std::size_t(PhaseLattice::Q * N_), Real(0));
+    h_.assign(std::size_t(PL::Q * N_), Real(0));
     fld_.assign(std::size_t(15 * N_), Real(0));
     pflags_.assign(std::size_t(N_), std::uint8_t(PhaseBulk));
     fflags_.assign(std::size_t(N_), std::uint8_t(lbm::Fluid));
@@ -532,6 +536,30 @@ class PhaseField {
   MultiphaseModel fluid;
 
   void enable_viscous_force(bool on) { viscous_ = on; }
+
+  // Same contract as the device class: independent operators, both BGK by
+  // default, and the phase field's central-moment form refused on a lattice
+  // that cannot carry it -- with a message, at setup.
+  void set_phase_op(PhaseOp op) {
+    if (op == PhaseOp::CentralMoments && PL::Q != 27) {
+      std::fprintf(stderr,
+                   "host::PhaseField: central moments need a product lattice; "
+                   "this one is D3Q%d. Use host::PhaseField<D3Q27>.\n", PL::Q);
+      std::exit(1);
+    }
+    phase_op_ = op;
+  }
+  void set_fluid_op(MultiOp op) { fluid_op_ = op; }
+
+  // An external per-node force, owned by the caller -- a penalised solid, say.
+  void couple_external_force(const Real* fx, const Real* fy, const Real* fz) {
+    ex_ = fx;  ey_ = fy;  ez_ = fz;
+  }
+  PhaseOp phase_op() const { return phase_op_; }
+  MultiOp fluid_op() const { return fluid_op_; }
+
+  void set_mobility(Real m) { phase.omega = PhaseModel::omega_from_mobility<PL>(m); }
+  Real mobility() const { return phase.template mobility<PL>(); }
 
   void set_geometry(const std::vector<std::uint8_t>& pf,
                     const std::vector<std::uint8_t>& ff) {
@@ -549,9 +577,9 @@ class PhaseField {
       Real g[27];
       for (int i = 0; i < 27; ++i) g[i] = FluidLattice::w(i) * pt;
       init_scatter<0, FluidLattice>(f_.data(), N_, x, y, z, nx_, ny_, nz_, g);
-      Real e[PhaseLattice::Q];
-      for (int i = 0; i < PhaseLattice::Q; ++i) e[i] = PhaseLattice::w(i) * ph;
-      init_scatter<0, PhaseLattice>(h_.data(), N_, x, y, z, nx_, ny_, nz_, e);
+      Real e[PL::Q];
+      for (int i = 0; i < PL::Q; ++i) e[i] = PL::w(i) * ph;
+      init_scatter<0, PL>(h_.data(), N_, x, y, z, nx_, ny_, nz_, e);
       fld_[std::size_t(n)] = ph;                       // phi
       fld_[std::size_t(8 * N_ + n)] = pt;              // p~
     }
@@ -588,13 +616,13 @@ class PhaseField {
 
  private:
   void derivatives() {
-    const PfParams p = params();
+    const Params p = params();
     if (has_geometry_) for (long n = 0; n < N_; ++n) pf_derivatives_node<true>(p, n);
     else               for (long n = 0; n < N_; ++n) pf_derivatives_node<false>(p, n);
   }
 
   template <int P> void run() {
-    const PfParams p = params();
+    const Params p = params();
     if (has_geometry_) for (long n = 0; n < N_; ++n) pf_field_node<P, true>(p, N_, n);
     else               for (long n = 0; n < N_; ++n) pf_field_node<P, false>(p, N_, n);
     derivatives();
@@ -610,8 +638,8 @@ class PhaseField {
     else               for (long n = 0; n < N_; ++n) pf_phase_node<P, false>(p, N_, n);
   }
 
-  PfParams params() {
-    PfParams p;
+  Params params() {
+    Params p;
     p.f = f_.data();  p.h = h_.data();
     p.phi = &fld_[0];
     p.gx = &fld_[std::size_t(N_)];
@@ -632,9 +660,11 @@ class PhaseField {
       p.py = &fld_[std::size_t(13 * N_)];
       p.pz = &fld_[std::size_t(14 * N_)];
     }
+    p.ex = ex_;  p.ey = ey_;  p.ez = ez_;
     p.pflags = pflags_.data();  p.fflags = fflags_.data();
     p.nx = nx_; p.ny = ny_; p.nz = nz_;
     p.pm = phase;  p.fm = fluid;
+    p.pop = phase_op_;  p.fop = fluid_op_;
     return p;
   }
 
@@ -642,8 +672,11 @@ class PhaseField {
   long N_;
   std::vector<Real> f_, h_, fld_;
   std::vector<std::uint8_t> pflags_, fflags_;
+  const Real *ex_ = nullptr, *ey_ = nullptr, *ez_ = nullptr;
   bool has_geometry_ = false;
   bool viscous_ = false;
+  PhaseOp phase_op_ = PhaseOp::BGK;
+  MultiOp fluid_op_ = MultiOp::BGK;
   std::size_t t_ = 0;
 };
 
