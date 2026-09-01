@@ -111,6 +111,21 @@ struct PhaseFieldCentralMoments {
 
   Real omega = Real(1);      // sets the mobility, exactly as in PhaseFieldBGK
   Real width = Real(4);      // interface width W, in lattice units
+  // Transform the source at the actual velocity instead of truncating it at
+  // u = 0. Their drivers truncate, and so does the default here, because
+  // MEASURED IT MAKES NO DIFFERENCE. On the advected flat slab of
+  // validation/phase_flat -- 50 000 steps, W = 3, the case that can see this
+  // if anything can -- the width drift is
+  //
+  //     omega      truncated     transformed
+  //     1.9881     -4.58e-2      -4.52e-2
+  //     1.9940     +7.43e-1      +7.45e-1
+  //
+  // 1.3 % and 0.3 % apart. The switch is kept because the reasoning that says
+  // it SHOULD matter is sound -- the discarded moments are O(|u| A), which is
+  // zero at rest and not under advection -- and the next person will have it
+  // too. It is simply not what limits this operator.
+  bool full_source = false;
 
   static Real omega_from_mobility(Real m) {
     return Real(1) / (m * inv_cs2<L, Real>() + Real(0.5));
@@ -216,14 +231,36 @@ struct PhaseFieldCentralMoments {
     const Real keep = Real(1) - omega;
     const Real pref = (Real(1) - Real(0.5) * omega) * cs2v;
 
-    const Real k1 = k[ix] * keep + pref * A[0];
-    const Real k2 = k[iy] * keep + pref * A[1];
-    const Real k3 = (iz >= 0) ? (k[iz] * keep + pref * A[2]) : Real(0);
-
-    for (int n = 0; n < NM; ++n) k[n] = Real(0);
-    k[i0] = phi;                      // k*_0: exactly conserved
-    k[ix] = k1;  k[iy] = k2;
-    if (iz >= 0) k[iz] = k3;
+    if (!full_source) {
+      // The u = 0 truncation, which is what their drivers use.
+      const Real k1 = k[ix] * keep + pref * A[0];
+      const Real k2 = k[iy] * keep + pref * A[1];
+      const Real k3 = (iz >= 0) ? (k[iz] * keep + pref * A[2]) : Real(0);
+      for (int n = 0; n < NM; ++n) k[n] = Real(0);
+      k[i0] = phi;
+      k[ix] = k1;  k[iy] = k2;
+      if (iz >= 0) k[iz] = k3;
+    } else {
+      // The source transformed at the ACTUAL velocity, so every slot it
+      // occupies is filled. Identical to the branch above at u = 0 and not
+      // otherwise: see the banner.
+      Real S[L::Q];
+      const Real sp = Real(1) - Real(0.5) * omega;
+      for (int i = 0; i < L::Q; ++i) {
+        const Real cA = Real(cvel<L>(i, 0)) * A[0] + Real(cvel<L>(i, 1)) * A[1] +
+                        Real(cvel<L>(i, 2)) * A[2];
+        S[i] = sp * weight<L, Real>(i) * cA;
+      }
+      Real r[NM];
+      Basis::to_moments(S, u, r);
+      const Real k1 = k[ix] * keep;
+      const Real k2 = k[iy] * keep;
+      const Real k3 = (iz >= 0) ? (k[iz] * keep) : Real(0);
+      for (int n = 0; n < NM; ++n) k[n] = r[n];
+      k[i0] = phi;                    // R_0 = 0, so phi is still conserved
+      k[ix] = k1 + r[ix];  k[iy] = k2 + r[iy];
+      if (iz >= 0) k[iz] = k3 + r[iz];
+    }
 
     Basis::to_populations(k, u, h);
   }
