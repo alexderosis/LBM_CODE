@@ -200,26 +200,48 @@ static RT run(Index W, bool three_d, double At, double Re, double Ca, double Pe,
       auto hp = Kokkos::create_mirror_view_and_copy(HostSpace{}, pf.phi());
       auto hu = Kokkos::create_mirror_view_and_copy(HostSpace{}, fl.ux());
       auto hv = Kokkos::create_mirror_view_and_copy(HostSpace{}, fl.uy());
-      Index spike = ny - 1, bubble = 0;
+      // THREE spike measures, because the obvious one is not the published
+      // one. "Position of the spike" in their Table IX is the tip of the
+      // coherent falling finger; the global lowest node with phi > 0.5 is a
+      // different quantity the moment anything detaches or a stray cell
+      // overshoots, and it can only ever read LOWER. Measuring all three is
+      // what distinguishes a physics error from a measurement artefact, and
+      // that distinction cost a wrong conclusion once already.
+      //
+      //   spike      global minimum -- what this case reported before
+      //   spike_ax   on the column where the initial perturbation is lowest,
+      //              (W/2, W/2), which is where the finger forms
+      //   spike_pop  lowest y whose cross-section holds at least 0.1 % of its
+      //              nodes above phi = 0.5, so one stray cell cannot set it
+      Index spike = ny - 1, bubble = 0, spike_ax = ny - 1, spike_pop = ny - 1;
       double um = 0;
       const Index z0 = three_d ? 0 : 0, z1 = three_d ? nz - 1 : 0;
-      for (Index z = z0; z <= z1; ++z)
-        for (Index y = 0; y < ny; ++y)
+      const Index xc = nx / 2, zc = three_d ? nz / 2 : 0;
+      const Index plane = (z1 - z0 + 1) * nx;
+      const Index need = std::max(Index(1), Index(plane / 1000));
+      for (Index y = 0; y < ny; ++y) {
+        Index cnt = 0;
+        for (Index z = z0; z <= z1; ++z)
           for (Index x = 0; x < nx; ++x) {
             const Index n = d.id(x, y, z);
             const double p = double(hp(n));
             if (!std::isfinite(p)) r.finite = false;
-            if (p > 0.5 && y < spike)  spike = y;
+            if (p > 0.5) { ++cnt; if (y < spike) spike = y; }
             if (p < 0.5 && y > bubble) bubble = y;
             um = std::max(um, std::hypot(double(hu(n)), double(hv(n))));
           }
+        if (cnt >= need && y < spike_pop) spike_pop = y;
+        if (double(hp(d.id(xc, y, zc))) > 0.5 && y < spike_ax) spike_ax = y;
+      }
       r.t_star.push_back(T_STAR[next]);
       r.y_spike.push_back(double(spike) / double(W));
       r.y_bubble.push_back(double(bubble) / double(W));
       r.umax.push_back(um);
-      std::printf("    t/t0 = %-5.2f  step %-8zu  y+ spike %.4f  bubble %.4f  "
-                  "|u|max %.4e\n", T_STAR[next], step,
-                  double(spike) / double(W), double(bubble) / double(W), um);
+      std::printf("    t/t0 = %-5.2f  step %-8zu  y+ spike %.4f (axis %.4f, "
+                  "pop %.4f)  bubble %.4f  |u|max %.4e\n", T_STAR[next], step,
+                  double(spike) / double(W), double(spike_ax) / double(W),
+                  double(spike_pop) / double(W),
+                  double(bubble) / double(W), um);
       std::fflush(stdout);
       ++next;
       if (!r.finite) break;
