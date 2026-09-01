@@ -52,6 +52,27 @@
 //  they spread by 30 % at t/t0 = 3 -- 0.648 to 0.863 -- so agreement inside that
 //  spread says the scheme belongs in the same family, and nothing sharper. The
 //  spread is printed alongside for exactly that reason.
+//
+//  RESOLUTION IS THE FIRST THING TO CHECK, AND W = 64 IS NOT ENOUGH HERE. On
+//  their Table VIII (2-D, Re = 30000, Ca = 0.26) with only W varied, the worst
+//  deviation over the seven tabulated instants is
+//
+//      W = 64    15.8 %
+//      W = 128    4.9 %
+//      W = 256    2.7 %
+//
+//  and in every case the error is LATE: the first five instants agree to about
+//  1 % at all three resolutions and the whole deficit appears at t/t0 = 2.5 and
+//  3, once the spike has rolled up and the structure that has to be resolved is
+//  the filament rather than the interface. So the scheme converges, and a
+//  disagreement at t/t0 = 3 on a coarse grid is the expected behaviour rather
+//  than a defect to hunt.
+//
+//  Surface tension stacks with it. At W = 64, Re = 30000, changing ONLY Ca from
+//  0.26 to 960 -- sigma from 1.58e-4 to 1.25e-6 -- takes the worst deviation
+//  from 15.8 % to 29.3 %, again entirely in the last two instants. Their 3-D
+//  cases run at Ca = 960 AND W = 64, so they sit at the bad end of both knobs
+//  at once, and their 92.8 % is not a single cause.
 //==============================================================================
 #include "collision/MultiphaseCentralMoments.hpp"
 #include "collision/PhaseFieldCentralMoments.hpp"
@@ -326,10 +347,19 @@ int main(int argc, char** argv) {
       std::printf("  %s\n", std::string(spread ? 74 : 46, '-').c_str());
       double worst = 0;
       for (std::size_t i = 0; i < r.t_star.size(); ++i) {
-        const double dev = 100.0 * (r.y_spike[i] / ref[i] - 1.0);
-        worst = std::max(worst, std::abs(dev));
-        std::printf("  %-8.1f %-11.4f %-13.3f %+8.1f%%", r.t_star[i],
-                    r.y_spike[i], ref[i], dev);
+        // Table X ends at exactly 0.000, so a relative deviation there is
+        // undefined rather than infinite. Report the absolute gap in that one
+        // slot and keep it out of the worst-case, which is a relative measure.
+        const bool rel = std::abs(ref[i]) > 1e-9;
+        const double dev = rel ? 100.0 * (r.y_spike[i] / ref[i] - 1.0)
+                               : (r.y_spike[i] - ref[i]);
+        if (rel) worst = std::max(worst, std::abs(dev));
+        if (rel)
+          std::printf("  %-8.1f %-11.4f %-13.3f %+8.1f%%", r.t_star[i],
+                      r.y_spike[i], ref[i], dev);
+        else
+          std::printf("  %-8.1f %-11.4f %-13.3f %+7.4f ", r.t_star[i],
+                      r.y_spike[i], ref[i], dev);
         if (spread) {
           const bool in = r.y_spike[i] >= RT3D_LO[i] - 1e-9 &&
                           r.y_spike[i] <= RT3D_HI[i] + 1e-9;
@@ -339,7 +369,7 @@ int main(int argc, char** argv) {
         std::printf("\n");
       }
       std::printf("\n  worst deviation %.1f%%.%s\n", worst,
-                  td ? "  The spread column is the range across the eight models\n"
+                  spread ? "  The spread column is the range across the eight models\n"
                        "  their Table IX tabulates; landing inside it is the "
                        "honest claim here,\n  because a nonlinear instability has "
                        "no closed form to be right against."
