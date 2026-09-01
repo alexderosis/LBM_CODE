@@ -169,9 +169,23 @@ static RT run(Index W, bool three_d, double At, double Re, double Ca, double Pe,
   const double g     = U * U / double(W);           // so sqrt(gW) = U
   const double nu    = double(W) * U / Re;
   const double rho_l = 1.0, rho_h = (1.0 + At) / (1.0 - At);
-  const double sigma = rho_h * nu * U / Ca;         // Ca = mu_H U / sigma
-  const double M     = U * iw / Pe;                 // Pe = U xi / M
-  const double t_ref = std::sqrt(double(W) / (g * At));
+  // THREE THINGS HERE COME FROM THEIR DRIVER RATHER THAN FROM THE PAPER'S
+  // PROSE, AND ALL THREE DIFFER FROM IT.
+  //
+  // 1. sigma = nu_H U / Ca, with NO rho_H, although Ca = mu_H U / sigma would
+  //    put one there. At At = 0.5 that is a factor of three.
+  // 2. M = U d / Pe with d the DOMAIN, not U xi / Pe. Same reading error as
+  //    the interface cases; here it is a factor of W/xi = 13 to 51.
+  // 3. THE REFERENCE TIME DIFFERS BETWEEN TWO AND THREE DIMENSIONS. Their 2-D
+  //    drivers use sqrt(W / (g At)) and their 3-D ones use sqrt(W / g) with no
+  //    Atwood factor at all. Using the 2-D form in 3-D stretches the clock by
+  //    1/sqrt(At) = 1.41, so a spike reported at t/t0 = 3 has actually been
+  //    run 41 % further than theirs -- which is most of why the 3-D case here
+  //    was falling through the floor.
+  const double sigma = nu * U / Ca;
+  const double M     = U * double(W) / Pe;
+  const double t_ref = three_d ? std::sqrt(double(W) / g)
+                               : std::sqrt(double(W) / (g * At));
   const std::size_t nsteps = std::size_t(tmax * t_ref);
 
   Domain d(nx, ny, nz, /*periodic x*/ true, /*y*/ false, /*z*/ true);
@@ -348,7 +362,7 @@ int main(int argc, char** argv) {
   const double Ca   = arg_num(argc, argv, "-ca", td ? 960.0 : 0.26);
   const double Pe   = arg_num(argc, argv, "-pe", td ? 1024.0 : 500.0);
   const double U    = arg_num(argc, argv, "-u", 0.04);
-  const double iw   = arg_num(argc, argv, "-iw", 3.0);
+  const double iw   = arg_num(argc, argv, "-iw", 5.0);   // THEIR value
   const double tmax = arg_num(argc, argv, "-tmax", 3.0);
   const bool   dump = arg_flag(argc, argv, "-dump");
   // Order-parameter snapshots for the figures, into doc/fig as raw float32.

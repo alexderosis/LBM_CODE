@@ -40,22 +40,22 @@ def fmt(r, key="e"):
     return f"{v:.4f}"
 
 out = [r"\begin{tabular}{llrrrr}", r"\toprule",
-       r"Case & Their table & $Pe$ & BGK & CM & Their FD \\", r"\midrule"]
+       r"Case & Table & $Pe$ & $\omega_\phi$ & CM & Theirs \\", r"\midrule"]
 last = None
 for case in ORDER:
     keys = sorted([k for k in rows if k[0] == case], key=lambda k: k[1])
     for k in keys:
         d = rows[k]
-        any_r = d.get("bgk") or d.get("cm")
+        r = d.get("cm") or d.get("bgk")
+        if r is None: continue
         tab, label = TAB[case]
         name = label if case != last else ""
         last = case
         out.append(f"{name} & {tab if name else ''} & {k[1]:.0f} & "
-                   f"{fmt(d.get('bgk'))} & {fmt(d.get('cm'))} & "
-                   f"{num(any_r['ref_fd']):.4f} " + r"\\")
+                   f"{num(r['omega']):.3f} & {fmt(r)} & "
+                   f"{num(r['ref_fd']):.4f} " + r"\\")
 out += [r"\bottomrule", r"\end{tabular}"]
-if not (len(sys.argv) > 1 and sys.argv[1] == "--ratio"):
-    sys.stdout.write("\n".join(out) + "\n")
+sys.stdout.write("\n".join(out) + "\n")
 
 # ---------------------------------------------------------------------------
 # Second table, written to a separate file: the CM/BGK ratio against run

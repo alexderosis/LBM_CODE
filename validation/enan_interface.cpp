@@ -187,21 +187,44 @@ struct Spec {
   double      L0;
   double      Rfac;         // R = Rfac * L0
   double      x0f, y0f, z0f;// centre, as fractions of L0
-  double      cycles;       // t_end / T
+  double      dref;         // THE d THEIR CODE USES: nx for some cases, nx-1 for
+                            // others, and it sets both T_ref and the mobility
+  double      mob;          // fixed mobility; 0 means M = U0 * dref / Pe
+  double      pe;           // the Pe of a single-Pe case; 0 if it has a sweep
+  double      cycles;       // t_end / T,  T = dref / U0
   double      xi;           // interface width, lattice units
   double      ref_fd;       // the paper's FD entry, 0 if the case has a Pe sweep
   const char* table;
 };
 
+// THE PECLET NUMBER IS DOMAIN-BASED, NOT INTERFACE-BASED, and reading it the
+// other way is the single largest error this case has carried. Their text says
+// Pe = U0 xi / M; every one of their drivers computes
+//
+//     M = U_ref * d / Pe
+//
+// with d the DOMAIN SIZE. On their Table III at Pe = 80 that is M = 0.0497 and
+// omega = 1.54; the interface-width reading gives M = 7.5e-4 and omega = 1.991,
+// which is 66 times too little mobility and sits against the stability edge.
+// Run that way, BGK diverges on three of the four Zalesak rows and the
+// central-moment operator does not -- a difference that was written up here as
+// the reason that operator exists, and was an artefact of the mobility.
+// THEIR OMEGA NEVER EXCEEDS 1.988 ON ANY CASE IN THE PAPER.
+//
+// Three cases do not use that rule at all: their Tables II, IV and V hardcode
+// M = 0.001, which the paper's text also states. Those are carried as `mob`.
+//
+// The interface width is likewise per-case rather than the 3 the text quotes:
+// Table III uses d/100 = 1.99 and Table V uses 2.
 const Spec SPECS[] = {
-  // name        field      dim  L0     R/L0   x0/L0  y0/L0  z0/L0  cyc  xi  ref     table
-  {"translate",  Translate, 2,  200.0, 0.2,   0.50,  0.50,  0.50, 10.0, 3.0, 0.0,    "I"},
-  {"translate41",Translate, 2,  100.0, 0.25,  0.50,  0.50,  0.50, 10.0, 3.0, 0.0134, "II"},
-  {"zalesak",    Zalesak,   2,  200.0, 0.4,   0.50,  0.50,  0.50,  1.0, 3.0, 0.0,    "III"},
-  {"shear2d",    Shear2D,   2,  200.0, 0.2,   0.50,  0.30,  0.50,  2.0, 3.0, 0.0244, "IV"},
-  {"smooth2d",   Smooth2D,  2,  512.0, 0.2,   0.50,  0.50,  0.50,  1.0, 2.0, 0.0199, "V"},
-  {"sphere3d",   Sphere3D,  3,  100.0, 0.2,   0.30,  0.30,  0.50,  1.0, 3.0, 0.0490, "VI"},
-  {"swirl3d",    Swirl3D,   3,  100.0, 0.2,   0.50,  0.50,  0.50,  1.0, 3.0, 0.1133, "VII"},
+  // name        field      dim  L0     R/L0   x0/L0  y0/L0  z0/L0  dref   mob    pe    cyc  xi    ref     table
+  {"translate",  Translate, 2,  200.0, 0.2,   0.50,  0.50,  0.50, 200.0, 0.0,     0.0, 10.0, 3.00, 0.0,    "I"},
+  {"translate41",Translate, 2,  100.0, 0.25,  0.50,  0.50,  0.50, 100.0, 0.001,   0.0, 10.0, 3.00, 0.0134, "II"},
+  {"zalesak",    Zalesak,   2,  200.0, 0.4,   0.50,  0.50,  0.50, 199.0, 0.0,     0.0,  1.0, 1.99, 0.0,    "III"},
+  {"shear2d",    Shear2D,   2,  200.0, 0.2,   0.50,  0.30,  0.50, 199.0, 0.001,   0.0,  2.0, 3.00, 0.0244, "IV"},
+  {"smooth2d",   Smooth2D,  2,  512.0, 0.2,   0.50,  0.50,  0.50, 511.0, 0.001,   0.0,  1.0, 2.00, 0.0199, "V"},
+  {"sphere3d",   Sphere3D,  3,  100.0, 0.2,   0.30,  0.30,  0.50, 100.0, 0.0,   200.0,  2.0, 3.00, 0.0490, "VI"},
+  {"swirl3d",    Swirl3D,   3,  100.0, 0.2,   0.50,  0.50,  0.50, 100.0, 0.0,   200.0,  1.0, 3.00, 0.1133, "VII"},
 };
 
 // The Peclet sweeps the paper tabulates, and its FD row for each.
@@ -220,8 +243,10 @@ Result run(const Spec& s, double Pe, double U0, const char* dump, int probe) {
   const Index N  = Index(std::lround(s.L0));
   const Index nz = (s.dim == 3) ? N : Index(1);
   const double R = s.Rfac * s.L0;
-  const double M = U0 * s.xi / Pe;
-  const std::size_t T     = std::size_t(std::lround(s.L0 / U0));
+  // M and T from THEIR d, not from L0 and not from xi. See the note above the
+  // spec table for why the interface-width reading of Pe is wrong.
+  const double M = (s.mob > 0.0) ? s.mob : U0 * s.dref / Pe;
+  const std::size_t T     = std::size_t(std::lround(s.dref / U0));
   const std::size_t steps = std::size_t(std::lround(s.cycles * double(T)));
 
   Domain d(N, N, nz, true, true, true);
@@ -456,8 +481,9 @@ int main(int argc, char** argv) {
       std::printf("  %s\n", std::string(92, '-').c_str());
 
       for (int k = 0; k < nrun; ++k) {
-        const double Pe  = sweepA ? PE_A[k] : (sweepB ? PE_B[k]
-                                             : U0 * s.xi / mob);
+        const double Pe  = sweepA ? PE_A[k]
+                         : (sweepB ? PE_B[k]
+                         : (s.pe > 0.0 ? s.pe : U0 * s.dref / s.mob));
         const double ref = sweepA ? REF_A_FD[k] : (sweepB ? REF_B_FD[k] : s.ref_fd);
         char tag[128];
         std::snprintf(tag, sizeof tag, "%s_%s_pe%g", s.name,

@@ -4307,307 +4307,173 @@ with a rotating inertia tensor and a quaternion; the fluid side would not change
 \subsubsection{A published multiphase campaign: De Rosis and Enan (2021)}
 \label{sec:enan}
 
-De Rosis and Enan \cite{derosis2021} is the source paper for this tree's phase-field
-formulation (\S\ref{sec:multiphase}), and its Sec.~III is nine test cases with
-tabulated numbers. That makes it the same kind of target as
-\S\ref{sec:campaign}: not one benchmark but a campaign, where the interesting
-result is the pattern across the cases rather than any single row.
+De Rosis and Enan \cite{derosis2021} is the source paper for this tree's
+phase-field formulation (\S\ref{sec:multiphase}), and its Sec.~III is nine test
+cases with tabulated numbers. That makes it the same kind of target as
+\S\ref{sec:campaign}: not one benchmark but a campaign, where the pattern
+across the cases matters more than any single row. Everything below runs the
+central-moment collision of \S\ref{sec:multiphase} on both lattices, which is
+what their own drivers use.
 
-The nine split into three groups, and only the first two are run here.
+\paragraph{The reference implementation is the authority, not the prose, and
+this section was rewritten once because of it.} The paper states
+$Pe = U_0\xi/M$. Every one of their drivers computes
+\[
+  M = U_{\rm ref}\,d\,/\,Pe,
+\]
+with $d$ the \emph{domain size}. On their Table~III at $Pe=80$ that is
+$M=0.0497$ and $\omega_\phi=1.540$; the interface-width reading gives
+$M=7.5\e{-4}$ and $\omega_\phi=1.991$, sixty-six times less mobility and hard
+against the stability edge. Read that way, BGK diverges on three of the four
+Zalesak rows and the central-moment operator does not --- a difference written
+up here, in an earlier revision, as the reason that operator exists. It was an
+artefact of the mobility. \textbf{Across every case in the paper their
+$\omega_\phi$ never exceeds 1.988.}
 
-\begin{itemize}
-  \item \textbf{Interface capture} (their III.A--III.F, Tables I--VII). The
-    velocity field is \emph{prescribed}; only the order parameter is solved.
-    No fluid collision operator is exercised at all, so these isolate the
-    Allen--Cahn discretisation from everything else.
-  \item \textbf{Rayleigh--Taylor instability} (their III.H--III.I,
-    Tables VIII--X). Fully coupled, and the only quantitative check is the
-    trajectory of the spike.
-  \item \textbf{Vertical penetration of a wedge} (their III.G). Not run --- see
-    the end of this section for why, which is a missing capability rather than
-    a missing run.
-\end{itemize}
+The same source settles several other points where the text and the code
+disagree, and the code wins each time: their Tables~II, IV and V hardcode
+$M=0.001$ rather than deriving it; the interface width is per-case rather than
+the 3 the text quotes ($\xi=1.99$ for the Zalesak disk, 2 for Table~V, 5 for
+\emph{both} Rayleigh--Taylor cases); the Rayleigh--Taylor surface tension is
+$\sigma=\nu_H U/Ca$ with no $\rho_H$, though $Ca=\mu_H U/\sigma$ implies one;
+and --- the one that mattered most --- \textbf{the three-dimensional
+Rayleigh--Taylor reference time is $\sqrt{W/g}$ with no Atwood factor} where
+the two-dimensional one is $\sqrt{W/(g\,\mathrm{At})}$. Using the 2-D form in
+3-D stretches the clock by $1/\sqrt{\mathrm{At}}=1.41$, so a spike reported at
+$t/t_0=3$ has been run 41\% further than theirs.
+
+Two differences remain by choice rather than oversight. Their scheme is D3Q19;
+this one is D3Q27, because the shifted product basis the collision is written
+in needs a product lattice (\S\ref{sec:eqprod}). That distinction is real only
+in three dimensions --- D3Q19 and D3Q27 have the same $z=0$ slice, so the
+two-dimensional cases run on the same effective D2Q9 either way. And their
+Zalesak slot is a sharp cut where this one is $\tanh$-smoothed.
 
 \paragraph{What is compared, and to which column.} The paper computes
-$\bm{\nabla}\phi$ two ways --- finite differences, its Eq.~(20), and directly
-from the first-order central moments, its Eq.~(70) --- and tabulates both. This
-tree implements the finite-difference route only, and the reason is structural:
-Eq.~(70) reads the phase field's own populations at the node, and under Esoteric
-Pull the slots a node reads are the slots it is about to write
-(\S\ref{sec:esopull}), so the gradient would be taken from a mixture of
-pre- and post-collision states. Every comparison below is therefore against the
-paper's FD column.
-
-Two further differences are deliberate and are stated here once rather than
-repeated per case. The paper's phase field is D3Q19 with a written-out
-$19\times19$ transform; this tree runs D3Q27, because the central-moment
-transform here is three one-dimensional passes and needs a product lattice
-(\S\ref{sec:eqprod}). And a two-dimensional case is run as D3Q27 with a
-single periodic cell in $z$, which is exact rather than approximate: D3Q27 is a
-product lattice, so at $n_z=1$ it reduces to D2Q9 identically.
-
-\paragraph{The six interface-capture cases.} Table~\ref{tab:enan} collects them.
-It is generated from \code{results/L\_enan/enan\_interface.dat} by
-\code{doc/fig/enan\_interface\_table.py} rather than transcribed, so the
-document cannot drift from the data behind it.
+$\bm{\nabla}\phi$ by finite differences (its Eq.~20) and from moments (its
+Eq.~70) and tabulates both. This tree implements the finite-difference route
+only: Eq.~(70) reads the phase field's own populations at the node, and under
+Esoteric Pull the slots a node reads are the slots it is about to write
+(\S\ref{sec:esopull}), so the gradient would be taken from a mixture of pre-
+and post-collision states.
 
 \begin{table}[htbp]
   \centering
-  \caption{De Rosis and Enan's Sec.~III interface-capture cases, D3Q27, FP64,
-  compared against their finite-difference column. The velocity is prescribed
-  in all of them. \textit{diverged} is a run that reached a non-finite state,
-  not one that finished badly.}
+  \caption{Interface capture, their III.A--III.F, at their mobilities. The
+  velocity is prescribed in all of them, so no fluid operator is exercised.
+  $Pe$ is their domain-based definition. Their Tables~VI and VII give a D3Q7
+  column as well, at 0.0754 and 0.1726.}
   \label{tab:enan}
   \input{fig/enan_interface_table.tex}
 \end{table}
 
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{fig/enan_phase_field.png}
-  \caption{The interface-capture campaign. (a) the six cases of their
-  III.A--III.F, both collisions against their finite-difference column; note
-  that the translation case is the one where the central-moment operator loses
-  badly and the Zalesak disk the one where it wins. (b) their Tables~I and III;
-  a cross marks a run that reached $10^{300}$, and the three of them are the
-  reason the central-moment operator exists. (c) the cycle scan, which is the
-  measurement that disproved a crossover in $\omega_\phi$: BGK's translation
-  error is flat across a tenfold change in run length and the central-moment
-  error compounds. (d) the mobility ladder at fixed run length, which is what
-  made the $\omega_\phi$ reading look right in the first place.}
-  \label{fig:enanphase}
+  \includegraphics[width=\textwidth]{fig/enan_campaign.png}
+  \caption{The campaign at their parameters, central moments throughout.
+  (a) interface capture against the published column, with the D3Q7 entries
+  their Tables VI and VII also give. (b) the Zalesak Peclet sweep with
+  $\omega_\phi$ marked: their domain-based mobility puts the ceiling at 1.988,
+  and an earlier revision of this section read $Pe$ as $U_0\xi/M$, ran at
+  1.9998, and drew conclusions from a regime the paper never visits. (c) the
+  2-D Rayleigh--Taylor spike against their Table VIII --- the pass. (d) the two
+  3-D cases against Tables IX and X, with the band their Table IX collects from
+  eight published models; both now sit above it, having sat far below it before
+  the reference time was corrected.}
+  \label{fig:enancampaign}
 \end{figure}
 
-Read the BGK column against the last one first, because that is the
-like-for-like comparison. It is favourable on four of the seven rows where both
-complete --- the Geier translation, the Zalesak disk, and both smoothed-shear
-cases --- and unfavourable on three, and the three are worth separating because
-they fail for two different reasons.
+\paragraph{The results, and the one that is not there.} Table~\ref{tab:enan}
+collects them. Their Table~I is \emph{not} run: it is three Peclet numbers at
+$100\,000$ steps each, and the campaign was stopped before it completed rather
+than reporting the earlier numbers, which were taken at a mobility sixty-seven
+times too small and answer a different question.
 
-The circular interface in a shear flow and the swirling sphere are the two that
-stretch the interface into a filament a few cells across before returning it,
-so they measure the reconstruction rather than the transport; being 14\% and
-31\% off there is a limitation of the scheme on thin filaments and is stated as
-one rather than averaged away.
+Four of the eight rows sit within 21\% of the published column and one within
+2\%. The Zalesak sweep grows from $+13\%$ to $+41\%$ as $\omega_\phi$ rises
+toward their ceiling of 1.988, which is a trend rather than scatter. Two rows
+need separating from the rest.
 
-Their Table~I is a different and worse story, and it is the one honest failure
-in the section. Both operators complete all three Peclet numbers --- BGK gives
-0.0781, 0.0267 and 0.0496 against their 0.0066, 0.0050 and 0.0090, and the
-central-moment collision 0.3053, 0.1190 and 0.0731 --- so nothing diverges and
-nothing is missing; the numbers are simply five to forty-six times the
-published ones. That \emph{both} operators miss by so much is what makes this
-informative: it locates the deficit in what they share --- the gradient
-stencil, the anti-diffusion source, the initialisation --- rather than in
-either collision, and it is recorded unresolved.
+\subparagraph{The translation case is inside the published spread, not outside
+it.} Their Table~II collects five methods at that operating point: 0.0074,
+0.0134 (theirs, FD), 0.0458 (theirs, moments), 0.0874 and 0.1176 --- a factor
+of sixteen. This scheme's 0.0397 lies between their own two entries, 13\% below
+their moment-based one. An earlier revision of this section quoted it as
+``$+196\%$ against their FD column'', which is picking one end of a wide range
+and calling it a failure.
 
-Two details sharpen it rather than explain it away. The same physical test at
-half the run length and half the Peclet number, their Table~II, has BGK
-\emph{beating} the published column at 0.0082 against 0.0134, so whatever this
-is switches on between the two. And the error is not monotonic in $Pe$ for
-either operator, which rules out a simple under-resolution of the interface at
-low mobility.
-
-\paragraph{The central-moment collision does not dominate BGK, and what it
-buys is the stability ceiling rather than accuracy.} This is the least expected
-result in the section, and two explanations were attempted for it here before
-one survived contact with the data. Both failures are recorded because each was
-a plausible reading of a real measurement.
-
-The first was a crossover in $\omega_\phi$. The mobility ladder below is a
-genuine measurement and it looks exactly like one --- until the Zalesak disk is
-run at $\omega_\phi = 1.991$ against translation's 1.988 and the ordering
-reverses. The second was run length, on the strength of the cycle scan below,
-which is also a genuine measurement; that one survived until the spherical
-interface came in 1.48 times worse at 5000 steps while the Zalesak disk was
-0.46 times at 10\,000. Table~\ref{tab:enanratio} is the evidence that no single
-variable orders the two operators.
-
-\begin{table}[htbp]
-  \centering
-  \caption{The two collisions on the cases where both complete, ordered by run
-  length. Neither run length nor $\omega_\phi$ orders the last column.}
-  \label{tab:enanratio}
-  \input{fig/enan_interface_ratio.tex}
-\end{table}
-
-What \emph{is} established, and is the reason the operator exists, is the
-stability ceiling. The mobility fixes the relaxation rate,
-$M = c_s^2(1/\omega_\phi - \tfrac{1}{2})$, and the Peclet number fixes the
-mobility, $Pe = U_0\xi/M$; so a high Peclet number \emph{is} an $\omega_\phi$
-approaching 2, with nothing to trade against it. BGK relaxes every moment at
-that rate, ghost modes included, and dies. This operator relaxes only the first
-three. Their Table~III is therefore completed here at all four published
-Peclet numbers --- 80, 400, 800 and 4000 --- with errors of 0.0131, 0.0237,
-0.0284 and 0.0336 against their 0.0593, 0.0590, 0.0558 and 0.0505, where BGK
-manages $Pe=80$ alone and reaches $10^{300}$ on the other three. Every one of
-those rows is better than the published column, and the drift in $\sum\phi$
-stays at $3\e{-13}$ across all of them.
-
-\paragraph{Two measurements that stand on their own.} The first is the cycle
-scan, on their Table~II translation with only the number of cycles varied and
-$\omega_\phi$ held --- one cycle is 5000 steps:
-
-\begin{center}
-\begin{tabular}{rrrr}
-  \toprule
-  Cycles & Steps & BGK & CM \\
-  \midrule
-  1  & 5\,000  & 0.00814 & 0.01593 \\
-  2  & 10\,000 & 0.00803 & 0.01671 \\
-  5  & 25\,000 & 0.00804 & 0.02276 \\
-  10 & 50\,000 & 0.00817 & 0.03968 \\
-  \bottomrule
-\end{tabular}
-\end{center}
-
-BGK is flat to within 2\% across a tenfold change in run length: on this case
-its error saturates within the first cycle and stays there. The central-moment
-error compounds, and there are two separable components --- it starts twice as
-bad and it also grows. That is a property of \emph{this} case, sustained uniform
-advection, and the ratio table above is why it is not offered as the general
-explanation.
-
-The second is the mobility ladder, at fixed ten cycles:
-
-\begin{center}
-\begin{tabular}{rrrr}
-  \toprule
-  $M$ & $\omega_\phi$ & BGK & CM \\
-  \midrule
-  0.2   & 0.909 & 0.0609 & 0.0112 \\
-  0.05  & 1.539 & 0.0097 & 0.0066 \\
-  0.001 & 1.988 & 0.0082 & 0.0397 \\
-  \bottomrule
-\end{tabular}
-\end{center}
-
-BGK's saturated error is large at low $\omega_\phi$ and small near 2. Note that
-$Pe=60$, the paper's own operating point, is the last row: on that case as
-published, on this lattice, the central-moment collision is the worse of the two.
-
-Neither operator is at fault, and the reason it cannot be either of them is that
-both put identical zeroth and first moments into the post-collision state.
-\code{tests/test\_phase\_field.cpp} checks that directly and it holds to
-$3\e{-18}$, which is round-off; every moment entering the Allen--Cahn equation
-at leading order is therefore shared, and the entire difference between them is
-the ghost modes --- which BGK relaxes at $\omega_\phi$ and the central-moment
-operator sends to equilibrium.
-
-One thing is left unexplained rather than resolved: on the translation case the
-central-moment collision here is also three times worse than the paper's own
-D3Q19 central-moment result of 0.0134 at the same Peclet number. The setup was
-checked against the source for the five things that could have made that
-artificial --- the initial profile is their Eq.~(72), the gradient is their
-isotropic Eq.~(20) stencil, the error is their Eq.~(71), and $L_0$, $R$, $\xi$,
-$U_0$ and the cycle count all match --- so it is a real disagreement, and it is
-recorded as one.
-
-\begin{figure}[htbp]
-  \centering
-  \includegraphics[width=\textwidth]{fig/enan_rt_wedge.png}
-  \caption{Rayleigh--Taylor and wedge entry. (a) the 2-D spike against their
-  Table~VIII at three Reynolds numbers --- the pass. (b) the two 3-D cases
-  against their Tables~IX and X, with the band their Table~IX collects from
-  eight published models; being outside it from $t/t_0=1$ is the failure, drawn
-  rather than asserted. (c) and (d) are from a superseded parameterisation of the
-  wedge --- deadrise $10$--$45^\circ$ and a body-reaction force, before their
-  own $2$ and $3^\circ$ and their surface-pressure measure were adopted --- and
-  are kept because each records a way this case misleads: in (c) the
-  $30^\circ$ curve collapses inside the fit window with the same signature as
-  (d), and in (d) an identical impact gives a fitted slope of $29.55$ or
-  $6.51$ according to release height alone, because the pulse from an
-  impulsive release returns inside the window. The reaction force is what makes
-  both possible; the surface-pressure measure of Table~\ref{tab:enanwedge} is
-  not exposed to either.}
-  \label{fig:enanrtwedge}
-\end{figure}
+\subparagraph{The two three-dimensional cases disagree with each other.} The
+spherical interface comes in 59\% \emph{below} their D3Q19 result and the
+swirling deformation 30\% above it. A richer velocity set explains the first
+--- their own D3Q7 column is worse than their D3Q19 by 35\%, and D3Q27
+continues that trend --- and then fails to explain the second. The swirling
+case is also the one insensitive to the mobility correction, moving only from
+0.1488 to 0.1469, so whatever limits it is not the operating point. It is the
+most severe deformation in the group, the one that draws the interface into
+filaments a few cells across, and that is as far as this goes.
 
 \paragraph{Rayleigh--Taylor instability.} Their III.H and III.I are the first
-cases in this group where the fluid is solved at all: the phase field is coupled
-to \code{MultiphaseCentralMoments} through the interfacial force, and both
-lattices run central moments. Four configurations are tabulated, and the paper's
-own list of cases announces only three of them --- its Table~X,
-three-dimensional at $Re=30\,000$, appears without being introduced, and is run
-here because it is there.
-
-The measured quantity is the vertical position of the spike normalised by the
-domain width, at $t/t_0 = 0,\,0.5,\dots,3$ with $t_0=\sqrt{W/(g\,\mathrm{At})}$.
-Table~\ref{tab:enanrt} is generated from \code{results/L\_enan/enan\_rt.dat}.
+cases here where the fluid is solved: the phase field is coupled to
+\code{MultiphaseCentralMoments} through the interfacial force, and both
+lattices run central moments. The measured quantity is the vertical position of
+the spike normalised by the domain width.
 
 \begin{table}[htbp]
   \centering
-  \caption{Rayleigh--Taylor spike position, D3Q27 on both lattices, against
-  their Tables VIII, IX and X. Their values in italics. Table~X ends at exactly
-  zero, so that instant is excluded from the worst relative deviation rather
-  than reported as infinite.}
+  \caption{Rayleigh--Taylor spike position against their Tables VIII, IX and X,
+  at their $\xi=5$, their $\sigma=\nu_H U/Ca$, their domain-based mobility, and
+  the 3-D reference time $\sqrt{W/g}$. Their values in italics. Table~X ends at
+  exactly zero, so that instant is excluded from the worst relative deviation.}
   \label{tab:enanrt}
   \input{fig/enan_rt_table.tex}
 \end{table}
 
-\subparagraph{Two dimensions: a pass, and a resolution requirement.} The 2-D
-case agrees with their Table~VIII to 2.7\% at worst and to under 1\% through
-most of the run. That is the whole of III.H, and it is the strongest evidence in
-this section that the coupled multiphase solver is right, because unlike the
+\subparagraph{Two dimensions: a pass.} The 2-D case agrees with their Table
+VIII to 2.6\% at worst and to under 0.5\% through the first three quarters of
+the run. That is the whole of III.H, and it is the strongest evidence in this
+section that the coupled multiphase solver is right, because unlike the
 interface-capture group it exercises the fluid operator, the interfacial force
-and the coupling order together.
+and the coupling order together. It is also insensitive to the corrections
+above: at the wrong $\xi$ and the wrong mobility it gave 2.7\%.
 
-It also comes with a resolution requirement that is worth stating separately,
-because it is the first thing to check before reading anything into a
-disagreement:
+\subparagraph{Three dimensions: still wrong, but wrong differently.} Both 3-D
+cases now fall too \emph{slowly} --- $+42\%$ at $t/t_0=3$ on their Table IX,
+$+144\%$ at $t/t_0=2.5$ on their Table X --- where before the reference-time
+correction they fell through the floor, reaching $y^\dagger=0.047$ against a
+published 0.648. That the sign flipped is itself the evidence that
+$t_0=\sqrt{W/g}$ was most of the discrepancy: rescaling the old trajectory onto
+the corrected clock predicted $\approx0.88$ against their 0.648, and the rerun
+gave 0.922.
 
-\begin{table}[htbp]
-  \centering
-  \caption{The same case, 2-D at $Re=30\,000$, with only $W$ and $Ca$ varied.
-  The deficit is entirely late: the first five instants agree to about 1\% at
-  every resolution.}
-  \label{tab:enanrtres}
-  \input{fig/enan_rt_resolution.tex}
-\end{table}
+It is still outside the band their Table IX collects from eight published
+models, from $t/t_0=1$ onward. Three candidates remain and none is settled:
 
-The scheme converges --- 15.8\%, 4.9\%, 2.7\% at $W=64$, 128, 256 --- and the
-error is late in every case, appearing only once the spike has rolled up and
-what has to be resolved is the filament rather than the interface.
+\begin{itemize}
+  \item \textbf{The Reynolds number is ambiguous in their own sources.} The
+    paper says $Re=256$ for Table IX; one of their 3-D drivers sets
+    $\mathtt{Reynolds}=128$ and another 3000. This runs 256. Since the spike
+    falls too slowly and a lower $Re$ is more viscous, their 128 would make it
+    worse and 3000 better, so the ambiguity is not incidental to the
+    disagreement.
+  \item $\xi=5$ on $W=64$ is an interface 8\% of the domain width.
+  \item D3Q27 against their D3Q19, which is a real difference in three
+    dimensions --- though the two interface-capture cases above show it cutting
+    both ways.
+\end{itemize}
 
-The $Ca$ rows correct something this document got wrong on first writing. At
-$W=64$, raising $Ca$ from 0.26 to 960 --- dropping $\sigma$ from
-$1.58\e{-4}$ to $1.25\e{-6}$ --- takes the worst deviation from 15.8\% to
-29.4\%, which reads exactly like surface tension adding a second, independent
-penalty. It does not. The same change at $W=256$ gives 1.9\% against 2.7\%,
-very slightly \emph{better}. A nearly surface-tension-free interface simply
-needs more cells to carry the filament; given them, it costs nothing.
+Their 3-D initial condition is a sharp step where this one is a $\tanh$ of
+width $\xi$; both relax to the same equilibrium profile, so that is expected to
+be a transient rather than a cause, and it is not offered as one.
 
-\subparagraph{Three dimensions: a failure, reported as one.} Both 3-D cases fall
-much faster than the published tables --- 92.8\% and 46.2\% at worst, with the
-$Re=256$ spike reaching 0.047 where all eight models their Table~IX collects lie
-between 0.648 and 0.863. This is not presented as agreement inside a spread; it
-is outside it from $t/t_0=1$ onward.
-
-What has been ruled out is worth as much as what has not. The setup is theirs:
-their Eq.~(83) puts a domain of $W\times4W\times W$ at $W=64$, the interface at
-$2W$ and a perturbation $0.05W[\cos2\pi x + \cos2\pi z]$, and all three match.
-The \emph{measurement} is also not at fault, which was the leading hypothesis
-here and a reasonable one: ``position of the spike'' means the tip of the
-coherent finger, whereas a global minimum over $\phi>\tfrac12$ becomes a
-different quantity the moment anything detaches, and $Ca=960$ is the regime an
-interface fragments in. \code{validation/enan\_rt} therefore reports three spike
-measures side by side --- the global minimum, the tip on the axis where
-Eq.~(83) puts the finger, and one thresholded on a cross-section population so
-a single stray cell cannot set it. On the 3-D $Re=256$ case \emph{they agree to
-the digit at every one of the seven instants}, 0.047 included. There is no
-detached material: the finger really does reach the floor.
-
-So the deficit is physics, and it is only partly accounted for. Their 3-D cases
-run at $W=64$, where the 2-D ladder above already costs 15.8\%, and at
-$Ca=960$, which costs nothing on its own. That leaves most of the gap
-unexplained, and the run that would test whether the residue is also resolution
---- three-dimensional at $W=96$ or beyond --- costs several hours and several
-gigabytes and has not been done. It is recorded here as an open disagreement
-with the bound that is known, rather than as a limitation with a cause.
-
-The two remaining 2-D configurations, $Re=256$ and $Re=3000$, have no table in
-the paper; its Fig.~11 plots them against four other studies. They are run and
-reported as trajectories rather than scored, and behave as viscosity should:
-the spike at $t/t_0=3$ sits at 1.324, 0.668 and 0.570 for $Re=256$, 3000 and
-$30\,000$.
+One observation belongs with the $Re$ ambiguity rather than with the
+explanations, because it is a coincidence until something accounts for it. The
+$Re=30\,000$ run here tracks \emph{their Table IX}, which is $Re=256$, far
+better than the nominal $Re=256$ run does --- within 3.1\% through $t/t_0=2$
+and 15.7\% at $t/t_0=3$, against $+42\%$ for the matching label. Before the
+reference-time correction the same pattern held with the pairing reversed: the
+$Re=256$ run then resembled their Table X at $Re=30\,000$. Two viscosities and
+two clocks admit more than one way to line up by accident, so this is recorded
+as a lead and not as a finding.
 
 \paragraph{Vertical penetration of a wedge.} Their III.G drives a symmetric
 wedge of deadrise angle $\varphi$ into quiescent water at constant speed $v$
