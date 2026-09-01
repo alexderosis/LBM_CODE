@@ -57,58 +57,30 @@
 //  not repeated; what matters here is that the two operators use the identical
 //  source, so any difference between them is the collision and nothing else.
 //
-//  WHAT IT COSTS, AND WHERE IT LOSES. Two three-pass transforms per node
-//  against BGK's single loop. It does NOT dominate BGK, and the variable that
-//  decides which wins is RUN LENGTH, not omega. On their Table II translation
-//  (L0 = 100, R = 25, xi = 3, U0 = 0.02, Pe = 60) with only the number of
-//  cycles varied -- one cycle is 5000 steps:
+//  WHAT IT COSTS. Two three-pass transforms per node against BGK's single loop.
 //
-//      cycles   steps    BGK        this
-//      1        5k       0.00814    0.01593
-//      2        10k      0.00803    0.01671
-//      5        25k      0.00804    0.02276
-//      10       50k      0.00817    0.03968
+//  A RETRACTION, AND IT MATTERS BECAUSE IT WAS THE CLAIM THIS OPERATOR WAS
+//  JUSTIFIED BY. An earlier version of this banner reported that the operator
+//  completes De Rosis & Enan's Table III at Pe = 80, 400, 800 and 4000 where
+//  BGK reaches 1e300 on the last three, and read that as a stability ceiling
+//  the central-moment form lifts. The Peclet number had been read as
+//  Pe = U0 xi / M, which is what their paper's text says. Their drivers all
+//  compute
 //
-//  BGK is FLAT to within 2 % across a tenfold change in run length: its
-//  translation error saturates in the first cycle and stays there. This
-//  operator's compounds. Two separable components, then -- it starts 2x worse
-//  and it also grows -- and the second is what makes the published 10-cycle
-//  row look like a collapse.
+//      M = U_ref * d / Pe
 //
-//  That is why the case-by-case picture reads as inconsistent until run length
-//  is accounted for. On their Zalesak disk, 10 000 steps, this operator wins
-//  every row and beats the paper's own column at all four Peclet numbers,
-//  including the three where BGK reaches 1e300. On the two translation cases,
-//  50 000 and 100 000 steps of uniform advection, it loses. The rotation tests
-//  never run long enough for the compounding to show.
+//  with d the DOMAIN SIZE. On Table III at Pe = 80 that is M = 0.0497 and
+//  omega = 1.54; the interface-width reading gives M = 7.5e-4 and omega =
+//  1.991. So BGK was being run 66 times short of mobility, hard against the
+//  stability edge, and it diverged for that reason and not because of anything
+//  intrinsic to BGK at their operating point. ACROSS EVERY CASE IN THE PAPER
+//  THEIR OMEGA NEVER EXCEEDS 1.988.
 //
-//  A second measurement, at fixed 10 cycles and varying the mobility, because
-//  M fixes omega and omega is the other half of the question:
-//
-//      M       omega     BGK        this
-//      0.2     0.909     0.0609     0.0112
-//      0.05    1.539     0.0097     0.0066
-//      0.001   1.988     0.0082     0.0397
-//
-//  So BGK's saturated error is large at low omega and small at high omega,
-//  while this operator's compounding gets worse as omega approaches 2. The two
-//  effects together account for every row measured. Neither operator is buggy:
-//  both put IDENTICAL zeroth and first moments into the post-collision state,
-//  which tests/test_phase_field.cpp block 6 checks to 3e-18, so every moment
-//  that enters the Allen-Cahn equation at leading order is shared and the whole
-//  difference between them is the ghost modes.
-//
-//  WHAT IT IS FOR is therefore the stability ceiling. The mobility fixes the
-//  relaxation rate and the Peclet number fixes the mobility, so a high Pe is an
-//  omega approaching 2 with nothing to trade against it; BGK relaxes every
-//  moment at that rate, ghost modes included, and dies. This relaxes only the
-//  first three. Their Table III is completed here at Pe = 80, 400, 800 and
-//  4000 -- errors 0.0131, 0.0237, 0.0284, 0.0336 against their 0.0593, 0.0590,
-//  0.0558, 0.0505 -- where BGK manages only Pe = 80.
-//
-//  Still unexplained, and not to be written up as though it were: on the
-//  translation case this operator is also 3x worse than the paper's own D3Q19
-//  central-moment result of 0.0134 at the same Pe.
+//  The comparison is being rerun at their mobilities. Until it lands, this
+//  operator has NO measured advantage over PhaseFieldBGK recorded here, and
+//  the numbers previously tabulated in this banner -- the mobility ladder and
+//  the cycle scan -- describe a regime the paper does not visit. They were
+//  real measurements of the wrong thing.
 //
 //  PRODUCT LATTICES ONLY. The transform is three one-dimensional passes, which
 //  needs the velocity set to be a tensor product: D2Q9 and D3Q27, not D3Q19 and
@@ -212,6 +184,15 @@ struct PhaseFieldCentralMoments {
   // the shifted ones outside the first three are 4e-20 -- because the trap is
   // live in both directions: adding the six here would double-count them, and
   // dropping them from a monomial implementation would lose them.
+  //
+  // THAT CANCELLATION IS AT u = 0, and the qualifier matters. Transform S_i at
+  // a general velocity and 26 of the 27 shifted moments are nonzero, not 3;
+  // the sparsity is a property of the rest frame. Their drivers add a
+  // u-INDEPENDENT source and so does this, so both truncate the source's
+  // central moments at u = 0 -- a shared approximation rather than an
+  // identity, and MATLAB/D3Q27_CM_phase.m prints both so the difference stays
+  // visible. The cost is O(|u| A) in the higher slots, which is the same order
+  // as the O(|u|^3) equilibrium gap against BGK that block 6 measures.
   //
   // THE cs2 IS NOT DECORATION. PhaseFieldBGK adds S_i = (1 - omega/2) w_i
   // (c_i . A) to the populations, whose first moment is (1 - omega/2) cs2 A

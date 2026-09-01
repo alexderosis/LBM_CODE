@@ -200,7 +200,8 @@ int main(int argc, char** argv) {
     // MONOMIAL basis, and reading it as a statement about this operator is a
     // trap worth pinning shut, because the two bases disagree about where the
     // same source lives. In the shifted basis phi_2 = C^2 - cs2 the (a,a,b)
-    // slot is (C_a^2 - cs2) C_b, whose source moment is
+    // slot is (C_a^2 - cs2) C_b, whose source moment -- AT u = 0, which is
+    // where both this operator and theirs evaluate it -- is
     //
     //     cs4 A_b  -  cs2 * cs2 A_b  =  0,
     //
@@ -252,7 +253,7 @@ int main(int argc, char** argv) {
         above = std::max(above, std::abs(double(r[n])));
       }
       check::near(above, 0.0, 1e-15,
-                  "the shift absorbs their six third-order entries exactly");
+                  "AT u=0 the shift absorbs their six third-order entries");
       std::printf("        (worst shifted slot outside the first three: %.3e)\n", above);
     }
   }
