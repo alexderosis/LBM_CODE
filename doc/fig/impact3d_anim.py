@@ -127,7 +127,7 @@ def main():
     if body:
         cys = [p_[1] for p_ in body.values()]
         rr = max(p_[3] for p_ in body.values())
-        ylo = int(max(0, min(cys) - 2.0 * rr))
+        ylo = int(max(0, min(cys) - 4.0 * rr))
         yhi = int(min(ny0, max(cys) + 2.5 * rr))
     else:
         ylo, yhi = ny0 // 4, (3 * ny0) // 4
@@ -145,12 +145,35 @@ def main():
         # the sphere disappears behind its own cavity. At azim = -62 the near
         # half is z < cz, so that is the half to remove.
         sub = np.ascontiguousarray(v[zcut:, ylo:yhi, :])
+        # SEAL THE BLOCK, or the water is a membrane. Marching cubes on the
+        # cropped array finds only the phi = 1/2 level set, which inside the
+        # crop is the free surface and the cavity and nothing else -- no bottom,
+        # no sides, no face on the plane we cut. Rendered, that is a sheet
+        # floating in space with the sphere hanging below it, and it does not
+        # read as water at all. Padding one layer of phi = 0 around the crop
+        # makes the level set CLOSE: the free surface stays where it is, and
+        # flat caps appear wherever the water meets the edge of the block -- the
+        # cut plane included. That is what a cutaway of a solid looks like.
+        #
+        # The caps are an artefact of the crop and are honest ones: the block
+        # genuinely is a sub-volume, and the label says so.
+        #
+        # BUT NOT ON THE CUT FACE. Sealing all six sides makes the near face a
+        # filled plane pointing at the camera, and then the picture is a solid
+        # slab with the cavity and the body hidden inside it -- the opposite
+        # failure to the membrane. The cut plane is the first z index of the
+        # kept block, so it is padded on the far side only: bottom and sides
+        # closed, the face we cut left OPEN to look in through.
+        sub = np.pad(sub, ((0, 1), (1, 1), (1, 1)), mode="constant",
+                     constant_values=0.0)
 
         fig = plt.figure(figsize=(5.2, 5.6), dpi=115, facecolor=GROUND)
         ax = fig.add_subplot(111, projection="3d")
         ax.set_facecolor(GROUND)
         try:
             verts, faces, _, _ = measure.marching_cubes(sub, level=0.5)
+            verts[:, 1] -= 1.0           # undo the pad on y ...
+            verts[:, 2] -= 1.0           # ... and on x; axis 0 had none below
             verts[:, 0] += zcut          # the slice started at zcut
             # verts are (z, y, x); the plot's axes are (x, z, y).
             # TRANSLUCENT, because cutting alone cannot expose the body: once
@@ -185,9 +208,9 @@ def main():
                  va="top", fontsize=12, color=INK)
         fig.text(0.015, 0.985, r"$g \downarrow$", ha="left", va="top",
                  fontsize=10, color="#7c8896")
-        fig.text(0.5, 0.015, "water cut at the body's centre plane; "
-                 "sphere drawn from its pose", ha="center", fontsize=7,
-                 color="#6b7684")
+        fig.text(0.5, 0.015, "a cropped block, cut at the body's centre plane; "
+                 "flat faces are the crop, not the tank", ha="center",
+                 fontsize=7, color="#6b7684")
         fig.savefig(os.path.join(tmp, "f%04d.png" % k), dpi=115,
                     facecolor=GROUND)
         plt.close(fig)
