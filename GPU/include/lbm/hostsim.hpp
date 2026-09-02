@@ -198,6 +198,8 @@ class Scalar {
 
   void set_geometry(const std::vector<std::uint8_t>& fl, const std::vector<Real>& wall) {
     flags_ = fl; wall_ = wall; has_geometry_ = true;
+    long degenerate = 0;
+    has_outflow_ = build_scalar_donors(flags_, nx_, ny_, nz_, donor_, degenerate) > 0;
   }
   void advect_with(const Real* ux, const Real* uy, const Real* uz) {
     ux_ = ux; uy_ = uy; uz_ = uz;
@@ -220,8 +222,10 @@ class Scalar {
   }
 
   void step() {
-    if (t_ % 2 == 0) run_step<0>();
-    else             run_step<1>();
+    // The serial loop supplies for free the fence the device gets from the
+    // kernel boundary: the outflow pass simply runs after the main one.
+    if (t_ % 2 == 0) { run_step<0>(); if (has_outflow_) run_outflow<0>(); }
+    else             { run_step<1>(); if (has_outflow_) run_outflow<1>(); }
     ++t_;
   }
 
@@ -257,12 +261,20 @@ class Scalar {
   template <int P> void run_step() {
     const ScalarParams p = params();
     if (ux_) {
-      if (has_geometry_) for (long n = 0; n < N_; ++n) scalar_node_update<P, true, true>(p, N_, n);
-      else               for (long n = 0; n < N_; ++n) scalar_node_update<P, true, false>(p, N_, n);
+      if (has_outflow_)       for (long n = 0; n < N_; ++n) scalar_node_update<P, true, true, true>(p, N_, n);
+      else if (has_geometry_) for (long n = 0; n < N_; ++n) scalar_node_update<P, true, true, false>(p, N_, n);
+      else                    for (long n = 0; n < N_; ++n) scalar_node_update<P, true, false, false>(p, N_, n);
     } else {
-      if (has_geometry_) for (long n = 0; n < N_; ++n) scalar_node_update<P, false, true>(p, N_, n);
-      else               for (long n = 0; n < N_; ++n) scalar_node_update<P, false, false>(p, N_, n);
+      if (has_outflow_)       for (long n = 0; n < N_; ++n) scalar_node_update<P, false, true, true>(p, N_, n);
+      else if (has_geometry_) for (long n = 0; n < N_; ++n) scalar_node_update<P, false, true, false>(p, N_, n);
+      else                    for (long n = 0; n < N_; ++n) scalar_node_update<P, false, false, false>(p, N_, n);
     }
+  }
+
+  template <int P> void run_outflow() {
+    const ScalarParams p = params();
+    if (ux_) for (long n = 0; n < N_; ++n) scalar_outflow_node<P, true>(p, N_, n);
+    else     for (long n = 0; n < N_; ++n) scalar_outflow_node<P, false>(p, N_, n);
   }
 
   ScalarParams params() {
@@ -270,6 +282,7 @@ class Scalar {
     p.h = h_.data(); p.flags = flags_.data(); p.wall = wall_.data();
     p.ux = ux_; p.uy = uy_; p.uz = uz_;
     p.T_out = T_.data();
+    p.donor = donor_.empty() ? nullptr : donor_.data();
     p.nx = nx_; p.ny = ny_; p.nz = nz_;
     p.omega = omega_; p.T_ref = T_ref_;
     return p;
@@ -280,8 +293,10 @@ class Scalar {
   Real T_ref_, omega_;
   std::vector<Real> h_, wall_, T_;
   std::vector<std::uint8_t> flags_;
+  std::vector<long> donor_;
   const Real *ux_ = nullptr, *uy_ = nullptr, *uz_ = nullptr;
   bool has_geometry_ = false;
+  bool has_outflow_ = false;
   std::size_t t_ = 0;
 };
 
@@ -301,6 +316,19 @@ class Magnetic {
   }
 
   void set_geometry(const std::vector<std::uint8_t>& fl) { flags_ = fl; has_geometry_ = true; }
+
+  // Magnetic walls. Same contract as the device class: set_geometry FIRST if
+  // the run has any, since the unknown-direction mask is built from both.
+  void set_walls(const std::vector<std::uint8_t>& kind,
+                 const std::vector<Real>& wall_bx,
+                 const std::vector<Real>& wall_by,
+                 const std::vector<Real>& wall_bz) {
+    mwall_ = kind;  wBx_ = wall_bx;  wBy_ = wall_by;  wBz_ = wall_bz;
+    long blind = 0;
+    has_walls_ = build_magnetic_walls(kind, has_geometry_ ? flags_
+                                                          : std::vector<std::uint8_t>(),
+                                      nx_, ny_, nz_, unk_, blind) > 0;
+  }
   void advect_with(const Real* ux, const Real* uy, const Real* uz) {
     ux_ = ux; uy_ = uy; uz_ = uz;
   }
@@ -326,20 +354,30 @@ class Magnetic {
   }
 
   void step() {
+    // With walls the collision reads B from the field array, not from the raw
+    // population sum -- at a moment wall the sum is not the field. The flag
+    // stops a coupled driver, which refreshes B itself before stepping the
+    // fluid, from paying for that pass twice. A periodic run takes neither
+    // branch. See magnetic.cuh.
+    if (has_walls_ && !field_current_) compute_field();
     if (t_ % 2 == 0) run_step<0>();
     else             run_step<1>();
+    field_current_ = false;
     ++t_;
   }
 
   void compute_field() {
     const MagneticParams p = params();
     if (t_ % 2 == 0) {
-      if (has_geometry_) for (long n = 0; n < N_; ++n) magnetic_field_node<0, true>(p, N_, n);
-      else               for (long n = 0; n < N_; ++n) magnetic_field_node<0, false>(p, N_, n);
+      if (has_walls_)         for (long n = 0; n < N_; ++n) magnetic_field_node<0, true, true>(p, N_, n);
+      else if (has_geometry_) for (long n = 0; n < N_; ++n) magnetic_field_node<0, true, false>(p, N_, n);
+      else                    for (long n = 0; n < N_; ++n) magnetic_field_node<0, false, false>(p, N_, n);
     } else {
-      if (has_geometry_) for (long n = 0; n < N_; ++n) magnetic_field_node<1, true>(p, N_, n);
-      else               for (long n = 0; n < N_; ++n) magnetic_field_node<1, false>(p, N_, n);
+      if (has_walls_)         for (long n = 0; n < N_; ++n) magnetic_field_node<1, true, true>(p, N_, n);
+      else if (has_geometry_) for (long n = 0; n < N_; ++n) magnetic_field_node<1, true, false>(p, N_, n);
+      else                    for (long n = 0; n < N_; ++n) magnetic_field_node<1, false, false>(p, N_, n);
     }
+    field_current_ = true;
   }
 
   void field_to_host(std::vector<Real>& bx, std::vector<Real>& by, std::vector<Real>& bz) {
@@ -360,11 +398,13 @@ class Magnetic {
   template <int P> void run_step() {
     const MagneticParams p = params();
     if (ux_) {
-      if (has_geometry_) for (long n = 0; n < N_; ++n) magnetic_node_update<P, true, true>(p, N_, n);
-      else               for (long n = 0; n < N_; ++n) magnetic_node_update<P, true, false>(p, N_, n);
+      if (has_walls_)         for (long n = 0; n < N_; ++n) magnetic_node_update<P, true, true, true>(p, N_, n);
+      else if (has_geometry_) for (long n = 0; n < N_; ++n) magnetic_node_update<P, true, true, false>(p, N_, n);
+      else                    for (long n = 0; n < N_; ++n) magnetic_node_update<P, true, false, false>(p, N_, n);
     } else {
-      if (has_geometry_) for (long n = 0; n < N_; ++n) magnetic_node_update<P, false, true>(p, N_, n);
-      else               for (long n = 0; n < N_; ++n) magnetic_node_update<P, false, false>(p, N_, n);
+      if (has_walls_)         for (long n = 0; n < N_; ++n) magnetic_node_update<P, false, true, true>(p, N_, n);
+      else if (has_geometry_) for (long n = 0; n < N_; ++n) magnetic_node_update<P, false, true, false>(p, N_, n);
+      else                    for (long n = 0; n < N_; ++n) magnetic_node_update<P, false, false, false>(p, N_, n);
     }
   }
 
@@ -373,6 +413,10 @@ class Magnetic {
     p.g = g_.data(); p.flags = flags_.data();
     p.ux = ux_; p.uy = uy_; p.uz = uz_;
     p.Bx = Bx_.data(); p.By = By_.data(); p.Bz = Bz_.data();
+    if (has_walls_) {
+      p.mwall = mwall_.data();  p.unknown = unk_.data();
+      p.wBx = wBx_.data();  p.wBy = wBy_.data();  p.wBz = wBz_.data();
+    }
     p.nx = nx_; p.ny = ny_; p.nz = nz_;
     p.omega = omega_;
     return p;
@@ -382,9 +426,12 @@ class Magnetic {
   long N_;
   Real omega_;
   std::vector<Real> g_, Bx_, By_, Bz_;
-  std::vector<std::uint8_t> flags_;
+  std::vector<Real> wBx_, wBy_, wBz_;
+  std::vector<std::uint8_t> flags_, mwall_, unk_;
   const Real *ux_ = nullptr, *uy_ = nullptr, *uz_ = nullptr;
   bool has_geometry_ = false;
+  bool has_walls_ = false;
+  bool field_current_ = false;
   std::size_t t_ = 0;
 };
 

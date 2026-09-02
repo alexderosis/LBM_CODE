@@ -417,6 +417,63 @@ LBM_HD LBM_INLINE Real maxwell(int i, const Real B[3]) {
 }
 
 //==============================================================================
+//  MOMENT-BASED DIRICHLET, for the advection-diffusion lattices (D3Q7).
+//
+//  P. J. Dellar, "Moment-Based Boundary Conditions for Lattice Boltzmann
+//  Magnetohydrodynamics", Eqs. (13a)-(13b). A port of
+//  ../src/boundary/MomentDirichlet.hpp.
+//
+//  The field these lattices carry is a ZEROTH moment -- B_a = sum_i g_{a,i},
+//  T = sum_i h_i -- so imposing its boundary value is ONE linear equation in
+//  the unknown populations. On a cross lattice a straight wall leaves exactly
+//  one unknown direction, the one pointing into the domain along the wall
+//  normal, and that single equation determines it uniquely and exactly:
+//
+//      g_1 = B_0 - (g_0 + g_2 + g_3 + g_4).                    Eq. (13a)
+//
+//  No closure assumption, no free parameter, and the boundary value is attained
+//  AT the node rather than half a cell away, which is what bounce-back and
+//  anti-bounce-back give. That last difference is the reason to have this at
+//  all: a Hartmann layer is resolved by a handful of cells and half of one is
+//  not a rounding error there.
+//
+//  CORNERS AND EDGES leave more than one unknown and the single moment no
+//  longer closes the system. The deficit is then shared in proportion to the
+//  lattice weights -- the choice that introduces no directional preference --
+//  and the imposed moment is still reproduced exactly; only its distribution
+//  over directions is a choice. That is a fallback, not part of the published
+//  method, and a channel periodic along its axis never reaches it.
+//==============================================================================
+
+// unknown_mask() -- which directions streamed in from outside -- is the other
+// half of this and lives in streaming.cuh, because it needs the periodic
+// wrap(). The split is along the same line as everywhere else here: the
+// arithmetic is LBM_HD and testable with no geometry, the indexing is not.
+
+//------------------------------------------------------------------------------
+// Set the unknown populations so that sum_i g_i equals `target`.
+//
+//   one unknown  -> exact and unique, Dellar Eq. (13)
+//   several      -> weight-proportional share of the deficit
+//
+// A node with NO unknown direction is left alone: nothing streamed in from
+// outside, so there is nothing to choose and overwriting would destroy a valid
+// interior state.
+//------------------------------------------------------------------------------
+template <class L>
+LBM_HD LBM_INLINE void impose_moment(Real g[L::Q], Real target, std::uint8_t unknown) {
+  Real known = Real(0), wsum = Real(0);
+  for (int i = 0; i < L::Q; ++i) {
+    if (unknown & (1u << i)) wsum += L::w(i);
+    else                     known += g[i];
+  }
+  if (!(wsum > Real(0))) return;
+  const Real deficit = target - known;
+  for (int i = 0; i < L::Q; ++i)
+    if (unknown & (1u << i)) g[i] = deficit * L::w(i) / wsum;
+}
+
+//==============================================================================
 //  Body force -- Guo et al. (2002).
 //
 //      u   = ( sum_i c_i f_i + F/2 ) / rho

@@ -104,6 +104,8 @@ enum CellType : std::uint8_t {
 //  ScalarBulk       transport
 //  ScalarAdiabatic  zero flux    -- bounce-back, hence skipped (see above)
 //  ScalarDirichlet  fixed value  -- anti-bounce-back toward T_wall
+//  ScalarOutflow    open         -- zero gradient, by equilibrium extrapolation
+//                                  from an interior donor. SECOND PASS; see below
 //  ScalarExcluded   not part of the simulation
 //
 // Note the asymmetry with the fluid. Bounce-back is the identity on Esoteric
@@ -111,12 +113,32 @@ enum CellType : std::uint8_t {
 // flips a sign and adds a source, so a Dirichlet cell must be processed every
 // step. Both still write back into the same two slots they read, so neither
 // disturbs the in-place scheme.
+//
+// OUTFLOW IS THE ONE THAT DOES NOT FIT THAT PATTERN, and the reason is worth
+// stating because the obvious implementation is a race.
+//
+// An open boundary must be zero-gradient, so the node has to learn its value
+// from an interior DONOR. Reading the donor's POPULATIONS to get it is a
+// genuine read/write conflict under Esoteric Pull: a scatter writes into the
+// node's own slots AND its neighbours', so a donor being processed
+// concurrently is rewriting slots the outflow node is reading, and which state
+// you get depends on thread scheduling. Nothing crashes; the boundary is
+// simply somewhere between pre- and post-collision, differently each run.
+//
+// So outflow nodes are SKIPPED by the main kernel and handled by a second one
+// after the kernel boundary, and that pass reads the CONCENTRATION FIELD, not
+// populations. Donors are guaranteed to be ScalarBulk, so nothing the second
+// pass reads is written by the second pass, and every storage slot still has
+// exactly one writer per step. Race-free by construction rather than by
+// argument -- and the whole thing is skipped when no cell is marked outflow,
+// so a closed problem pays nothing.
 //------------------------------------------------------------------------------
 enum ScalarCell : std::uint8_t {
   ScalarBulk      = 0,
   ScalarAdiabatic = 1,
   ScalarDirichlet = 2,
   ScalarExcluded  = 3,
+  ScalarOutflow   = 4,
 };
 
 //------------------------------------------------------------------------------
@@ -137,6 +159,31 @@ LBM_HD LBM_INLINE long neighbour(int x, int y, int z, int i, int nx, int ny, int
   return node_id(wrap(x + L::cx(i), nx),
                  wrap(y + L::cy(i), ny),
                  wrap(z + L::cz(i), nz), nx, ny);
+}
+
+//------------------------------------------------------------------------------
+// Directions whose SOURCE node lies outside the field, as a bitmask. Host-side
+// and built once: geometry does not change during a run. D3Q7 needs 7 bits, so
+// a std::uint8_t per node is enough and that is what the kernels carry.
+//
+// `outside(x, y, z)` is called with wrapped coordinates and reports whether that
+// node is absent from the transport.
+//------------------------------------------------------------------------------
+template <class L, class Outside>
+inline std::uint8_t unknown_mask(int x, int y, int z, int nx, int ny, int nz,
+                                 Outside outside) {
+  std::uint8_t m = 0;
+  for (int i = 0; i < L::Q; ++i) {
+    // The SOURCE of direction i is at x - c_i: that is where the population
+    // arriving along i came from. Using x + c_i instead builds the mirror image
+    // of the right mask, which imposes the moment on the outgoing directions --
+    // it still reproduces the moment and is still wrong.
+    const int sx = wrap(x - L::cx(i), nx);
+    const int sy = wrap(y - L::cy(i), ny);
+    const int sz = wrap(z - L::cz(i), nz);
+    if (outside(sx, sy, sz)) m = std::uint8_t(m | (1u << i));
+  }
+  return m;
 }
 
 //------------------------------------------------------------------------------

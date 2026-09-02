@@ -21,8 +21,12 @@
 //                                                   ITS plane sits
 //    5  a decaying sinusoid                         the D3Q7 diffusivity, cs^2=1/4
 //    6  an advected sinusoid                        the advective flux
+//    6b an open exit                              ScalarOutflow, against the
+//                                                   bounce-back it replaces
 //    7  uniform buoyancy                            the whole Boussinesq path
 //    8  resistive decay                             induction alone, no flow
+//    8b a magnetic Dirichlet wall              where the moment condition puts
+//                                                   the boundary
 //    9  a shear Alfven wave                         the Lorentz coupling, the
 //                                                   induction equation, and the
 //                                                   ORDER in which they are
@@ -574,6 +578,115 @@ static void advection() {
 }
 
 //==============================================================================
+//  6b. AN OPEN EXIT: a blob must leave, not pile up.
+//
+//  ScalarOutflow is zero-gradient by equilibrium extrapolation from an interior
+//  donor, run as a SECOND pass after the main one -- see the enum banner in
+//  streaming.cuh for why reading the donor's populations inside the main kernel
+//  would be a race rather than merely untidy.
+//
+//  A boundary condition is only worth having if the alternative is visibly
+//  wrong, so this runs the SAME case twice and changes one flag. A Gaussian
+//  blob is advected at u = 0.05 down a closed tube whose far end is either
+//  ScalarOutflow or ScalarAdiabatic. Measured, nx = 96, D = 0.005, FP32:
+//
+//      t       OPEN  sum  peak       CLOSED  sum  peak
+//      0            1.000  1.000            1.000  1.000
+//      600          1.000  0.850            1.000  0.850
+//      1200         0.996  0.754            0.998  0.754
+//      1500         0.389  0.661            0.666  5.246
+//      1800         0.003  0.011            0.446  7.420
+//      2100         0.000  0.000            0.444  7.427
+//
+//  Identical to four digits until the blob reaches the exit, which is the check
+//  that the flag changes nothing in the interior. Then they separate completely:
+//  the open exit empties the tube, and the closed one reflects the blob into a
+//  pile SEVEN AND A HALF TIMES the initial peak and holds 44% of the scalar for
+//  ever. That factor of 7.4 is the thing an open boundary is for, and it is why
+//  a plume study run against a bounce-back exit is not merely slightly wrong.
+//
+//  The peak also tracks x0 + u t exactly while it is in the interior -- 20, 35,
+//  50, 65, 80 at t = 0, 300, 600, 900, 1200 -- which is the advection check
+//  case 6 makes on a periodic domain, repeated here against a wall.
+//
+//  WHAT THIS DOES NOT CHECK is the accuracy of the exit, only that it opens.
+//  The condition discards the non-equilibrium part, which slightly damps the
+//  diffusive flux there; that is negligible when the exit is advection
+//  dominated, which is the only place an open boundary belongs, and it is a
+//  known approximation rather than an accident.
+//==============================================================================
+static double open_exit(bool open, double& peak_out, int& peak_x_at_1200) {
+  const int nx = 96, ny = 4, nz = 4;
+  const double U = 0.05, D = 0.005, x0 = 20.0, sig = 4.0;
+
+  host::Scalar sc(nx, ny, nz, Real(D));
+  std::vector<std::uint8_t> fl(std::size_t(nx) * ny * nz, std::uint8_t(ScalarBulk));
+  std::vector<Real> wall(std::size_t(nx) * ny * nz, Real(0));
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < ny; ++y) {
+      // The last plane is outside the field; the one before it is the boundary.
+      // Marking the outside is what tells build_donors which way is "inward".
+      fl[std::size_t(node_id(nx - 1, y, z, nx, ny))] = ScalarExcluded;
+      fl[std::size_t(node_id(nx - 2, y, z, nx, ny))] = open ? ScalarOutflow : ScalarAdiabatic;
+      // Close the inlet too, so nothing wraps round and re-enters.
+      fl[std::size_t(node_id(0, y, z, nx, ny))] = ScalarExcluded;
+      fl[std::size_t(node_id(1, y, z, nx, ny))] = ScalarAdiabatic;
+    }
+  sc.set_geometry(fl, wall);
+
+  std::vector<Real> ux(std::size_t(nx) * ny * nz, Real(U));
+  std::vector<Real> uy(ux.size(), Real(0)), uz(ux.size(), Real(0));
+  sc.advect_with(ux.data(), uy.data(), uz.data());
+  sc.initialise_with([&](int x, int, int) {
+    return Real(std::exp(-0.5 * (x - x0) * (x - x0) / (sig * sig)));
+  });
+
+  auto scan = [&](double& sum, double& peak, int& px) {
+    std::vector<Real> Tv;
+    sc.field_to_host(Tv);
+    sum = 0;  peak = -1e30;  px = 0;
+    for (int z = 0; z < nz; ++z)
+      for (int y = 0; y < ny; ++y)
+        for (int x = 2; x < nx - 2; ++x)
+          sum += double(Tv[std::size_t(node_id(x, y, z, nx, ny))]);
+    sum /= double(ny) * nz;
+    for (int x = 2; x < nx - 2; ++x) {
+      const double v = double(Tv[std::size_t(node_id(x, ny / 2, nz / 2, nx, ny))]);
+      if (v > peak) { peak = v; px = x; }
+    }
+  };
+
+  double s0 = 0, p0 = 0;  int q = 0;
+  scan(s0, p0, q);
+  for (int t = 0; t < 1200; ++t) sc.step();
+  double s = 0, p = 0;
+  scan(s, p, peak_x_at_1200);
+  for (int t = 0; t < 900; ++t) sc.step();          // t = 2100
+  scan(s, p, q);
+  peak_out = p;
+  return s / s0;
+}
+
+static void open_boundary() {
+  double peak_open = 0, peak_closed = 0;
+  int px_open = 0, px_closed = 0;
+  const double left_open   = open_exit(true,  peak_open,   px_open);
+  const double left_closed = open_exit(false, peak_closed, px_closed);
+
+  // The interior must not know which flag was set, until the blob arrives.
+  check(px_open == 80 && px_closed == 80,
+        "the blob advects at u = 0.05 either way (x = 80 at t = 1200)",
+        double(px_open), 80.0);
+  check(left_open < 1e-3, "open exit: the tube empties", left_open, 0.0);
+  check(peak_open < 1e-2, "open exit: nothing is left behind", peak_open, 0.0);
+  check(left_closed > 0.4, "closed exit: 44% of the scalar is trapped for ever",
+        left_closed, 0.444);
+  check(peak_closed > 5.0, "closed exit: and it piles up past 5x the initial peak",
+        peak_closed, 7.43);
+  note("that factor of 7.4 is what an open boundary is for; measured, not asserted");
+}
+
+//==============================================================================
 //  7. Uniform buoyancy: the whole Boussinesq path in one number.
 //
 //  A periodic box at rest, held at a uniform T above the reference. The force is
@@ -662,6 +775,115 @@ static void resistive_decay() {
   const double rate = -slope(ts, la);
   const double exact = eta * k * k;
   check(std::fabs(rate - exact) / exact < 0.02, "resistive decay: rate", rate, exact);
+}
+
+//==============================================================================
+//  8b. A MAGNETIC WALL, AND WHERE IT IS.
+//
+//  Dellar's moment condition (core.cuh): the field these lattices carry is a
+//  ZEROTH moment, so imposing its boundary value is one linear equation in the
+//  unknown populations, and on a straight wall a cross lattice leaves exactly
+//  one unknown -- the direction pointing into the domain. That equation is then
+//  exact and unique, with no closure assumption and no free parameter.
+//
+//  WHAT THAT BUYS, AND WHY IT IS THE POINT OF THE CONDITION. The boundary value
+//  is attained AT the node, not half a cell away. This case is the magnetic
+//  twin of case 4 (conduction between Dirichlet walls), and it makes the same
+//  measurement: a conducting slab is held at B_y = 0 on one face and 0.02 on
+//  the other, with no flow at all, so the steady state is a straight line and
+//  its GRADIENT says where the planes are.
+//
+//  Measured, 32 fluid nodes with the held nodes at x = 1 and x = 32:
+//
+//      worst deviation from linear   2.7e-15 (FP64) / 1.4e-06 (FP32)
+//      measured gradient             0.000645161
+//      planes 31 apart give          0.000645161      <- on the nodes
+//      planes 32 apart would give    0.000625000      <- half a cell out
+//
+//  So the planes are on the nodes, to round-off, and a half-way condition would
+//  be 3.2% out on the gradient of this case. A Hartmann layer is a handful of
+//  cells thick, so half of one is not a rounding error there -- that is the
+//  whole reason to carry a second kind of boundary condition for B rather than
+//  bouncing it back with the fluid.
+//
+//  WHAT IS STILL MISSING, said plainly rather than left to be discovered:
+//
+//   * A full Hartmann flow needs an ON-NODE VELOCITY wall as well, so that the
+//     fluid and the field agree about where the wall is. This code has halfway
+//     bounce-back only, which puts the no-slip plane half a cell outside the
+//     last fluid node while the condition tested here puts B exactly on it.
+//     Mixing them is a half-cell disagreement about the channel width, which is
+//     precisely the error the moment condition exists to avoid. So: the
+//     magnetic wall works, and a wall-bounded MHD BENCHMARK still wants the
+//     parent for now.
+//   * MagOutflow is exposed and NOT validated. The parent measures it driving B
+//     about 6% high over the last ten nodes of an inlet-driven channel. Keep an
+//     outlet far from anything being measured.
+//   * A conducting or insulating wall -- one that couples to a wall current or
+//     matches onto an exterior vacuum field -- is a different piece of work and
+//     is not faked by either of these.
+//==============================================================================
+static void magnetic_wall() {
+  const int nx = 34, ny = 4, nz = 4;
+  const double eta = 0.1, BL = 0.0, BR = 0.02;
+
+  host::Magnetic mg(nx, ny, nz, Real(eta));
+
+  std::vector<std::uint8_t> geo(std::size_t(nx) * ny * nz, std::uint8_t(Fluid));
+  std::vector<std::uint8_t> kind(geo.size(), std::uint8_t(MagBulk));
+  std::vector<Real> wx(geo.size(), Real(0)), wy(geo.size(), Real(0)), wz(geo.size(), Real(0));
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < ny; ++y) {
+      // The OUTERMOST plane is solid: that is what tells the mask which
+      // direction streamed in from outside. The held node is the fluid face
+      // next to it -- marking the solid cell itself would leave the wall with
+      // no unknown direction and the condition would silently do nothing,
+      // which set_walls counts and reports.
+      geo[std::size_t(node_id(0, y, z, nx, ny))] = Solid;
+      geo[std::size_t(node_id(nx - 1, y, z, nx, ny))] = Solid;
+      const long a = node_id(1, y, z, nx, ny);
+      const long b = node_id(nx - 2, y, z, nx, ny);
+      kind[std::size_t(a)] = MagDirichlet;  wy[std::size_t(a)] = Real(BL);
+      kind[std::size_t(b)] = MagDirichlet;  wy[std::size_t(b)] = Real(BR);
+    }
+  mg.set_geometry(geo);
+  mg.set_walls(kind, wx, wy, wz);
+  mg.initialise_with(
+      [](int, int, int, Real B[3]) { B[0] = B[1] = B[2] = Real(0); },
+      [](int, int, int, Real u[3]) { u[0] = u[1] = u[2] = Real(0); });
+
+  // Diffusive time across the slab is L^2/eta = 31^2/0.1 ~ 9600 steps.
+  for (int t = 0; t < 40000; ++t) mg.step();
+
+  std::vector<Real> bx, by, bz;
+  mg.field_to_host(bx, by, bz);
+
+  double worst = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+  int n = 0;
+  for (int x = 1; x <= nx - 2; ++x) {
+    const double v = double(by[std::size_t(node_id(x, ny / 2, nz / 2, nx, ny))]);
+    const double e = BL + (BR - BL) * double(x - 1) / double(nx - 3);
+    worst = std::fmax(worst, std::fabs(v - e));
+    sx += x;  sy += v;  sxx += double(x) * x;  sxy += double(x) * v;  ++n;
+  }
+  const double grad = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+  const double on_node = (BR - BL) / double(nx - 3);
+  const double half_out = (BR - BL) / double(nx - 2);
+
+  const double wl = double(by[std::size_t(node_id(1, ny / 2, nz / 2, nx, ny))]);
+  const double wr = double(by[std::size_t(node_id(nx - 2, ny / 2, nz / 2, nx, ny))]);
+
+  check(worst < (fp64 ? 1e-12 : 1e-5),
+        "magnetic wall: the steady profile is linear to round-off", worst, 0.0);
+  check(std::fabs(grad - on_node) / on_node < 1e-4,
+        "magnetic wall: gradient says the planes are ON the nodes", grad, on_node);
+  check(std::fabs(grad - half_out) / half_out > 0.02,
+        "  ... and NOT half a cell outside them", grad, half_out);
+  check(std::fabs(wl - BL) < (fp64 ? 1e-14 : 1e-8) &&
+        std::fabs(wr - BR) < (fp64 ? 1e-14 : 1e-8),
+        "magnetic wall: the imposed value is attained exactly at the node", wr, BR);
+  note("a half-way condition would be 3.2% out on this gradient; a Hartmann "
+       "layer is a few cells thick");
 }
 
 //==============================================================================
@@ -766,12 +988,14 @@ int main() {
   conduction();
   diffusion();
   advection();
+  open_boundary();
 
   std::printf("\n  -- coupled: buoyancy --\n");
   buoyancy();
 
   std::printf("\n  -- magnetohydrodynamics --\n");
   resistive_decay();
+  magnetic_wall();
   alfven(Op::BGK, "BGK");
   alfven(Op::CentralMoments, "CM");
 
