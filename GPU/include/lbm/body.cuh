@@ -167,13 +167,19 @@ struct Rect {
   // them slightly -- harmless, and it keeps the function separable and cheap.
   // The point is taken into the body frame first, so the shape turns with theta
   // and the rounding turns with it.
-  LBM_HD LBM_INLINE Real chi(Real x, Real y) const {
+  LBM_HD LBM_INLINE Real chi(Real x, Real y, Real) const {
     const Real dx = x - cx, dy = y - cy;
     const Real X =  ct * dx + st * dy;
     const Real Y = -st * dx + ct * dy;
     const Real ax = (hx - (X < 0 ? -X : X)) / smooth;
     const Real ay = (hy - (Y < 0 ? -Y : Y)) / smooth;
     return Real(0.25) * (Real(1) + body_tanh(ax)) * (Real(1) + body_tanh(ay));
+  }
+  // A PRISM IS UNBOUNDED IN z, so the cheap rejection must not test rz. Getting
+  // this wrong culls the whole body except one plane and the reduction silently
+  // returns 1/nz of the mass.
+  LBM_HD LBM_INLINE bool outside(Real rx, Real ry, Real, Real reach2) const {
+    return rx * rx + ry * ry > reach2;
   }
 };
 
@@ -243,7 +249,7 @@ struct Wedge {
   // Apex to knuckle corner: sqrt(b^2 + H^2) = b / cos(phi).
   LBM_HD LBM_INLINE Real reach() const { return half_beam / cphi + Real(4) * smooth; }
 
-  LBM_HD LBM_INLINE Real chi(Real x, Real y) const {
+  LBM_HD LBM_INLINE Real chi(Real x, Real y, Real) const {
     const Real dx = x - cx, dy = y - cy;
     const Real X =  ct * dx + st * dy;
     const Real Y = -st * dx + ct * dy;
@@ -251,6 +257,49 @@ struct Wedge {
     const Real df = (Y * cphi - aX * sphi) / smooth;
     const Real dt = (height() - Y) / smooth;
     return Real(0.25) * (Real(1) + body_tanh(df)) * (Real(1) + body_tanh(dt));
+  }
+  LBM_HD LBM_INLINE bool outside(Real rx, Real ry, Real, Real reach2) const {
+    return rx * rx + ry * ry > reach2;
+  }
+};
+
+//------------------------------------------------------------------------------
+// A SPHERE, and the ONE shape here that is not a prism.
+//
+// chi is a single tanh in the radius, which is what makes it cheap: one
+// transcendental per node against the prisms' two, and no body frame to rotate
+// into, because a sphere is its own rotation group. That last point is not a
+// convenience -- it is why this shape can be used at all without a quaternion
+// (see the note on BodySums::Sz below).
+//
+// WHAT THIS DOES NOT MAKE. Adding a sphere does NOT turn the body here into a
+// 3-D rigid body. Rotation is still one angle about z, and for a sphere that is
+// inert: chi is invariant under it, so the roll equation measures nothing and
+// changes nothing. Translation is now three components, which for a sphere is
+// the whole of the dynamics -- a sphere entering water on its axis carries no
+// torque about any axis, so 3-DOF translation is EXACT for that case and is not
+// an approximation to a 6-DOF solve. It is not exact for anything asymmetric,
+// and the tilted, spinning or tumbling sphere is still absent.
+//------------------------------------------------------------------------------
+struct Sphere {
+  Real cx = 0, cy = 0, cz = 0;      // centre
+  Real R = 0;                       // radius
+  Real smooth = Real(1.5);          // indicator smoothing width, in cells
+  // Present so a Sphere satisfies the same interface as the prisms and can be
+  // dropped into PenalisedBody unchanged. Both are inert: see the banner.
+  Real theta = 0;
+  void set_angle(Real th) { theta = th; }
+
+  LBM_HD LBM_INLINE Real reach() const { return R + Real(4) * smooth; }
+
+  LBM_HD LBM_INLINE Real chi(Real x, Real y, Real z) const {
+    const Real dx = x - cx, dy = y - cy, dz = z - cz;
+    const Real r = body_sqrt(dx * dx + dy * dy + dz * dz);
+    return Real(0.5) * (Real(1) + body_tanh((R - r) / smooth));
+  }
+  // The only shape whose rejection is genuinely spherical.
+  LBM_HD LBM_INLINE bool outside(Real rx, Real ry, Real rz, Real reach2) const {
+    return rx * rx + ry * ry + rz * rz > reach2;
   }
 };
 
@@ -261,9 +310,15 @@ struct Wedge {
 struct BodySums {
   double m = 0;               // integral chi rho              -- fictitious mass
   double Sx = 0, Sy = 0;      // integral chi rho r            -- its first moments
-  double Iz = 0;              // integral chi rho |r|^2        -- its inertia
+  double Iz = 0;              // integral chi rho (rx^2+ry^2)  -- inertia ABOUT z
   double Px = 0, Py = 0;      // integral chi rho (u* - rigid) -- momentum deficit
   double Lz = 0;              // integral chi rho r x (u* - rigid)
+  // The third translation. Sz is carried for symmetry of the bookkeeping and is
+  // NOT coupled into the roll equation: rotation here is about z only, so a
+  // first moment along z has no equation to enter. It is reported rather than
+  // used, and for a sphere on its axis it is zero to round-off -- which makes it
+  // a free check that the entry really is axisymmetric.
+  double Sz = 0, Pz = 0;
 };
 
 //------------------------------------------------------------------------------
@@ -301,22 +356,27 @@ struct FieldDensity {
 // HOVERED, with nothing in the output to say why.
 //------------------------------------------------------------------------------
 struct BodyState {
-  Real cx = 0, cy = 0;            // shape origin, for r = x - x_c
-  Real vx = 0, vy = 0, omega = 0;
+  Real cx = 0, cy = 0, cz = 0;    // shape origin, for r = x - x_c
+  Real vx = 0, vy = 0, vz = 0, omega = 0;
   int nx = 0, ny = 0;
 };
 
 template <class Shape, class LiquidOf, class LbmOf>
 LBM_HD LBM_INLINE bool body_probe_node(const Shape& b, const BodyState& st,
                                        const Real* ux, const Real* uy,
+                                       const Real* uz,
                                        const Real* fx, const Real* fy,
+                                       const Real* fz,
                                        LiquidOf dens, LbmOf ldens,
                                        long n, Real reach2, BodySums& out) {
   int x, y, z;
   coords(n, st.nx, st.ny, x, y, z);
-  const Real rx = Real(x) - st.cx, ry = Real(y) - st.cy;
-  if (rx * rx + ry * ry > reach2) return false;
-  const Real c = b.chi(Real(x), Real(y));
+  const Real rx = Real(x) - st.cx, ry = Real(y) - st.cy, rz = Real(z) - st.cz;
+  // The SHAPE decides the rejection, because a prism must not be culled in z
+  // and a sphere must be. Doing it here with one formula was the bug this
+  // interface exists to prevent.
+  if (b.outside(rx, ry, rz, reach2)) return false;
+  const Real c = b.chi(Real(x), Real(y), Real(z));
   if (c < Real(1e-6)) return false;
 
   const Real r  = dens(n);             // liquid: the force and Newton
@@ -327,15 +387,21 @@ LBM_HD LBM_INLINE bool body_probe_node(const Shape& b, const BodyState& st,
   const Real inv = (rl > Real(1e-12)) ? Real(0.5) / rl : Real(0);
   const Real usx = ux[n] - fx[n] * inv;
   const Real usy = uy[n] - fy[n] * inv;
+  // A 2-D caller passes no z velocity at all; nullptr means "no third
+  // component" rather than "a component that happens to be zero", so the whole
+  // z limb folds away and the prism cases are bit-for-bit what they were.
+  const Real usz = (uz && fz) ? (uz[n] - fz[n] * inv) : Real(0);
   // ... and measure what is left against the rigid field it should match.
   const Real dx = usx - (st.vx - st.omega * ry);
   const Real dy = usy - (st.vy + st.omega * rx);
+  const Real dz = (uz && fz) ? (usz - st.vz) : Real(0);
 
   out.m  += double(cr);
   out.Sx += double(cr * rx);   out.Sy += double(cr * ry);
   out.Iz += double(cr * (rx * rx + ry * ry));
   out.Px += double(cr * dx);   out.Py += double(cr * dy);
   out.Lz += double(cr * (rx * dy - ry * dx));
+  out.Sz += double(cr * rz);   out.Pz += double(cr * dz);
   return true;
 }
 
@@ -345,24 +411,31 @@ LBM_HD LBM_INLINE bool body_probe_node(const Shape& b, const BodyState& st,
 template <class Shape, class LiquidOf, class LbmOf>
 LBM_HD LBM_INLINE void body_apply_node(const Shape& b, const BodyState& st,
                                        const Real* ux, const Real* uy,
+                                       const Real* uz,
                                        Real* fx, Real* fy, Real* fz,
                                        LiquidOf dens, LbmOf ldens,
                                        long n, Real reach2) {
   int x, y, z;
   coords(n, st.nx, st.ny, x, y, z);
-  fz[n] = Real(0);
-  const Real rx = Real(x) - st.cx, ry = Real(y) - st.cy;
-  if (rx * rx + ry * ry > reach2) { fx[n] = Real(0); fy[n] = Real(0); return; }
-  const Real c = b.chi(Real(x), Real(y));
-  if (c < Real(1e-6)) { fx[n] = Real(0); fy[n] = Real(0); return; }
+  const bool three = (uz != nullptr);
+  const Real rx = Real(x) - st.cx, ry = Real(y) - st.cy, rz = Real(z) - st.cz;
+  if (b.outside(rx, ry, rz, reach2)) {
+    fx[n] = Real(0); fy[n] = Real(0); fz[n] = Real(0); return;
+  }
+  const Real c = b.chi(Real(x), Real(y), Real(z));
+  if (c < Real(1e-6)) {
+    fx[n] = Real(0); fy[n] = Real(0); fz[n] = Real(0); return;
+  }
 
   const Real r  = dens(n);
   const Real rl = ldens(n);
   const Real inv = (rl > Real(1e-12)) ? Real(0.5) / rl : Real(0);
   const Real usx = ux[n] - fx[n] * inv;
   const Real usy = uy[n] - fy[n] * inv;
+  const Real usz = three ? (uz[n] - fz[n] * inv) : Real(0);
   fx[n] = c * Real(2) * r * ((st.vx - st.omega * ry) - usx);
   fy[n] = c * Real(2) * r * ((st.vy + st.omega * rx) - usy);
+  fz[n] = three ? (c * Real(2) * r * (st.vz - usz)) : Real(0);
 }
 
 //------------------------------------------------------------------------------
@@ -378,18 +451,22 @@ LBM_HD LBM_INLINE void body_apply_node(const Shape& b, const BodyState& st,
 struct BodyProperties {
   Real mass = 0;              // m_b
   Real inertia = 0;           // I_b about the shape origin
-  Real bx = 0, by = 0;        // body force per unit mass -- the SAME vector the
+  Real bx = 0, by = 0, bz = 0;  // body force per unit mass -- the SAME vector the
                               // collision operator is given, or the buoyancy
                               // term is inconsistent with it
   bool free_translation = true;
   bool free_rotation = true;
 };
 
+// duz is the third TRANSLATION and is deliberately uncoupled from the roll
+// equation: rotation here is about z, so a z-translation exerts no moment on it
+// and receives none. That is exact, not an omission -- but it is exact only
+// because rotation is 2-D. A genuine 3-D body would couple all six.
 inline void body_solve(const BodyProperties& p, const BodySums& q,
-                       double& dux, double& duy, double& dw) {
+                       double& dux, double& duy, double& dw, double& duz) {
   const double A = double(p.mass) + q.m;
   const double B = double(p.inertia) + q.Iz;
-  dux = duy = dw = 0;
+  dux = duy = dw = duz = 0;
   if (A <= 0) return;
 
   const double rx = 2.0 * q.Px + (double(p.mass) - q.m) * double(p.bx);
@@ -407,6 +484,15 @@ inline void body_solve(const BodyProperties& p, const BodySums& q,
   }
   dux = (rx + q.Sy * dw) * invA;
   duy = (ry - q.Sx * dw) * invA;
+  const double rzz = 2.0 * q.Pz + (double(p.mass) - q.m) * double(p.bz);
+  duz = rzz * invA;
+}
+
+// The 2-D entry point, kept so every existing caller and test is untouched.
+inline void body_solve(const BodyProperties& p, const BodySums& q,
+                       double& dux, double& duy, double& dw) {
+  double duz = 0;
+  body_solve(p, q, dux, duy, dw, duz);
 }
 
 // The force and torque the fluid exerts on the body, in closed form from the
@@ -441,16 +527,18 @@ template <class Shape, class LiquidOf, class LbmOf>
 __global__ void body_probe_kernel(Shape b, BodyState st,
                                   const Real* __restrict__ ux,
                                   const Real* __restrict__ uy,
+                                  const Real* __restrict__ uz,
                                   const Real* __restrict__ fx,
                                   const Real* __restrict__ fy,
+                                  const Real* __restrict__ fz,
                                   LiquidOf dens, LbmOf ldens,
                                   long N, Real reach2, double* __restrict__ partial) {
-  extern __shared__ double sm[];             // 7 * blockDim.x
+  extern __shared__ double sm[];             // 9 * blockDim.x
   const unsigned T = blockDim.x;
   BodySums acc;
   const long stride = long(T) * gridDim.x;
   for (long n = long(blockIdx.x) * T + threadIdx.x; n < N; n += stride)
-    body_probe_node(b, st, ux, uy, fx, fy, dens, ldens, n, reach2, acc);
+    body_probe_node(b, st, ux, uy, uz, fx, fy, fz, dens, ldens, n, reach2, acc);
 
   // Written out rather than through `&acc.m` as seven contiguous doubles: that
   // works and is one line, but it is an aliasing assumption about a struct
@@ -462,26 +550,29 @@ __global__ void body_probe_kernel(Shape b, BodyState st,
   sm[4 * T + threadIdx.x] = acc.Px;
   sm[5 * T + threadIdx.x] = acc.Py;
   sm[6 * T + threadIdx.x] = acc.Lz;
+  sm[7 * T + threadIdx.x] = acc.Sz;
+  sm[8 * T + threadIdx.x] = acc.Pz;
   __syncthreads();
   for (unsigned s = T / 2; s > 0; s >>= 1) {
     if (threadIdx.x < s)
-      for (int k = 0; k < 7; ++k) sm[k * T + threadIdx.x] += sm[k * T + threadIdx.x + s];
+      for (int k = 0; k < 9; ++k) sm[k * T + threadIdx.x] += sm[k * T + threadIdx.x + s];
     __syncthreads();
   }
   if (threadIdx.x == 0)
-    for (int k = 0; k < 7; ++k) partial[k * gridDim.x + blockIdx.x] = sm[k * T];
+    for (int k = 0; k < 9; ++k) partial[k * gridDim.x + blockIdx.x] = sm[k * T];
 }
 
 template <class Shape, class LiquidOf, class LbmOf>
 __global__ void body_apply_kernel(Shape b, BodyState st,
                                   const Real* __restrict__ ux,
                                   const Real* __restrict__ uy,
+                                  const Real* __restrict__ uz,
                                   Real* __restrict__ fx, Real* __restrict__ fy,
                                   Real* __restrict__ fz,
                                   LiquidOf dens, LbmOf ldens, long N, Real reach2) {
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
-  body_apply_node(b, st, ux, uy, fx, fy, fz, dens, ldens, n, reach2);
+  body_apply_node(b, st, ux, uy, uz, fx, fy, fz, dens, ldens, n, reach2);
 }
 
 // Integrals of the indicator alone: its area and its second moment about the
@@ -500,9 +591,12 @@ __global__ void body_moments_kernel(Shape b, int nx, int ny, long N,
   for (long n = long(blockIdx.x) * T + threadIdx.x; n < N; n += stride) {
     int x, y, z;
     coords(n, nx, ny, x, y, z);
-    const Real c = b.chi(Real(x), Real(y));
+    const Real c = b.chi(Real(x), Real(y), Real(z));
     const Real rx = Real(x) - b.cx, ry = Real(y) - b.cy;
     a += double(c);
+    // The second moment is about z, matching BodySums::Iz. For a sphere this is
+    // the polar moment of a sphere rather than its full inertia -- correct for
+    // the only rotation this code has, and inert for a sphere anyway.
     s += double(c) * (double(rx) * rx + double(ry) * ry);
   }
   sm2[threadIdx.x] = a;  sm2[T + threadIdx.x] = s;
@@ -534,7 +628,7 @@ class PenalisedBody {
     LBM_CUDA_CHECK(cudaMemset(fx_, 0, sizeof(Real) * N_));
     LBM_CUDA_CHECK(cudaMemset(fy_, 0, sizeof(Real) * N_));
     LBM_CUDA_CHECK(cudaMemset(fz_, 0, sizeof(Real) * N_));
-    LBM_CUDA_CHECK(cudaMalloc(&partial_, sizeof(double) * 7 * GRID));
+    LBM_CUDA_CHECK(cudaMalloc(&partial_, sizeof(double) * 9 * GRID));
   }
   ~PenalisedBody() {
     cudaFree(fx_); cudaFree(fy_); cudaFree(fz_); cudaFree(partial_);
@@ -545,11 +639,16 @@ class PenalisedBody {
   //---- state, public so a driver can prescribe, clamp or read any of it ------
   Shape shape;
   BodyProperties props;
-  Real vx = 0, vy = 0;             // centre-of-mass velocity
+  Real vx = 0, vy = 0, vz = 0;     // centre-of-mass velocity
   Real omega = 0;                  // angular velocity about z
 
-  // Device pointers owned by the fluid solver.
-  void couple_velocity(const Real* ux, const Real* uy) { ux_ = ux; uy_ = uy; }
+  // Device pointers owned by the fluid solver. The two-argument form leaves the
+  // z limb switched OFF -- uz_ stays null, and every prism case is the
+  // arithmetic it was before a sphere existed. Pass three to enable it.
+  void couple_velocity(const Real* ux, const Real* uy) { ux_ = ux; uy_ = uy; uz_ = nullptr; }
+  void couple_velocity(const Real* ux, const Real* uy, const Real* uz) {
+    ux_ = ux; uy_ = uy; uz_ = uz;
+  }
 
   const Real* fx() const { return fx_; }
   const Real* fy() const { return fy_; }
@@ -589,9 +688,12 @@ class PenalisedBody {
   template <class LiquidOf, class LbmOf>
   BodyReaction refresh(LiquidOf dens, LbmOf ldens) {
     const BodySums q = probe(dens, ldens);
-    double dux = 0, duy = 0, dw = 0;
-    body_solve(props, q, dux, duy, dw);
-    if (props.free_translation) { vx += Real(dux); vy += Real(duy); }
+    double dux = 0, duy = 0, dw = 0, duz = 0;
+    body_solve(props, q, dux, duy, dw, duz);
+    if (props.free_translation) {
+      vx += Real(dux); vy += Real(duy);
+      if (uz_) vz += Real(duz);
+    }
     if (props.free_rotation)    { omega += Real(dw); }
     apply(dens, ldens);
     return body_reaction(props, q, dux, duy, dw);
@@ -602,24 +704,26 @@ class PenalisedBody {
   void advance() {
     shape.cx += vx;
     shape.cy += vy;
+    advance_z(shape);
     shape.set_angle(shape.theta + omega);
   }
 
   template <class LiquidOf, class LbmOf>
   BodySums probe(LiquidOf dens, LbmOf ldens) {
     const Real r2 = shape.reach() * shape.reach();
-    body_probe_kernel<<<GRID, BLOCK, sizeof(double) * 7 * BLOCK>>>(
-        shape, state(), ux_, uy_, fx_, fy_, dens, ldens, N_, r2, partial_);
+    body_probe_kernel<<<GRID, BLOCK, sizeof(double) * 9 * BLOCK>>>(
+        shape, state(), ux_, uy_, uz_, fx_, fy_, fz_, dens, ldens, N_, r2, partial_);
     LBM_CUDA_CHECK(cudaGetLastError());
-    std::vector<double> h(std::size_t(7 * GRID));
-    LBM_CUDA_CHECK(cudaMemcpy(h.data(), partial_, sizeof(double) * 7 * GRID,
+    std::vector<double> h(std::size_t(9 * GRID));
+    LBM_CUDA_CHECK(cudaMemcpy(h.data(), partial_, sizeof(double) * 9 * GRID,
                               cudaMemcpyDeviceToHost));
-    double t[7] = {0, 0, 0, 0, 0, 0, 0};
-    for (int k = 0; k < 7; ++k)
+    double t[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+    for (int k = 0; k < 9; ++k)
       for (int i = 0; i < GRID; ++i) t[k] += h[std::size_t(k * GRID + i)];
     BodySums q;
     q.m = t[0]; q.Sx = t[1]; q.Sy = t[2]; q.Iz = t[3];
     q.Px = t[4]; q.Py = t[5]; q.Lz = t[6];
+    q.Sz = t[7]; q.Pz = t[8];
     return q;
   }
 
@@ -628,17 +732,27 @@ class PenalisedBody {
     const Real r2 = shape.reach() * shape.reach();
     const int B = 128;
     body_apply_kernel<<<int((N_ + B - 1) / B), B>>>(
-        shape, state(), ux_, uy_, fx_, fy_, fz_, dens, ldens, N_, r2);
+        shape, state(), ux_, uy_, uz_, fx_, fy_, fz_, dens, ldens, N_, r2);
     LBM_CUDA_CHECK(cudaGetLastError());
   }
 
  private:
   static constexpr int BLOCK = 256, GRID = 256;
 
+  // A prism has no cz to read, so the z limb of the state is filled only for a
+  // shape that has one. SFINAE rather than a flag: a Rect that grew a cz member
+  // by accident would otherwise start behaving like a sphere silently.
+  template <class S> static auto shape_cz(const S& sh, int) -> decltype(sh.cz) { return sh.cz; }
+  template <class S> static Real shape_cz(const S&, long) { return Real(0); }
+
+  template <class S> static auto bump_z(S& sh, Real dz, int) -> decltype(sh.cz, void()) { sh.cz += dz; }
+  template <class S> static void bump_z(S&, Real, long) {}
+  template <class S> void advance_z(S& sh) { bump_z(sh, vz, 0); }
+
   BodyState state() const {
     BodyState st;
-    st.cx = shape.cx;  st.cy = shape.cy;
-    st.vx = vx;  st.vy = vy;  st.omega = omega;
+    st.cx = shape.cx;  st.cy = shape.cy;  st.cz = shape_cz(shape, 0);
+    st.vx = vx;  st.vy = vy;  st.vz = vz;  st.omega = omega;
     st.nx = nx_; st.ny = ny_;
     return st;
   }
@@ -647,7 +761,7 @@ class PenalisedBody {
   long N_;
   Real *fx_ = nullptr, *fy_ = nullptr, *fz_ = nullptr;
   double* partial_ = nullptr;
-  const Real *ux_ = nullptr, *uy_ = nullptr;
+  const Real *ux_ = nullptr, *uy_ = nullptr, *uz_ = nullptr;
 };
 
 #endif  // __CUDACC__

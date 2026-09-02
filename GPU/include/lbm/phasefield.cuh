@@ -133,6 +133,8 @@
 //  tension with a spurious current twenty times smaller. When one of these
 //  diverges at a ratio, omega is the first thing to print.
 //==============================================================================
+#include <functional>
+
 #include "streaming.cuh"
 
 namespace lbm {
@@ -689,6 +691,53 @@ LBM_HD LBM_INLINE void pf_fluid_node(const PfParamsT<PL>& p, long N, long n) {
 }
 
 //------------------------------------------------------------------------------
+// PASS 4b. THE MACROSCOPIC FIELD ALONE, read-only.
+//
+// WHY THIS EXISTS, and it is not an optimisation -- it is a coupling order. The
+// fluid pass below FUSES the macroscopic sum with the collision, which is right
+// for a solver nobody interleaves with: one gather, one scatter. A penalised
+// body cannot live with it. Volume penalisation measures the FORCE-FREE
+// velocity u* = u - F/(2 rho) and writes the next force from it, so it needs a
+// u computed from the CURRENT populations with the CURRENT force array. Reading
+// the u the previous step happened to leave behind gives u* one step stale, and
+// stale is not merely late here: the penalisation moves u by F/rho each step, so
+// the stale deficit (u* - v) carries the OPPOSITE SIGN to the true one, and the
+// body-fluid pair diverges. Measured on a driven sphere at matched density, it
+// went non-finite at step 15 with the flow alone perfectly stable.
+//
+// The parent has this pass as FluidSolver::compute_macroscopic() and its
+// wedge-entry driver calls it immediately before the body. This is that pass, so
+// the two codes' orderings agree rather than differing invisibly.
+//
+// It costs one extra gather of the fluid lattice per node per step, and is run
+// ONLY when a caller has registered something to run between it and the
+// collision. Nothing that does not use a body pays for it.
+//------------------------------------------------------------------------------
+template <int Parity, bool HasGeometry, class PL>
+LBM_HD LBM_INLINE void pf_macro_node(const PfParamsT<PL>& p, long N, long n) {
+  if (HasGeometry && p.fflags[n] != Fluid) return;
+  int x, y, z;
+  coords(n, p.nx, p.ny, x, y, z);
+  Real f[27];
+  gather<Parity, FluidLattice>(p.f, N, x, y, z, p.nx, p.ny, p.nz, f);
+  Real s = Real(0), mx = Real(0), my = Real(0), mz = Real(0);
+  for (int i = 0; i < 27; ++i) {
+    s  += f[i];
+    mx += f[i] * Real(FluidLattice::cx(i));
+    my += f[i] * Real(FluidLattice::cy(i));
+    mz += f[i] * Real(FluidLattice::cz(i));
+  }
+  const MultiphaseModel::Local l = p.fm.local(p.phi[n]);
+  Real F[3];
+  pf_force(p, n, l, s, F);
+  const Real hh = Real(0.5) / l.rho;
+  p.ux[n] = mx + hh * F[0];
+  p.uy[n] = my + hh * F[1];
+  p.uz[n] = mz + hh * F[2];
+  p.pt[n] = s;
+}
+
+//------------------------------------------------------------------------------
 // PASS 6. The phase field: stream, relax, add the anti-diffusion source, stream.
 //
 // Bounce-back is the identity on Esoteric Pull's storage, so a zero-flux wall
@@ -739,6 +788,14 @@ LBM_HD LBM_INLINE void pf_phase_node(const PfParamsT<PL>& p, long N, long n) {
 }
 
 #if defined(__CUDACC__)
+
+template <int Parity, bool HasGeometry, class PL>
+__global__ void pf_macro_kernel(PfParamsT<PL> p, long N) {
+  const long n = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n >= N) return;
+  pf_macro_node<Parity, HasGeometry, PL>(p, N, n);
+}
+
 
 template <int Parity, bool HasGeometry, class PL>
 __global__ void pf_field_kernel(PfParamsT<PL> p, long N) {
@@ -869,6 +926,9 @@ class PhaseFieldSolver {
   void couple_external_force(const Real* fx, const Real* fy, const Real* fz) {
     ex_ = fx;  ey_ = fy;  ez_ = fz;
   }
+  // Run between the macroscopic pass and the collision -- the only window a
+  // volume penalisation can be applied in. Registering one switches PASS 4b on.
+  void set_pre_fluid(std::function<void()> fn) { pre_fluid_ = std::move(fn); }
   PhaseOp phase_op() const { return phase_op_; }
   MultiOp fluid_op() const { return fluid_op_; }
 
@@ -952,6 +1012,14 @@ class PhaseFieldSolver {
       else               pf_viscous_kernel<false, PL><<<G, B>>>(p, N_);
     }
     if (fluid.constant_reference()) pf_pgrad_kernel<PL><<<G, B>>>(p, N_);
+    // Only when somebody is waiting to run between the macroscopic field and
+    // the collision. See PASS 4b on why the order and not the cost is the point.
+    if (pre_fluid_) {
+      if (has_geometry_) pf_macro_kernel<P, true, PL><<<G, B>>>(p, N_);
+      else               pf_macro_kernel<P, false, PL><<<G, B>>>(p, N_);
+      LBM_CUDA_CHECK(cudaGetLastError());
+      pre_fluid_();
+    }
     if (has_geometry_) pf_fluid_kernel<P, true, PL><<<G, B>>>(p, N_);
     else               pf_fluid_kernel<P, false, PL><<<G, B>>>(p, N_);
     if (has_geometry_) pf_phase_kernel<P, true, PL><<<G, B>>>(p, N_);
@@ -987,6 +1055,7 @@ class PhaseFieldSolver {
   std::uint8_t* pflags_ = nullptr;
   std::uint8_t* fflags_ = nullptr;
   const Real *ex_ = nullptr, *ey_ = nullptr, *ez_ = nullptr;
+  std::function<void()> pre_fluid_;
   bool has_geometry_ = false;
   bool viscous_ = false;
   PhaseOp phase_op_ = PhaseOp::BGK;

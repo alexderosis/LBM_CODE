@@ -193,7 +193,7 @@ struct RT {
 static RT run(Index W, bool three_d, double At, double Re, double Ca, double Pe,
               double U, double iw, double tmax, const char* dump,
               const char* field, bool volume, int anim,
-              const char* animdir) {
+              const char* animdir, bool animdiag) {
   const Index nx = W, ny = 4 * W, nz = three_d ? W : Index(1);
   const double g     = U * U / double(W);           // so sqrt(gW) = U
   const double nu    = double(W) * U / Re;
@@ -250,9 +250,6 @@ static RT run(Index W, bool three_d, double At, double Re, double Ca, double Pe,
   fc.beta  = FColl::beta_from_sigma(Real(sigma), Real(iw));
   fc.by    = Real(-g);
   FluidSolver<FL, EsotericPull<FL>, FColl> fl(d, fc);
-  fl.set_geometry([&](Index, Index y, Index) -> CellType {
-    return (y == 0 || y == ny - 1) ? Solid : Fluid;
-  });
   // THE PHASE FIELD NEEDS THE SAME TWO PLANES, and until 2026-09-02 it did not
   // get them: only the fluid was given a geometry, so phi was transported
   // across the planes the fluid calls Solid. Zero normal flux is the condition
@@ -275,6 +272,31 @@ static RT run(Index W, bool three_d, double At, double Re, double Ca, double Pe,
     const Real I = rl * dz + (rh - rl) * Real(0.5) * (dz + Real(0.5) * iwr * lnch);
     const Real r = rl + phiv(n) * (rh - rl);
     return FlowState{(-gr * I) / (r / Real(3)), Real(0), Real(0), Real(0)};
+  });
+  // GEOMETRY AFTER THE SEED, DELIBERATELY, AND THIS ORDER IS THE WHOLE BUG.
+  //
+  // FluidSolver::initialize_field seeds a node from the caller's function only
+  // where the flag is Fluid or RegWall; anywhere else it seeds FlowState{},
+  // which is rho = 0. In a MULTIPHASE run the populations carry the normalised
+  // pressure p~ rather than a density, so that is not an inert value: it is
+  // p~ = 0 written into the wall, against a fluid neighbour sitting at the
+  // hydrostatic p~ ~ -9e-3 one cell away.
+  //
+  // Under Esoteric Pull the wall's stored slots ARE what the neighbour reads
+  // back -- bounce-back is the identity -- and the neighbour does not overwrite
+  // the second parity's half until its second step. So the seed survives
+  // exactly two steps and then arrives as a pressure discontinuity. Measured at
+  // the top wall of this case: uy at the adjacent node goes from -1.2500e-05,
+  // which is precisely Guo's half-force -g/2 and correct, to -1.68e-01 at step
+  // 2 -- a factor of 13000, Ma = 0.29, in quiescent fluid 120 cells from the
+  // interface. phi then collapses from 1 to 0.917 in the same step, which is
+  // how this was found: as a phase-field discrepancy against the CUDA port.
+  //
+  // Seeding first and flagging afterwards gives every node the hydrostatic
+  // profile, which is what GPU/src/rti3d.cu does -- its pf_initialise has no
+  // flag test at all -- and it is why the port did not have this.
+  fl.set_geometry([&](Index, Index y, Index) -> CellType {
+    return (y == 0 || y == ny - 1) ? Solid : Fluid;
   });
 
   pf.set_velocity(fl.ux(), fl.uy(), fl.uz());
@@ -375,11 +397,41 @@ static RT run(Index W, bool three_d, double At, double Re, double Ca, double Pe,
       char fp[256];
       std::snprintf(fp, sizeof fp, "%s_%04zu.bin", animdir, nframe);
       write_phi(fp, ha, d, nx, ny, nz, three_d);
+      // -animdiag ADDS TWO MORE FIELDS PER FRAME, and is off by default
+      // because it triples the output: 200 frames of a 64 x 256 x 64 grid is
+      // 800 MB of phi alone. They are here because between them they bisect a
+      // wall fault in one run.
+      //
+      //   grad_y   for a uniform phi this is identically zero, since
+      //            sum_i w_i c_i = 0. A nonzero value one cell from a wall puts
+      //            the fault in the gradient stencil.
+      //   uy       with a zero gradient the anti-diffusion source is zero and
+      //            the phase collision conserves phi exactly, so anything that
+      //            moves phi arrived through the velocity -- which is how the
+      //            seed-order bug above was caught: uy at the wall-adjacent
+      //            node went from -1.25e-05 to -1.68e-01 at step 2 while its
+      //            gradient was still 1e-16.
+      if (animdiag) {
+        auto hg = Kokkos::create_mirror_view_and_copy(HostSpace{}, pf.grad_y());
+        std::snprintf(fp, sizeof fp, "%s_gy_%04zu.bin", animdir, nframe);
+        write_phi(fp, hg, d, nx, ny, nz, three_d);
+        auto hv = Kokkos::create_mirror_view_and_copy(HostSpace{}, fl.uy());
+        std::snprintf(fp, sizeof fp, "%s_uy_%04zu.bin", animdir, nframe);
+        write_phi(fp, hv, d, nx, ny, nz, three_d);
+      }
       ++nframe;
     }
-    fl.step(true);
-    pf.refresh();
-    pf.step();
+    // THE ORDER IS THE SOLVER'S, NOT THE DRIVER'S CHOICE, and this loop had it
+    // wrong until 2026-09-02: it stepped the fluid first, so the capillary
+    // stress was evaluated from grad phi(t-1) while the interface it belongs to
+    // had already moved. PhaseFieldSolver.hpp's header states the order and
+    // says why it matters -- the splitting error does not refine away, and
+    // because the interface MOVES it is a systematically misplaced interface
+    // rather than a damping offset. The CUDA port had it right, which is how
+    // the discrepancy between the two was noticed.
+    pf.refresh();          // phi(t) and grad phi(t)
+    fl.step(true);         // collides against grad phi(t), writes u(t)
+    pf.step();             // advects with u(t)
   }
 
   if (dump && *dump) {
@@ -423,6 +475,7 @@ int main(int argc, char** argv) {
   // stride, so the same number of frames comes back whatever -tmax is.
   const int    anim      = int(arg_num(argc, argv, "-anim", 0.0));
   const char*  animdir   = arg_str(argc, argv, "-animdir", "doc/fig/rtanim");
+  const bool   animdiag  = arg_flag(argc, argv, "-animdiag");  // + grad_y, uy
 
   Kokkos::initialize(argc, argv);
   int status = 0;
@@ -443,7 +496,7 @@ int main(int argc, char** argv) {
     std::snprintf(tag, sizeof tag, "rt%s_w%d_re%.0f_iw%g",
                   td ? "3d" : "2d", int(W), Re, iw);
     const RT r = run(W, td, At, Re, Ca, Pe, U, iw, tmax, dump ? tag : "",
-                     fieldflag ? tag : "", volflag, anim, animdir);
+                     fieldflag ? tag : "", volflag, anim, animdir, animdiag);
 
     std::printf("\n  nu = %.4e   tau = %.5f   sigma = %.4e   M = %.4e   "
                 "rho_H = %.2f\n", r.nu, r.tau, r.sigma, r.M, r.rho_h);

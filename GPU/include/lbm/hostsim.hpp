@@ -23,6 +23,7 @@
 //
 //  Slow, and meant to be. Grids of 32^3 in seconds, not 512^3.
 //==============================================================================
+#include <functional>
 #include "body.cuh"
 #include "colour.cuh"
 #include "freesurface.cuh"
@@ -670,6 +671,7 @@ class PhaseField {
   void couple_external_force(const Real* fx, const Real* fy, const Real* fz) {
     ex_ = fx;  ey_ = fy;  ez_ = fz;
   }
+  void set_pre_fluid(std::function<void()> fn) { pre_fluid_ = std::move(fn); }
   PhaseOp phase_op() const { return phase_op_; }
   MultiOp fluid_op() const { return fluid_op_; }
 
@@ -747,6 +749,14 @@ class PhaseField {
     }
     if (fluid.constant_reference())
       for (long n = 0; n < N_; ++n) pf_pgrad_node(p, n);
+    // PASS 4b, mirroring the device: the macroscopic field alone, so a
+    // penalised body can be applied in the one window where u is current and
+    // the collision has not happened yet. See phasefield.cuh's PASS 4b.
+    if (pre_fluid_) {
+      if (has_geometry_) for (long n = 0; n < N_; ++n) pf_macro_node<P, true>(p, N_, n);
+      else               for (long n = 0; n < N_; ++n) pf_macro_node<P, false>(p, N_, n);
+      pre_fluid_();
+    }
     if (has_geometry_) for (long n = 0; n < N_; ++n) pf_fluid_node<P, true>(p, N_, n);
     else               for (long n = 0; n < N_; ++n) pf_fluid_node<P, false>(p, N_, n);
     if (has_geometry_) for (long n = 0; n < N_; ++n) pf_phase_node<P, true>(p, N_, n);
@@ -788,6 +798,7 @@ class PhaseField {
   std::vector<Real> f_, h_, fld_;
   std::vector<std::uint8_t> pflags_, fflags_;
   const Real *ex_ = nullptr, *ey_ = nullptr, *ez_ = nullptr;
+  std::function<void()> pre_fluid_;
   bool has_geometry_ = false;
   bool viscous_ = false;
   PhaseOp phase_op_ = PhaseOp::BGK;
@@ -817,9 +828,12 @@ class Body {
 
   Shape shape;
   BodyProperties props;
-  Real vx = 0, vy = 0, omega = 0;
+  Real vx = 0, vy = 0, vz = 0, omega = 0;
 
-  void couple_velocity(const Real* ux, const Real* uy) { ux_ = ux; uy_ = uy; }
+  void couple_velocity(const Real* ux, const Real* uy) { ux_ = ux; uy_ = uy; uz_ = nullptr; }
+  void couple_velocity(const Real* ux, const Real* uy, const Real* uz) {
+    ux_ = ux; uy_ = uy; uz_ = uz;
+  }
   const Real* fx() const { return fx_.data(); }
   const Real* fy() const { return fy_.data(); }
   const Real* fz() const { return fz_.data(); }
@@ -830,7 +844,7 @@ class Body {
     for (long n = 0; n < N_; ++n) {
       int x, y, z;
       coords(n, nx_, ny_, x, y, z);
-      const double c = double(shape.chi(Real(x), Real(y)));
+      const double c = double(shape.chi(Real(x), Real(y), Real(z)));
       const double rx = double(x) - double(shape.cx), ry = double(y) - double(shape.cy);
       m.area += c;
       m.second += c * (rx * rx + ry * ry);
@@ -849,9 +863,12 @@ class Body {
   template <class LiquidOf, class LbmOf>
   BodyReaction refresh(LiquidOf dens, LbmOf ldens) {
     const BodySums q = probe(dens, ldens);
-    double dux = 0, duy = 0, dw = 0;
-    body_solve(props, q, dux, duy, dw);
-    if (props.free_translation) { vx += Real(dux); vy += Real(duy); }
+    double dux = 0, duy = 0, dw = 0, duz = 0;
+    body_solve(props, q, dux, duy, dw, duz);
+    if (props.free_translation) {
+      vx += Real(dux); vy += Real(duy);
+      if (uz_) vz += Real(duz);
+    }
     if (props.free_rotation)    { omega += Real(dw); }
     apply(dens, ldens);
     return body_reaction(props, q, dux, duy, dw);
@@ -860,6 +877,7 @@ class Body {
   void advance() {
     shape.cx += vx;
     shape.cy += vy;
+    advance_z(shape);
     shape.set_angle(shape.theta + omega);
   }
 
@@ -869,7 +887,8 @@ class Body {
     const BodyState st = state();
     BodySums q;
     for (long n = 0; n < N_; ++n)
-      body_probe_node(shape, st, ux_, uy_, fx_.data(), fy_.data(), dens, ldens, n, r2, q);
+      body_probe_node(shape, st, ux_, uy_, uz_, fx_.data(), fy_.data(),
+                      fz_.data(), dens, ldens, n, r2, q);
     return q;
   }
 
@@ -878,22 +897,29 @@ class Body {
     const Real r2 = shape.reach() * shape.reach();
     const BodyState st = state();
     for (long n = 0; n < N_; ++n)
-      body_apply_node(shape, st, ux_, uy_, fx_.data(), fy_.data(), fz_.data(),
-                      dens, ldens, n, r2);
+      body_apply_node(shape, st, ux_, uy_, uz_, fx_.data(), fy_.data(),
+                      fz_.data(), dens, ldens, n, r2);
   }
 
  private:
+  template <class S> static auto shape_cz(const S& sh, int) -> decltype(sh.cz) { return sh.cz; }
+  template <class S> static Real shape_cz(const S&, long) { return Real(0); }
+  template <class S> static auto bump_z(S& sh, Real dz, int) -> decltype(sh.cz, void()) { sh.cz += dz; }
+  template <class S> static void bump_z(S&, Real, long) {}
+
   BodyState state() const {
     BodyState st;
-    st.cx = shape.cx;  st.cy = shape.cy;
-    st.vx = vx;  st.vy = vy;  st.omega = omega;
+    st.cx = shape.cx;  st.cy = shape.cy;  st.cz = shape_cz(shape, 0);
+    st.vx = vx;  st.vy = vy;  st.vz = vz;  st.omega = omega;
     st.nx = nx_; st.ny = ny_;
     return st;
   }
+  template <class S> void advance_z(S& sh) { bump_z(sh, vz, 0); }
+
   int nx_, ny_, nz_;
   long N_;
   std::vector<Real> fx_, fy_, fz_;
-  const Real *ux_ = nullptr, *uy_ = nullptr;
+  const Real *ux_ = nullptr, *uy_ = nullptr, *uz_ = nullptr;
 };
 
 //==============================================================================
