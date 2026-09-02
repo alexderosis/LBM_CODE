@@ -31,6 +31,56 @@ eight digits. It is fixed. A constant offset is invisible in a profile *shape*,
 which is how it survived; what it moved was the fitted wall position, and it had
 led to a wrong conclusion about TRT that is retracted below.
 
+## The last seven features — confirmed on a T4
+
+TRT, shifted storage, central moments for both multiphase distributions, the
+open scalar boundary, the magnetic wall, the penalised rigid body and the free
+surface. All written and measured with no GPU, then built with nvcc and run on a
+Tesla T4 (sm_75, CUDA 12.8).
+
+**The build was clean: `BUILD_EXIT=0`, zero errors, 6m09s for eleven targets.**
+Not one line of the `__CUDACC__` half had been compiled before that.
+
+`src/newpaths.cu` then runs one measurement per new path and prints it beside
+the number the host predicted, so anything that disagrees is device-side by
+elimination:
+
+| measurement | device | host said | rel |
+|---|---|---|---|
+| TRT: bounce-back wall at tau = 2 | 0.50007 | 0.500175 | 2.1e-04 |
+| ... and BGK's, for contrast | 0.329833 | 0.329796 | 1.1e-04 |
+| shifted: shear decay error at A = 1e-2 | 5.21483e-03 | 5.217e-03 | 4.2e-04 |
+| shifted: and at A = 1e-5, where raw loses it | 5.2136e-03 | 5.213e-03 | 1.2e-04 |
+| raw: the same, at A = 1e-5 | −0.967929 | −0.967929 | 7.7e-08 |
+| phase field D3Q27 BGK: slab width | 4.44968 | 4.45 | 7.2e-05 |
+| phase field D3Q27 CM: slab width | 4.44968 | 4.45 | 7.1e-05 |
+| body: dU from the 7-accumulator reduction | −8.18182e-05 | −8.18182e-05 | 2.4e-07 |
+| body: fictitious mass = area of chi | 575.999 | 576 | 1.2e-06 |
+| free surface: mass drift over 4000 steps | −1.94e-06 | ~1e-6 | — |
+| free surface: Fluid cells touching Gas | 0 | 0 | exact |
+| free surface: interface cells | 184 | 184 | exact |
+
+**DEVICE MATCHES HOST, 0 lines differ.** The row worth singling out is the
+body's: the seven-accumulator block reduction is the one piece with no serial
+counterpart at all, and `dU` comes straight out of it — so a reduction that
+dropped a block or summed into the wrong accumulator would show there and
+nowhere else. It agrees to 2.4e-07.
+
+**And nothing already committed moved.** The changes touched `Macro`,
+`macroscopic()` and the phase field's lattice templating, so the existing device
+results are the regression test that matters:
+
+| | committed | device now |
+|---|---|---|
+| tgv3d, E/E0 at t\*=10, 64³ | 0.014462 | 0.014462 |
+| bubble, gamma = 1, mu matched | 9.382817e-04, −6.17%, 1.235e-05 | identical to every digit |
+| bubble, gamma = 100, nu matched | 9.625386e-04, −3.75%, 5.685e-07 | 9.625390e-04, −3.75%, 5.686e-07 |
+| `ctest`, six host binaries, gcc/Linux | — | 6/6 passed |
+
+The last row is not redundant with running them here: the host suite is built
+with clang on macOS in development and gcc on Linux there, and a
+different compiler is a real second opinion on anything undefined.
+
 ## Measured, on a Tesla T4 (sm_75, CUDA 12.8, FP32)
 
 | operator | grid | MLUPS | GB/s | mass drift |
