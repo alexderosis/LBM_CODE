@@ -55,9 +55,29 @@ rate, not on the wall alone.
 `../validation/hartmann.cpp`. Two different boundary mechanisms meet: a
 regularised velocity wall and a moment-based magnetic wall, both on the node.
 
-| Ha = 10 | l2 error in u | l2 error in b | u, b at the wall |
-|---|---|---|---|
-| L = 15 | 5.18e-03 | 1.27e-02 | 0.000e+00 |
+Measured on a T4, FP32, converged (three diffusive times minimum, 2.4M steps
+at the widest). **u and b are exactly 0.000e+00 at both wall nodes at every
+resolution** — that is the on-node claim, and it is what bounce-back cannot do.
+
+| L | raw, u | shifted, u | raw, b | shifted, b |
+|---|---|---|---|---|
+| 15 | 5.17e-03 | 5.21e-03 | 1.28e-02 | 1.27e-02 |
+| 31 | 5.65e-03 | **1.30e-03** | 3.90e-03 | **2.87e-03** |
+| 63 | 1.55e-02 | **4.75e-04** | 5.96e-03 | **8.35e-04** |
+
+**AND IT NEEDS SHIFTED STORAGE.** The driving force scales as 1/L², so a wider
+channel puts the dynamics into ever smaller differences between populations of
+size w_i — exactly the cancellation shifted storage removes. Raw storage **does
+not converge**: flat from L = 15 to 31, three times worse at 63, and u_max
+1.5% below target there (1.9708e-02 against 2.0e-02). Shifted converges at
+roughly second order and is 33× more accurate at the finest grid, with u_max
+2.00066e-02.
+
+At L = 15 the two agree to 1%, which is the control: there the error is
+discretisation and the storage cannot matter. So this is not "raw storage is
+wrong" — it is that this case, at this precision, is one where the cancellation
+dominates, and **only the resolution study exposes it**. A single-resolution run
+would have looked fine.
 
 **AND THE CONVERGENCE PROBE IN THAT DRIVER WAS WRONG, WHICH IS WORTH THE
 PARAGRAPH.** It stopped when two samples 2000 steps apart agreed to 1e-11

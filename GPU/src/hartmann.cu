@@ -46,7 +46,30 @@
 //  there would tell its mask that the along-wall directions streamed from
 //  outside -- which they did not.
 //
-//  Run:  ./hartmann [-n 65] [-ha 10] [-nu 0.02] [-u 0.02] [-op bgk|trt|cm]
+//  ================ AND IT NEEDS SHIFTED STORAGE, MEASURED ====================
+//  The driving force scales as 1/L^2, so a wider channel puts the dynamics into
+//  ever smaller differences between populations of size w_i -- exactly the
+//  cancellation shifted storage removes (core.cuh). On a T4 in FP32:
+//
+//      L     raw, u      shifted, u    raw, b      shifted, b
+//      15    5.17e-03    5.21e-03      1.28e-02    1.27e-02
+//      31    5.65e-03    1.30e-03      3.90e-03    2.87e-03
+//      63    1.55e-02    4.75e-04      5.96e-03    8.35e-04
+//
+//  RAW STORAGE DOES NOT CONVERGE. Its error is flat from L = 15 to 31 and then
+//  three times WORSE at 63, and u_max comes out 1.5% below target there
+//  (1.9708e-02 against 2.0e-02). Shifted converges at roughly second order and
+//  is 33x more accurate at the finest grid, with u_max 2.00066e-02.
+//
+//  At L = 15 the two agree to 1%, which is the control: there the error is
+//  discretisation and the storage cannot matter. So this is not a general
+//  statement that raw storage is wrong -- it is that THIS case, at THIS
+//  precision, is one where the cancellation dominates, and the resolution study
+//  is what exposes it. Hence `shifted` is the default here and `-raw` shows the
+//  contrast.
+//  ===========================================================================
+//
+//  Run:  ./hartmann [-n 65] [-ha 10] [-nu 0.02] [-u 0.02] [-op bgk|trt|cm] [-raw]
 //==============================================================================
 #include "lbm/backend.cuh"
 
@@ -81,7 +104,7 @@ int main(int argc, char** argv) {
   std::size_t steps = 200000;
   Op op = Op::BGK;
   const char* opname = "BGK";
-  bool shifted = false;
+  bool shifted = true;      // see the banner: raw FP32 does not converge here
 
   for (int i = 1; i < argc; ++i) {
     auto num = [&](double& v) { if (i + 1 < argc) v = std::atof(argv[++i]); };
@@ -90,7 +113,7 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "-nu")) num(nu);
     else if (!std::strcmp(argv[i], "-u"))  num(utarget);
     else if (!std::strcmp(argv[i], "-steps")) { if (i+1<argc) steps = std::size_t(std::atol(argv[++i])); }
-    else if (!std::strcmp(argv[i], "-shifted")) shifted = true;
+    else if (!std::strcmp(argv[i], "-raw")) shifted = false;
     else if (!std::strcmp(argv[i], "-op") && i + 1 < argc) {
       ++i;
       if      (!std::strcmp(argv[i], "trt")) { op = Op::TRT;            opname = "TRT"; }
