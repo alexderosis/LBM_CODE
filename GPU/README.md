@@ -58,7 +58,17 @@ regularised velocity wall and a moment-based magnetic wall, both on the node.
 | Ha = 10 | l2 error in u | l2 error in b | u, b at the wall |
 |---|---|---|---|
 | L = 15 | 5.18e-03 | 1.27e-02 | 0.000e+00 |
-| L = 31 | 9.45e-04 | 4.36e-03 | 0.000e+00 |
+
+**AND THE CONVERGENCE PROBE IN THAT DRIVER WAS WRONG, WHICH IS WORTH THE
+PARAGRAPH.** It stopped when two samples 2000 steps apart agreed to 1e-11
+relative — but with u ≈ 2e-2 the smallest change FP32 can represent is ≈2.4e-9,
+so that threshold fires the moment the creep drops below *precision*, long
+before steady state. It gave an l2 error at L = 63 that was **worse** than at
+L = 31, breaking the convergence, with nothing in the output to say the run had
+stopped early. The threshold now follows the precision and a minimum of three
+diffusive times L²/ν must elapse regardless — which at L = 63, ν = 0.02 is
+2.4 million steps. This case is diffusive and therefore slow; no residual test
+substitutes for knowing that.
 
 **THE ERROR IS NOT A SLIP LENGTH**, which is what it looked like first. The
 Poiseuille error reads as a uniform velocity pedestal, and fitting the

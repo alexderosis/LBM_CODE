@@ -162,7 +162,23 @@ int main(int argc, char** argv) {
   // then step B against the velocity the fluid just wrote. Lagging it is a
   // first-order splitting error that does not vanish under refinement -- see the
   // banner in solver.cuh.
+  // TWO GUARDS, AND THE SECOND ONE WAS LEARNED THE HARD WAY.
+  //
+  // A relative threshold of 1e-11 is BELOW THE FP32 FLOOR: with u ~ 2e-2 the
+  // smallest representable change between samples is ~2.4e-9, so consecutive
+  // probes agree to 1e-11 the moment the creep drops under precision -- long
+  // before steady state. Quoting that gave an l2 error at L = 63 that was
+  // WORSE than at L = 31 and broke the convergence, with nothing in the output
+  // to say the run had stopped early.
+  //
+  // So the threshold follows the precision, and a MINIMUM of three diffusive
+  // times L^2/nu must have elapsed regardless. At L = 63, nu = 0.02 that is
+  // 595 000 steps: this case is slow because it is diffusive, and no residual
+  // test substitutes for knowing that.
   const std::size_t probe = 2000;
+  const double tol = (sizeof(Real) == 4) ? 1e-7 : 1e-11;
+  const std::size_t t_min = std::size_t(3.0 * (2.0 * L) * (2.0 * L) / nu);
+  if (steps < t_min + probe) steps = t_min + probe;
   double prev = 0;
   std::size_t taken = 0;
   for (std::size_t t = 0; t < steps; t += probe) {
@@ -176,7 +192,8 @@ int main(int argc, char** argv) {
     fl.macroscopic_to_host(rho, ux, uy, uz);
     const double cur = double(uy[std::size_t(node_id(n / 2, nyc / 2, nz / 2, n, nyc))]);
     if (!std::isfinite(cur)) { std::printf("  DIVERGED at step %zu\n", taken); return 1; }
-    if (t > 0 && std::fabs(cur - prev) < 1e-11 * (std::fabs(cur) + 1e-30)) break;
+    if (taken >= t_min && t > 0 &&
+        std::fabs(cur - prev) < tol * (std::fabs(cur) + 1e-30)) break;
     prev = cur;
   }
 
@@ -202,7 +219,8 @@ int main(int argc, char** argv) {
       std::printf("  %+6.3f   %12.5e  %12.5e  %12.5e  %12.5e\n", xi, nu_, au, nb_, ab);
   }
   const double eu = std::sqrt(su / uref), eb = std::sqrt(sb / bref);
-  std::printf("\n  steps %zu   u_max %.6e (target %.4g)\n", taken, umax, utarget);
+  std::printf("\n  steps %zu (min %zu = 3 diffusive times)   u_max %.6e (target %.4g)\n",
+              taken, t_min, umax, utarget);
   std::printf("  l2 error   u %.4e   b %.4e        Eq. (15)\n", eu, eb);
   std::printf("  AT THE WALL: u %.3e / %.3e   b %.3e / %.3e   (both should be ~0)\n",
               std::fabs(double(uy[std::size_t(node_id(w0, nyc/2, nz/2, n, nyc))])),
