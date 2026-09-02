@@ -56,6 +56,12 @@ def main():
     out = sys.argv[2] if len(sys.argv) > 2 else "rt2d.mp4"
     tmax = float(sys.argv[3]) if len(sys.argv) > 3 else 10.0
     fps = int(sys.argv[4]) if len(sys.argv) > 4 else 20
+    # UPRIGHT, for a domain that is not a 1:4 column. The rotation below exists
+    # because a W x 4W tower drawn honestly is a 500 x 2000 video; a 1:2 tank is
+    # perfectly viewable upright, and a sphere falling into water shown on its
+    # side reads as a wall of liquid moving sideways. Pass "upright" to keep
+    # gravity pointing down.
+    upright = len(sys.argv) > 5 and sys.argv[5] == "upright"
 
     # A DIRECTORY IS ACCEPTED AS WELL AS A GLOB, and that is not laziness: in a
     # Colab cell a quoted wildcard is exactly the thing the editor's bracket
@@ -78,9 +84,9 @@ def main():
         lo, hi = min(lo, float(phi.min())), max(hi, float(phi.max()))
         ny, nx = phi.shape
         # Rotate so the long axis is horizontal; gravity then points left.
-        img = np.rot90(phi, k=1)
-        fig_w = 12.0
-        fig_h = fig_w * nx / float(ny)
+        img = phi if upright else np.rot90(phi, k=1)
+        fig_w = 12.0 if not upright else 5.0
+        fig_h = fig_w * (nx / float(ny) if not upright else ny / float(nx))
         fig = plt.figure(figsize=(fig_w, fig_h + 0.5), dpi=100)
         ax = fig.add_axes([0.0, 0.0, 1.0, fig_h / (fig_h + 0.5)])
         ax.imshow(img, origin="lower", cmap=CMAP, vmin=0.0, vmax=1.0,
@@ -91,8 +97,8 @@ def main():
         # placing the text relative to the axes puts it back inside the image.
         fig.text(0.5, 0.995, "$t/t_0 = %.2f$" % (k * dt), ha="center",
                  va="top", fontsize=13, color="#222222")
-        fig.text(0.012, 0.995, r"$g \leftarrow$", ha="left", va="top",
-                 fontsize=11, color="#666666")
+        fig.text(0.012, 0.995, r"$g \downarrow$" if upright else r"$g \leftarrow$",
+                 ha="left", va="top", fontsize=11, color="#666666")
         fig.savefig(os.path.join(tmp, "f%04d.png" % k), dpi=100,
                     facecolor="white")
         plt.close(fig)
@@ -103,7 +109,7 @@ def main():
     cmd = ["ffmpeg", "-y", "-framerate", str(fps),
            "-i", os.path.join(tmp, "f%04d.png"),
            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20",
-           "-vf", "scale=1200:-2", out]
+           "-vf", "scale=%d:-2" % (500 if upright else 1200), out]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
                    stderr=subprocess.DEVNULL)
     print("wrote %s  (%d frames, %.1f MB)"
