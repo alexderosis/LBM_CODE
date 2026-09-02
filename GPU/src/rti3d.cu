@@ -42,7 +42,7 @@
 //  measurement artefact.
 //
 //  Run:  ./rti3d [-w 64] [-re 256] [-ca 960] [-pe 1024] [-iw 5] [-tmax 3]
-//                [-frames 60] [-dump PREFIX] [-op cm|bgk]
+//                [-frames 60] [-dump PREFIX] [-vol] [-bgk]
 //==============================================================================
 #include "lbm/backend.cuh"
 
@@ -100,7 +100,7 @@ int main(int argc, char** argv) {
   int W = 64, frames = 60;
   double Re = 256.0, At = 0.5, Ca = 960.0, Pe = 1024.0, U = 0.04, iw = 5.0, tmax = 3.0;
   const char* dump = "";
-  bool cm = true;
+  bool cm = true, vol = false;
 
   for (int i = 1; i < argc; ++i) {
     auto num = [&](double& v) { if (i + 1 < argc) v = std::atof(argv[++i]); };
@@ -114,6 +114,7 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "-iw"))     num(iw);
     else if (!std::strcmp(argv[i], "-tmax"))   num(tmax);
     else if (!std::strcmp(argv[i], "-bgk"))    cm = false;
+    else if (!std::strcmp(argv[i], "-vol"))    vol = true;
     else if (!std::strcmp(argv[i], "-dump") && i + 1 < argc) dump = argv[++i];
   }
 
@@ -220,21 +221,42 @@ int main(int argc, char** argv) {
         ++next;
       }
 
-      // One frame: the order parameter on the mid-z plane. The finger forms on
-      // the diagonal of the box and that plane cuts through it.
+      // One frame of the order parameter.
+      //
+      // A PLANE IS NOT THE SAME PICTURE AS THE SURFACE once the spike rolls up.
+      // The mid-z plane cuts through the finger and is what the spike position
+      // is read from, but the mushroom cap and the saddles between the four
+      // sides are exactly what a single cut misses -- and they are what the
+      // paper's Fig. 15 shows. -vol writes the whole volume so the phi = 1/2
+      // isosurface can be extracted; it is 4 MB a frame against 64 kB.
+      //
+      // The volume layout matches doc/fig/enan_rt3d_render.py: three int32
+      // dimensions, then nx*ny*nz float32 with x fastest.
       if (want_frame) {
         char fp[256];
         std::snprintf(fp, sizeof fp, "%s_%04d.bin", dump, nframe);
         std::FILE* f = std::fopen(fp, "wb");
         if (f) {
-          const int hdr[2] = {nx, ny};
-          std::fwrite(hdr, sizeof(int), 2, f);
-          std::vector<float> plane_data(std::size_t(nx) * ny);
-          for (int y = 0; y < ny; ++y)
-            for (int x = 0; x < nx; ++x)
-              plane_data[std::size_t(y) * nx + x] =
-                  float(phi[std::size_t(node_id(x, y, nz / 2, nx, ny))]);
-          std::fwrite(plane_data.data(), sizeof(float), plane_data.size(), f);
+          if (vol) {
+            const int hdr[3] = {nx, ny, nz};
+            std::fwrite(hdr, sizeof(int), 3, f);
+            std::vector<float> v(std::size_t(nx) * ny * nz);
+            for (int z = 0; z < nz; ++z)
+              for (int y = 0; y < ny; ++y)
+                for (int x = 0; x < nx; ++x)
+                  v[(std::size_t(z) * ny + y) * nx + x] =
+                      float(phi[std::size_t(node_id(x, y, z, nx, ny))]);
+            std::fwrite(v.data(), sizeof(float), v.size(), f);
+          } else {
+            const int hdr[2] = {nx, ny};
+            std::fwrite(hdr, sizeof(int), 2, f);
+            std::vector<float> plane_data(std::size_t(nx) * ny);
+            for (int y = 0; y < ny; ++y)
+              for (int x = 0; x < nx; ++x)
+                plane_data[std::size_t(y) * nx + x] =
+                    float(phi[std::size_t(node_id(x, y, nz / 2, nx, ny))]);
+            std::fwrite(plane_data.data(), sizeof(float), plane_data.size(), f);
+          }
           std::fclose(f);
           ++nframe;
         }
