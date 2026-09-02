@@ -53,6 +53,13 @@ def chi_path(path):
 
     <prefix>_0007.bin  ->  <prefix>_chi_0007.bin
     """
+    # demonstrator/water_entry.cpp writes rt_NNNN_phi.bin beside
+    # rt_NNNN_body.bin, in this same layout. Reading its body mask here means
+    # that case gets the coloured solid too, with no renaming.
+    if path.endswith("_phi.bin"):
+        cand = path[: -len("_phi.bin")] + "_body.bin"
+        if os.path.exists(cand):
+            return cand
     head, tail = path.rsplit("_", 1)
     cand = head + "_chi_" + tail
     return cand if os.path.exists(cand) else None
@@ -88,7 +95,12 @@ def main():
     # only the FIRST frame ever reaches argv. Passing the directory sidesteps
     # both.
     if os.path.isdir(pattern):
-        pattern = os.path.join(pattern, "*.bin")
+        # A water_entry dump holds phi, ux, uy and body per frame, so "*.bin"
+        # would treat the velocity fields as frames of their own. Prefer the
+        # phi planes when they are named as such.
+        pattern = os.path.join(
+            pattern,
+            "*_phi.bin" if glob.glob(os.path.join(pattern, "*_phi.bin")) else "*.bin")
     # The chi planes live beside the phi planes and are NOT frames of their own.
     paths = sorted(p for p in glob.glob(pattern) if "_chi_" not in os.path.basename(p))
     if not paths:
