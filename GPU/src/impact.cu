@@ -111,7 +111,7 @@ int main(int argc, char** argv) {
   double U = 0.04, iw = 4.0, tmax = 12.0, Pe = 128.0;
   double aspect = 2.0, span = 4.0;     // ny = aspect*D*2, nx = nz = span*D
   const char* dump = "";
-  bool cm = true, driven = false, nobody = false;
+  bool cm = true, driven = false, nobody = false, vol = false;
 
   for (int i = 1; i < argc; ++i) {
     auto num = [&](double& v) { if (i + 1 < argc) v = std::atof(argv[++i]); };
@@ -140,6 +140,12 @@ int main(int argc, char** argv) {
     // so if THIS diverges the fault is in the flow setup and the body is
     // innocent.
     else if (!std::strcmp(argv[i], "-nobody")) nobody = true;
+    // The WHOLE volume, for a 3-D view rather than a section. A mid-plane cut
+    // through a water entry misses the crown and the cavity's shape away from
+    // the axis, which is most of what a 3-D render is for. Opt-in because it is
+    // nx*ny*nz float32 a frame -- 13 MB at D = 24 -- against 115 kB for the
+    // plane.
+    else if (!std::strcmp(argv[i], "-vol"))    vol = true;
     else if (!std::strcmp(argv[i], "-dump") && i + 1 < argc) dump = argv[++i];
   }
 
@@ -365,6 +371,38 @@ int main(int argc, char** argv) {
                     float(body.shape.chi(Real(x), Real(y), Real(nz / 2)));
             std::fwrite(cl.data(), sizeof(float), cl.size(), c);
             std::fclose(c);
+          }
+        }
+        // THE BODY'S POSE AS FOUR NUMBERS, not a second volume. chi is
+        // analytic, so a renderer can rebuild the sphere exactly from its
+        // centre and radius; dumping a chi volume would double the output to
+        // carry information that fits on one line.
+        if (!nobody) {
+          char bp[256];
+          std::snprintf(bp, sizeof bp, "%s_body.dat", dump);
+          if (std::FILE* b = std::fopen(bp, nframe == 0 ? "wb" : "ab")) {
+            std::fprintf(b, "%d %.4f %.4f %.4f %.4f\n", nframe,
+                         double(body.shape.cx), double(body.shape.cy),
+                         double(body.shape.cz), double(body.shape.R));
+            std::fclose(b);
+          }
+        }
+        if (vol) {
+          char vp[256];
+          std::snprintf(vp, sizeof vp, "%s_vol_%04d.bin", dump, nframe);
+          if (std::FILE* v = std::fopen(vp, "wb")) {
+            // Three int32 then nx*ny*nz float32 with x fastest -- the layout
+            // doc/fig/enan_rt3d_render.py and rt3d_isoanim.py already read.
+            const int vh[3] = {nx, ny, nz};
+            std::fwrite(vh, sizeof(int), 3, v);
+            std::vector<float> vv(std::size_t(nx) * ny * nz);
+            for (int z = 0; z < nz; ++z)
+              for (int y = 0; y < ny; ++y)
+                for (int x = 0; x < nx; ++x)
+                  vv[(std::size_t(z) * ny + y) * nx + x] =
+                      float(phi[std::size_t(node_id(x, y, z, nx, ny))]);
+            std::fwrite(vv.data(), sizeof(float), vv.size(), v);
+            std::fclose(v);
           }
         }
         ++nframe;
