@@ -123,6 +123,16 @@ endif()
 #                 that exercises all three through several hundred conversions.
 #
 # Run both before trusting anything the device produces.
+#
+# WHAT THE HOST BUILD CANNOT SEE, and it is not only the launch. Every CUDA
+# DRIVER CLASS -- Solver, PhaseFieldSolver, FreeSurfaceSolver, PenalisedBody,
+# the set_*() methods that allocate and upload -- lives inside
+# `#if defined(__CUDACC__)`, so a plain C++ build never compiles a line of it.
+# The host reference in hostsim.hpp is a SEPARATE class with the same interface.
+# So host-side setup code added to a device class is unchecked until nvcc sees
+# it: a most-vexing-parse in Solver::set_regularized_walls compiled clean here
+# and failed the CUDA build with 37 errors. Build with nvcc before believing a
+# new solver method exists.
 #-------------------------------------------------------------------------------
 foreach(t host_check host_physics host_colour host_phasefield host_body host_freesurface)
   add_executable(${t} test/${t}.cpp)

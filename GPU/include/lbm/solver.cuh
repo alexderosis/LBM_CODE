@@ -500,7 +500,14 @@ class Solver {
                    spec.size(), N_);
       std::exit(1);
     }
-    std::vector<std::uint8_t> geo(std::size_t(N_), std::uint8_t(Fluid));
+    // NOT `geo(std::size_t(N_), std::uint8_t(Fluid))`: two function-style casts
+    // as the only arguments make that a FUNCTION DECLARATION, and this class is
+    // inside `#if defined(__CUDACC__)`, so no host build can ever catch it --
+    // it cost a failed nvcc build to find. Naming both operands removes the
+    // ambiguity.
+    const std::size_t NN = static_cast<std::size_t>(N_);
+    const std::uint8_t kFluid = Fluid;
+    std::vector<std::uint8_t> geo(NN, kFluid);
     if (has_geometry_)
       LBM_CUDA_CHECK(cudaMemcpy(geo.data(), flags_, sizeof(std::uint8_t) * N_,
                                 cudaMemcpyDeviceToHost));
