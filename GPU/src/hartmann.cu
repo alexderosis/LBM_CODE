@@ -81,6 +81,7 @@ int main(int argc, char** argv) {
   std::size_t steps = 200000;
   Op op = Op::BGK;
   const char* opname = "BGK";
+  bool shifted = false;
 
   for (int i = 1; i < argc; ++i) {
     auto num = [&](double& v) { if (i + 1 < argc) v = std::atof(argv[++i]); };
@@ -89,6 +90,7 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "-nu")) num(nu);
     else if (!std::strcmp(argv[i], "-u"))  num(utarget);
     else if (!std::strcmp(argv[i], "-steps")) { if (i+1<argc) steps = std::size_t(std::atol(argv[++i])); }
+    else if (!std::strcmp(argv[i], "-shifted")) shifted = true;
     else if (!std::strcmp(argv[i], "-op") && i + 1 < argc) {
       ++i;
       if      (!std::strcmp(argv[i], "trt")) { op = Op::TRT;            opname = "TRT"; }
@@ -109,7 +111,8 @@ int main(int argc, char** argv) {
   const double A = F * L / B0;
 
   const backend::DeviceInfo dev = backend::device_info();
-  std::printf("Hartmann flow   %s   %s, %s\n", opname, dev.name.c_str(),
+  std::printf("Hartmann flow   %s   %s storage   %s, %s\n", opname,
+              shifted ? "shifted" : "raw", dev.name.c_str(),
               sizeof(Real) == 4 ? "FP32" : "FP64");
   std::printf("  n = %d   wall nodes %d..%d   L = %.1f   Ha = %.4g\n", n, w0, w1, L, Ha);
   std::printf("  nu = eta = %.5g   B0 = %.6e   F = %.6e   tau = %.4f\n\n",
@@ -147,6 +150,10 @@ int main(int argc, char** argv) {
   mag.set_walls(mkind, wbx, wby, wbz);
 
   backend::Fluid fl(n, nyc, nz, op, Real(nu));
+  // The driving force scales as 1/L^2, so a wide channel puts the dynamics into
+  // ever smaller differences between populations of size w_i -- exactly the
+  // cancellation shifted storage removes. See core.cuh.
+  fl.set_shifted(shifted);
   fl.set_geometry(geo_f);
   fl.set_regularized_walls(spec);
   fl.couple_magnetic(mag.Bx_device(), mag.By_device(), mag.Bz_device());
