@@ -301,8 +301,17 @@ Do not spend time on these without saying so first; several are deliberate.
   conserving**, since BC3 overwrites populations. A closed box holds its mass
   exactly; a driven cavity leaks linearly and does not saturate (−1.7e-2 over
   20000 steps at 32²). Do not read an absolute pressure off a long cavity run.
-- **The rigid body is 2-D and of uniform density**; there is no collision model,
-  so bodies interpenetrate.
+- **The rigid body is of uniform density**, and there is no collision model, so
+  bodies interpenetrate. It is no longer 2-D: `RigidBody3D.hpp` and
+  `PenalisedBody`'s `refresh6`/`advance6` solve the full 6x6 with a rotating
+  inertia tensor and a quaternion pose (`Box` shape, `demonstrator/cube_entry`).
+  The two paths are **separate**, not layered: `Rect` and `Wedge` are prisms with
+  `six_dof = false` and keep the validated 3x3, so calling `refresh()` on a Box
+  or `refresh6()` on a Rect is a compile error rather than a wrong answer.
+  `set_uniform_density6()` measures the inertia in the world frame and stores it
+  in the body frame — using the 2-D `set_uniform_density()` on a 6-DOF body
+  fills the mass and leaves the tensor at **zero**, which makes the angular half
+  singular and produces a plausible tumble rather than a failure.
 
 ---
 

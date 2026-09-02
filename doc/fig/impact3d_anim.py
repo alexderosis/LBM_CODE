@@ -69,7 +69,16 @@ def load_volume(path):
 
 
 def load_body(prefix):
-    """{frame: (cx, cy, cz, R)} from <prefix>_body.dat, or {} if absent."""
+    """{frame: pose} from <prefix>_body.dat, or {} if absent.
+
+    TWO ARITIES, TOLD APART BY THE FIELD COUNT, because the drivers write two
+    different bodies and neither should be able to be read as the other. Five
+    fields is sphere_entry.cpp / impact.cu's `frame cx cy cz R`; eleven is
+    cube_entry.cpp's `frame cx cy cz hx hy hz qw qx qy qz`. A line of any other
+    length is skipped rather than guessed at -- a sphere renderer that silently
+    read the first four numbers of a cube line would draw a ball of radius hx
+    where the cube is, and it would look plausible.
+    """
     p = prefix + "_body.dat"
     if not os.path.exists(p):
         return {}
@@ -77,8 +86,51 @@ def load_body(prefix):
     for line in open(p):
         f = line.split()
         if len(f) == 5:
-            out[int(f[0])] = tuple(float(v) for v in f[1:])
+            out[int(f[0])] = ("sphere",) + tuple(float(v) for v in f[1:])
+        elif len(f) == 11:
+            out[int(f[0])] = ("box",) + tuple(float(v) for v in f[1:])
     return out
+
+
+def quat_matrix(w, x, y, z):
+    """The 3x3 rotation of a unit quaternion, matching Quat::matrix()."""
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
+
+
+# The 8 corners of the unit cube and the 6 faces, wound so that the cross
+# product of the first two edges points OUT. The winding is what makes the
+# shading below mean anything.
+_CUBE_V = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1)
+                    for sz in (-1, 1)], dtype=float)
+_CUBE_F = [(0, 1, 3, 2), (4, 6, 7, 5),      # -x, +x
+           (0, 4, 5, 1), (2, 3, 7, 6),      # -y, +y
+           (0, 2, 6, 4), (1, 5, 7, 3)]      # -z, +z
+
+
+def box_faces(cx, cy, cz, hx, hy, hz, R):
+    """Six quads in PLOT order (x, z, y), with a shade factor for each.
+
+    A cube drawn in one flat colour reads as a hexagon: the three faces visible
+    from any viewpoint have no edge between them that the eye can find. Each
+    face is therefore shaded by |n . l| against a fixed light, which is the
+    minimum needed for the three to separate -- and it also makes the TUMBLE
+    legible, since the shading changes as the body turns even when its
+    silhouette barely does.
+    """
+    v = (_CUBE_V * np.array([hx, hy, hz])) @ R.T + np.array([cx, cy, cz])
+    light = np.array([0.4, 0.75, 0.53])
+    light /= np.linalg.norm(light)
+    quads, shades = [], []
+    for f in _CUBE_F:
+        q = v[list(f)]
+        n = np.cross(q[1] - q[0], q[2] - q[0])
+        nn = np.linalg.norm(n)
+        shades.append(0.55 + 0.45 * abs(float(n @ light) / nn) if nn > 0 else 1.0)
+        quads.append(q[:, [0, 2, 1]])       # (x, y, z) -> (x, z, y)
+    return quads, shades
 
 
 def sphere_mesh(cx, cy, cz, R, n=26):
@@ -125,8 +177,13 @@ def main():
     v0 = load_volume(paths[0])
     nz0, ny0, nx0 = v0.shape
     if body:
-        cys = [p_[1] for p_ in body.values()]
-        rr = max(p_[3] for p_ in body.values())
+        cys = [p_[2] for p_ in body.values()]
+        # The body's own scale: a sphere's radius, or a box's largest half
+        # extent times sqrt(3) -- the distance to its CORNER, which is what a
+        # tumbling cube can reach and a half extent is not.
+        rr = max(p_[4] if p_[0] == "sphere"
+                 else 1.7320508 * max(p_[4], p_[5], p_[6])
+                 for p_ in body.values())
         ylo = int(max(0, min(cys) - 4.0 * rr))
         yhi = int(min(ny0, max(cys) + 2.5 * rr))
     else:
@@ -136,7 +193,7 @@ def main():
         v = load_volume(p)
         nz, ny, nx = v.shape
         pose = body.get(k)
-        zcut = int(round(pose[2])) if pose else nz // 2
+        zcut = int(round(pose[3])) if pose else nz // 2
         zcut = max(2, min(nz - 1, zcut))
         # THE FAR HALF IS KEPT, NOT THE NEAR ONE, and getting this backwards
         # produces a render that looks right and shows nothing: matplotlib does
@@ -168,7 +225,17 @@ def main():
                      constant_values=0.0)
 
         fig = plt.figure(figsize=(5.2, 5.6), dpi=115, facecolor=GROUND)
-        ax = fig.add_subplot(111, projection="3d")
+        # computed_zorder OFF, and this is the fix for a real defect rather than
+        # a preference. mplot3d orders whole ARTISTS by their average depth, not
+        # faces across artists, so the water block -- which spans the far half
+        # of the domain and averages nearer than the body sitting inside it --
+        # was winning and drawing its alpha 0.42 blue OVER the cube. The effect
+        # was not a missing body but a discoloured one: ivory under 42 % blue
+        # comes out pale blue-grey, and only two of the cube's three visible
+        # faces were affected, so it read as odd shading rather than as a
+        # painter's-order bug. With this off the zorders below are obeyed
+        # literally: water first, body always on top of it.
+        ax = fig.add_subplot(111, projection="3d", computed_zorder=False)
         ax.set_facecolor(GROUND)
         try:
             verts, faces, _, _ = measure.marching_cubes(sub, level=0.5)
@@ -180,18 +247,35 @@ def main():
             # the cavity closes it is a POCKET around the sphere, so its far
             # wall faces inward and occludes the ball from every angle. Alpha
             # lets the cavity keep its shape while the body shows through it.
-            mesh = Poly3DCollection(verts[faces][:, :, [2, 0, 1]], alpha=0.42)
+            mesh = Poly3DCollection(verts[faces][:, :, [2, 0, 1]], alpha=0.42,
+                                    zorder=1)
             mesh.set_facecolor(WATER)
             mesh.set_edgecolor("none")
             ax.add_collection3d(mesh)
         except (ValueError, RuntimeError):
             pass                      # a frame with no interface is still a frame
 
-        if pose:
-            cx, cy, cz, R = pose
+        if pose and pose[0] == "sphere":
+            _, cx, cy, cz, R = pose
             xs, zs, ys = sphere_mesh(cx, cy - ylo, cz, R)
             ax.plot_surface(xs, zs, ys, color=BODY, shade=True,
-                            linewidth=0, antialiased=False)
+                            linewidth=0, antialiased=False, zorder=2)
+        elif pose and pose[0] == "box":
+            _, cx, cy, cz, hx_, hy_, hz_, qw, qx, qy, qz = pose
+            quads, shades = box_faces(cx, cy - ylo, cz, hx_, hy_, hz_,
+                                      quat_matrix(qw, qx, qy, qz))
+            base = np.array(matplotlib.colors.to_rgb(BODY))
+            # ONE COLLECTION, NOT SIX. Separate collections are drawn in the
+            # order they were added and matplotlib does not depth-sort between
+            # them, so six of them means a back face can draw over a front one
+            # and the cube turns inside out as it tumbles. Inside a single
+            # Poly3DCollection the faces ARE sorted.
+            body_mesh = Poly3DCollection(quads, alpha=1.0, zorder=2)
+            body_mesh.set_facecolor([tuple(np.clip(base * sh, 0, 1))
+                                     for sh in shades])
+            body_mesh.set_edgecolor("#6f6552")
+            body_mesh.set_linewidth(0.5)
+            ax.add_collection3d(body_mesh)
 
         ax.set_xlim(0, nx)
         ax.set_ylim(0, nz)

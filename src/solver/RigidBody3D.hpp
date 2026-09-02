@@ -75,6 +75,13 @@ struct Mat3 {
     oy = a[3] * vx + a[4] * vy + a[5] * vz;
     oz = a[6] * vx + a[7] * vy + a[8] * vz;
   }
+
+  KOKKOS_INLINE_FUNCTION Mat3 transposed() const {
+    Mat3 t;
+    for (int i = 0; i < 3; ++i)
+      for (int j = 0; j < 3; ++j) t.a[3 * i + j] = a[3 * j + i];
+    return t;
+  }
 };
 
 // R M R^T -- how a body-frame inertia tensor is expressed in the world frame.

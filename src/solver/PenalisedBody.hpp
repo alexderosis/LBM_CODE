@@ -203,6 +203,7 @@
 //     Anything with a signed distance function drops straight in.
 //==============================================================================
 #include "core/Types.hpp"
+#include "solver/RigidBody3D.hpp"
 #include "grid/Domain.hpp"
 
 namespace lbm {
@@ -288,6 +289,7 @@ struct Wedge {
   // either. One shared formula would cull the body to a single plane and the
   // reduction would silently return 1/nz of its mass.
   static constexpr bool three_d = false;
+  static constexpr bool six_dof = false;
   KOKKOS_INLINE_FUNCTION bool outside(Real rx, Real ry, Real, Real reach2) const {
     return rx * rx + ry * ry > reach2;
   }
@@ -339,6 +341,7 @@ struct Rect {
   // function separable and cheap. The point is taken into the body frame first,
   // so the shape turns with theta and the rounding turns with it.
   static constexpr bool three_d = false;      // a prism; see Wedge::outside
+  static constexpr bool six_dof = false;
   KOKKOS_INLINE_FUNCTION bool outside(Real rx, Real ry, Real, Real reach2) const {
     return rx * rx + ry * ry > reach2;
   }
@@ -386,6 +389,10 @@ struct Sphere {
   KOKKOS_INLINE_FUNCTION void set_angle(Real th) { theta = th; }
 
   static constexpr bool three_d = true;
+  // A sphere's chi is invariant under rotation, so its roll equation measures
+  // nothing: three translations are the whole of its dynamics and the 6-DOF
+  // path would be six unknowns for three answers.
+  static constexpr bool six_dof = false;
 
   KOKKOS_INLINE_FUNCTION Real reach() const { return R + Real(4) * smooth; }
 
@@ -398,6 +405,62 @@ struct Sphere {
     const Real dx = x - cx, dy = y - cy, dz = z - cz;
     const Real r = Kokkos::sqrt(dx * dx + dy * dy + dz * dz);
     return Real(0.5) * (Real(1) + Kokkos::tanh((R - r) / smooth));
+  }
+};
+
+//------------------------------------------------------------------------------
+// A BOX with a full orientation -- the first shape here that needs six degrees
+// of freedom rather than three translations and an inert angle.
+//
+// WHY IT NEEDS THEM AND THE SPHERE DID NOT. A sphere's chi is invariant under
+// rotation, so its roll equation measures nothing; a cube's is not. Released
+// corner-down it strikes on a vertex, and the reaction on that vertex is not
+// through the centre in ANY single plane -- so the response is a rotation about
+// an axis that is neither x, y nor z, and that axis MOVES as the body turns.
+// One angle cannot express it and neither can three.
+//
+// chi is the product of three tanh axis indicators in the BODY frame, which is
+// Rect's construction with a third factor: exact away from the edges, rounding
+// them slightly, and separable so it stays three transcendentals rather than a
+// distance-to-a-polyhedron. The rounding turns with the body because the point
+// is taken into the body frame first.
+//
+// The orientation is a quaternion for the state and its matrix cached beside
+// it, for the reason Rect caches cos and sin: chi is evaluated at every node of
+// the domain every step.
+//------------------------------------------------------------------------------
+struct Box {
+  Real cx = 0, cy = 0, cz = 0;      // centre
+  Real hx = 0, hy = 0, hz = 0;      // half extents, in the BODY frame
+  Real smooth = Real(1.5);
+  Quat q;                           // orientation, the state
+  Mat3 Rm;                          // its matrix, cached
+
+  static constexpr bool three_d = true;
+  static constexpr bool six_dof = true;
+
+  void set_orientation(const Quat& qq) { q = qq;  q.normalise();  Rm = q.matrix(); }
+  // Present so a Box satisfies the same interface as the prisms. theta is
+  // meaningless for a 3-D orientation and is deliberately not tracked: a caller
+  // that wants the pose should read q.
+  Real theta = 0;
+  KOKKOS_INLINE_FUNCTION void set_angle(Real) {}
+
+  KOKKOS_INLINE_FUNCTION Real reach() const {
+    return Kokkos::sqrt(hx * hx + hy * hy + hz * hz) + Real(4) * smooth;
+  }
+  KOKKOS_INLINE_FUNCTION bool outside(Real rx, Real ry, Real rz, Real reach2) const {
+    return rx * rx + ry * ry + rz * rz > reach2;
+  }
+  KOKKOS_INLINE_FUNCTION Real chi(Real x, Real y, Real z) const {
+    Real X, Y, Z;
+    Rm.tmul(x - cx, y - cy, z - cz, X, Y, Z);       // world -> body is R^T
+    const Real ax = (hx - Kokkos::fabs(X)) / smooth;
+    const Real ay = (hy - Kokkos::fabs(Y)) / smooth;
+    const Real az = (hz - Kokkos::fabs(Z)) / smooth;
+    return Real(0.125) * (Real(1) + Kokkos::tanh(ax))
+                       * (Real(1) + Kokkos::tanh(ay))
+                       * (Real(1) + Kokkos::tanh(az));
   }
 };
 
@@ -481,6 +544,13 @@ class PenalisedBody {
   //---- state, public so a driver can prescribe, clamp or read any of it -------
   Shape shape;
   Real vx = 0, vy = 0, vz = 0;     // centre-of-mass velocity
+  // THE SIX-DOF STATE, used only by a shape whose six_dof is true. The angular
+  // velocity is a VECTOR and the body's inertia is a tensor held in the BODY
+  // frame -- world-frame inertia changes as the body turns, so storing that
+  // would mean recomputing it from something, and the body frame is the
+  // something. See RigidBody3D.hpp.
+  Real wx = 0, wy = 0, wz = 0;     // angular velocity, world frame
+  Mat3 inertia_body;               // I_b in the body frame; rotated per step
   Real omega = 0;                  // angular velocity about z
 
   //---- properties -------------------------------------------------------------
@@ -536,6 +606,219 @@ class PenalisedBody {
 
   // Kept for callers that only want the area.
   Real penalised_area() const { return indicator_moments().area; }
+
+  //--------------------------------------------------------------------------
+  //  THE SIX-DOF PATH. Only instantiated for a shape with six_dof, because
+  //  members of a class template are instantiated on use -- so these bodies
+  //  may refer to Box's cz and Rm freely without a Rect user paying for it or
+  //  failing to compile.
+  //--------------------------------------------------------------------------
+
+  // Volume and the six products integral chi ri rj at the CURRENT pose, in the
+  // world frame, with rho = 1. Reduced into a BodySums6 so the existing reducer
+  // is reused; only m and the J entries are filled.
+  BodySums6 moments6() const {
+    const Domain d = dom_;
+    const Shape b = shape;
+    const Index hx = dom_.hx, hy = dom_.hy, hz = dom_.hz;
+    const Real reach2 = shape.reach() * shape.reach();
+    BodySums6 out;
+    Kokkos::parallel_reduce("penalised_moments6", Range(0, dom_.n_padded),
+      KOKKOS_LAMBDA(Index n, BodySums6& acc) {
+        Index px, py, pz; d.coords(n, px, py, pz);
+        const Real X = Real(px - hx), Y = Real(py - hy), Z = Real(pz - hz);
+        const Real rx = X - b.cx, ry = Y - b.cy, rz = Z - b.cz;
+        if (b.outside(rx, ry, rz, reach2)) return;
+        const Real c = b.chi(X, Y, Z);
+        if (c < Real(1e-6)) return;
+        acc.m += c;
+        acc.Jxx += c * rx * rx;  acc.Jyy += c * ry * ry;  acc.Jzz += c * rz * rz;
+        acc.Jxy += c * rx * ry;  acc.Jxz += c * rx * rz;  acc.Jyz += c * ry * rz;
+      }, Kokkos::Sum<BodySums6>(out));
+    Kokkos::fence();
+    return out;
+  }
+
+  // Mass and the BODY-frame inertia tensor of a body of uniform density, from
+  // those moments. Measured from chi rather than from the nominal box, for the
+  // reason the 2-D version gives: the smoothing makes the penalised body
+  // slightly larger than the nominal one and nominal values would bias both.
+  //
+  // The measurement is in the WORLD frame at the current pose, so it is rotated
+  // back: I_body = R^T I_world R. Getting that inverse the wrong way round
+  // leaves an inertia that is right only at the release orientation.
+  void set_uniform_density6(Real rho_b) {
+    BodySums6 q = moments6();
+    q.m *= rho_b;
+    q.Jxx *= rho_b;  q.Jyy *= rho_b;  q.Jzz *= rho_b;
+    q.Jxy *= rho_b;  q.Jxz *= rho_b;  q.Jyz *= rho_b;
+    mass = q.m;
+    const Mat3 R = shape.Rm;
+    inertia_body = rotate_tensor(R.transposed(), q.fluid_inertia());
+  }
+
+  Real penalised_volume() const { return moments6().m; }
+
+  template <class LiquidOf, class LbmOf>
+  BodySums6 probe6(LiquidOf density_of, LbmOf lbm_of) {
+    const Domain d = dom_;
+    const Shape b = shape;
+    const Real bvx = vx, bvy = vy, bvz = vz;
+    const Real bwx = wx, bwy = wy, bwz = wz;
+    auto ux = ux_, uy = uy_, uz = uz_;
+    auto fx = fx_, fy = fy_, fz = fz_;
+    const auto dens = density_of;
+    const auto ldens = lbm_of;
+    const Index hx = dom_.hx, hy = dom_.hy, hz = dom_.hz;
+    const Real reach2 = shape.reach() * shape.reach();
+
+    BodySums6 out;
+    Kokkos::parallel_reduce("penalised_body_probe6", Range(0, dom_.n_padded),
+      KOKKOS_LAMBDA(Index n, BodySums6& acc) {
+        Index px, py, pz; d.coords(n, px, py, pz);
+        const Real X = Real(px - hx), Y = Real(py - hy), Z = Real(pz - hz);
+        const Real rx = X - b.cx, ry = Y - b.cy, rz = Z - b.cz;
+        if (b.outside(rx, ry, rz, reach2)) return;
+        const Real c = b.chi(X, Y, Z);
+        if (c < Real(1e-6)) return;
+        const Real r = dens(n);
+        const Real rl = ldens(n);
+        const Real cr = c * r;
+        // Undo this body's own previous contribution to the stored velocity.
+        const Real inv = (rl > Real(1e-12)) ? Real(0.5) / rl : Real(0);
+        const Real usx = ux(n) - fx(n) * inv;
+        const Real usy = uy(n) - fy(n) * inv;
+        const Real usz = uz(n) - fz(n) * inv;
+        // The rigid field is now U + omega x r with omega a VECTOR, which is
+        // the whole difference from the 2-D probe.
+        const Real vrx = bvx + (bwy * rz - bwz * ry);
+        const Real vry = bvy + (bwz * rx - bwx * rz);
+        const Real vrz = bvz + (bwx * ry - bwy * rx);
+        const Real dx = usx - vrx, dy = usy - vry, dz = usz - vrz;
+        acc.m += cr;
+        acc.Sx += cr * rx;  acc.Sy += cr * ry;  acc.Sz += cr * rz;
+        acc.Jxx += cr * rx * rx;  acc.Jyy += cr * ry * ry;  acc.Jzz += cr * rz * rz;
+        acc.Jxy += cr * rx * ry;  acc.Jxz += cr * rx * rz;  acc.Jyz += cr * ry * rz;
+        acc.Px += cr * dx;  acc.Py += cr * dy;  acc.Pz += cr * dz;
+        acc.Lx += cr * (ry * dz - rz * dy);
+        acc.Ly += cr * (rz * dx - rx * dz);
+        acc.Lz += cr * (rx * dy - ry * dx);
+      }, Kokkos::Sum<BodySums6>(out));
+    Kokkos::fence();
+    return out;
+  }
+
+  template <class LiquidOf, class LbmOf>
+  void apply6(LiquidOf density_of, LbmOf lbm_of) {
+    const Domain d = dom_;
+    const Shape b = shape;
+    const Real bvx = vx, bvy = vy, bvz = vz;
+    const Real bwx = wx, bwy = wy, bwz = wz;
+    auto ux = ux_, uy = uy_, uz = uz_;
+    auto fx = fx_, fy = fy_, fz = fz_;
+    const auto dens = density_of;
+    const auto ldens = lbm_of;
+    const Index hx = dom_.hx, hy = dom_.hy, hz = dom_.hz;
+    const Real reach2 = shape.reach() * shape.reach();
+
+    Kokkos::parallel_for("penalised_body_apply6", Range(0, dom_.n_padded),
+      KOKKOS_LAMBDA(Index n) {
+        Index px, py, pz; d.coords(n, px, py, pz);
+        const Real X = Real(px - hx), Y = Real(py - hy), Z = Real(pz - hz);
+        const Real rx = X - b.cx, ry = Y - b.cy, rz = Z - b.cz;
+        if (b.outside(rx, ry, rz, reach2)) {
+          fx(n) = Real(0); fy(n) = Real(0); fz(n) = Real(0); return;
+        }
+        const Real c = b.chi(X, Y, Z);
+        if (c < Real(1e-6)) {
+          fx(n) = Real(0); fy(n) = Real(0); fz(n) = Real(0); return;
+        }
+        const Real r = dens(n);
+        const Real rl = ldens(n);
+        const Real inv = (rl > Real(1e-12)) ? Real(0.5) / rl : Real(0);
+        const Real usx = ux(n) - fx(n) * inv;
+        const Real usy = uy(n) - fy(n) * inv;
+        const Real usz = uz(n) - fz(n) * inv;
+        const Real vrx = bvx + (bwy * rz - bwz * ry);
+        const Real vry = bvy + (bwz * rx - bwx * rz);
+        const Real vrz = bvz + (bwx * ry - bwy * rx);
+        fx(n) = c * Real(2) * r * (vrx - usx);
+        fy(n) = c * Real(2) * r * (vry - usy);
+        fz(n) = c * Real(2) * r * (vrz - usz);
+      });
+    Kokkos::fence();
+  }
+
+  // The 2-D Reaction, with the force and the moment completed to vectors. Same
+  // closed forms, generalised: dw * (zhat x S) becomes dW x S and Iz * dw
+  // becomes I_f dW.
+  struct Reaction6 {
+    Real fx = 0, fy = 0, fz = 0;      // force the fluid exerts on the body
+    Real tx = 0, ty = 0, tz = 0;      // and its moment about the body centre
+    Real fluid_mass = 0;              // fluid standing in the penalised region
+    Real rx = 0, ry = 0, rz = 0;      // the hydrostatic couple -(S x g)
+  };
+
+  // One 6-DOF coupling step. Same contract as refresh(): AFTER the macroscopic
+  // pass and BEFORE the fluid steps.
+  template <class DensityOf>
+  Reaction6 refresh6(DensityOf dens) { return refresh6(dens, dens); }
+
+  template <class LiquidOf, class LbmOf>
+  Reaction6 refresh6(LiquidOf dens, LbmOf ldens) {
+    const BodySums6 q = probe6(dens, ldens);
+    Body6Properties p;
+    p.mass = mass;
+    // The body's tensor rotated into the world frame at the CURRENT pose. This
+    // is the line that makes it a 3-D body rather than three translations: a
+    // tumbling body's resistance to a torque depends on which way it is facing.
+    p.inertia_world = rotate_tensor(shape.Rm, inertia_body);
+    p.bx = bx;  p.by = by;  p.bz = bz;
+    p.free_translation = free_translation;
+    p.free_rotation = free_rotation;
+    Real dU[3], dW[3];
+    body6_solve(p, q, dU, dW);
+    if (free_translation) { vx += dU[0];  vy += dU[1];  vz += dU[2]; }
+    if (free_rotation)    { wx += dW[0];  wy += dW[1];  wz += dW[2]; }
+    apply6(dens, ldens);
+
+    // F = 2 dP - 2 (m_f dU + dW x S),  T = 2 dL - 2 (I_f dW + S x dU).
+    const Real S[3] = {q.Sx, q.Sy, q.Sz};
+    const Real WxS[3] = {dW[1] * S[2] - dW[2] * S[1],
+                         dW[2] * S[0] - dW[0] * S[2],
+                         dW[0] * S[1] - dW[1] * S[0]};
+    const Real SxU[3] = {S[1] * dU[2] - S[2] * dU[1],
+                         S[2] * dU[0] - S[0] * dU[2],
+                         S[0] * dU[1] - S[1] * dU[0]};
+    const Mat3 If = q.fluid_inertia();
+    Real IfW[3];
+    for (int i = 0; i < 3; ++i)
+      IfW[i] = If(i, 0) * dW[0] + If(i, 1) * dW[1] + If(i, 2) * dW[2];
+    const Real g[3] = {bx, by, bz};
+    Reaction6 out;
+    out.fx = Real(2) * q.Px - Real(2) * (q.m * dU[0] + WxS[0]);
+    out.fy = Real(2) * q.Py - Real(2) * (q.m * dU[1] + WxS[1]);
+    out.fz = Real(2) * q.Pz - Real(2) * (q.m * dU[2] + WxS[2]);
+    out.tx = Real(2) * q.Lx - Real(2) * (IfW[0] + SxU[0]);
+    out.ty = Real(2) * q.Ly - Real(2) * (IfW[1] + SxU[1]);
+    out.tz = Real(2) * q.Lz - Real(2) * (IfW[2] + SxU[2]);
+    out.fluid_mass = q.m;
+    out.rx = -(S[1] * g[2] - S[2] * g[1]);
+    out.ry = -(S[2] * g[0] - S[0] * g[2]);
+    out.rz = -(S[0] * g[1] - S[1] * g[0]);
+    return out;
+  }
+
+  // Advance the pose: the centre by Euler, the orientation by one quaternion
+  // step. dt = 1 because the fluid step is the timescale.
+  void advance6() {
+    shape.cx += vx;
+    shape.cy += vy;
+    shape.cz += vz;
+    Quat q = shape.q;
+    q.integrate(wx, wy, wz, Real(1));
+    shape.set_orientation(q);
+  }
 
   //----------------------------------------------------------------------------
   // One coupling step: measure, solve Newton for the new body state, write the

@@ -8162,12 +8162,26 @@ the fitted rate is blamed on the scheme.
   orders of magnitude. The choice is a trade, and the measurement covers one
   case --- a static droplet --- not a flow.
 
-\item \textbf{The rigid body is two-dimensional.} \code{PenalisedBody} carries
-  one angle and one angular velocity about $z$, and says so in the compiler's
-  voice as well as in prose: instantiated on a 3D lattice it would silently
-  model an infinite prism. A three-dimensional body is a $6\times6$ system with
-  a rotating inertia tensor and a quaternion, and does not exist here. The fluid
-  side would not change.
+\item \textbf{The rigid body's two paths are separate, and the 6-DOF one is
+  demonstrated rather than validated.} The planar path carries one angle and one
+  angular velocity about $z$; the six-degree-of-freedom path
+  (\code{src/solver/RigidBody3D.hpp}) carries a quaternion and an inertia tensor
+  held in the body frame and rotated out each step. They are chosen by the
+  shape: \code{Rect} and \code{Wedge} declare \code{six\_dof = false} and use the
+  validated $3\times3$, \code{Box} and \code{Sphere} are three-dimensional, and
+  mixing a shape with the wrong solve is a compile error rather than a wrong
+  answer. \code{tests/test\_rigid3d} pins the $6\times6$ against that $3\times3$
+  on a planar problem to $1.7\times10^{-18}$, so the generalisation carries the
+  older code's validation --- but only for the planar limb. What the new three
+  degrees of freedom do in a flow has \emph{no} closed-form check in this tree:
+  \code{demonstrator/cube\_entry} is a demonstrator, and the honest bound on it
+  is its own symmetry run. A cube released exactly corner-down has a three-fold
+  symmetry axis, which cannot be aligned with D3Q27's four-fold axis about $y$,
+  so the discrete torque is not zero: at $D=12$ it turns the body diagonal by
+  $0.095^\circ$ over $t/t_0=6$, against a $0.44^\circ$ response to a
+  deliberate $5^\circ$ tilt. The response is resolved by a factor of about
+  $4.5$ and no more, so the \emph{sign} of that response is a result and its
+  magnitude is not.
 
 \item \textbf{The body is of uniform density.} Its centre of mass is taken to be
   the centre of the rectangle, which is what lets its own weight drop out of the

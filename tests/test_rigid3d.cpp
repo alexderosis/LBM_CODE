@@ -238,6 +238,68 @@ int main(int argc, char** argv) {
       check::near(ang, w * Real(N), Real(2e-4),
                   "angle after 100 steps of omega = 0.01 (Euler, O(w dt)^2)");
     }
+
+    //-------------------------------------------------------------------------
+    std::printf("\n7. THE BOX, AND THE DIRECTION OF THE INERTIA ROTATION\n\n");
+    // The one line in the 6-DOF path that is wrong silently. set_uniform_density6
+    // measures J in the WORLD frame at whatever pose the body is in, then stores
+    // I in the BODY frame; refresh6 rotates it back out each step. Get either
+    // inverse the wrong way round and the inertia is still symmetric, still
+    // positive definite, still gives a solvable system -- it is simply the
+    // inertia of a body facing some other direction. Nothing crashes and the
+    // tumble is merely wrong.
+    //
+    // A CUBE CANNOT CATCH THIS: a uniform cube's inertia tensor is isotropic,
+    // so R I R^T = I for every R and both directions agree. The test box is
+    // deliberately 6 x 6 x 20, whose I_zz is far from its I_xx.
+    {
+      Domain d(48, 48, 48, true, true, true);
+      PenalisedBody<D3Q27, Box> b(d);
+      b.shape.cx = 24;  b.shape.cy = 24;  b.shape.cz = 24;
+      b.shape.hx = 3;   b.shape.hy = 3;   b.shape.hz = 10;
+      b.shape.smooth = Real(1.0);
+      b.shape.set_orientation(Quat{});
+      b.set_uniform_density6(Real(1));
+
+      // Mass first, against the nominal volume. chi is smoothed so the
+      // penalised box is a little larger than 6 x 6 x 20 = 720; the tolerance
+      // is that, and it is one-sided in the direction the smoothing goes.
+      const Real vol = Real(6) * Real(6) * Real(20);
+      check::near(b.mass / vol, Real(1), Real(0.06), "measured mass / nominal");
+
+      const Mat3 I0 = b.inertia_body;
+      // A slab is not isotropic: I_zz is about (hx^2+hy^2)/(hx^2+hz^2) of I_xx,
+      // and if it were not the test would prove nothing.
+      check::ok(I0(2, 2) < Real(0.4) * I0(0, 0),
+                   "the test box really is anisotropic (Izz << Ixx)");
+      check::near(I0(0, 1) / I0(0, 0), Real(0), Real(2e-3),
+                  "axis-aligned box has no product of inertia");
+
+      // Now re-measure at a tilted pose. The BODY-frame tensor is a property of
+      // the body, so it must come back the same -- to lattice discretisation,
+      // not to round-off, because rotating the box changes which cells chi
+      // covers. With the inverse the wrong way round the two differ by tens of
+      // per cent.
+      const Real ang = Real(0.6154797086703873);   // atan(1/sqrt(2)), corner-down
+      b.shape.set_orientation(Quat::from_axis_angle(Real(1), Real(0), Real(0), ang));
+      b.set_uniform_density6(Real(1));
+      const Mat3 I1 = b.inertia_body;
+      Real worst = 0;
+      for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+          worst = Kokkos::fmax(worst, Kokkos::fabs(I1(i, j) - I0(i, j)) / I0(0, 0));
+      std::printf("   I_body at 0 deg vs %.1f deg: worst entry differs by %.3f %%\n",
+                  ang * Real(57.29577951308232), Real(100) * worst);
+      check::ok(worst < Real(0.03),
+                   "body-frame inertia is pose independent (R^T J R, not R J R^T)");
+
+      // And the world-frame tensor at that pose is NOT the body one -- if it
+      // were, rotate_tensor would be doing nothing and the check above would
+      // pass for the wrong reason.
+      const Mat3 Iw = rotate_tensor(b.shape.Rm, b.inertia_body);
+      check::ok(Kokkos::fabs(Iw(1, 2)) > Real(0.05) * I0(0, 0),
+                   "the tilted world-frame tensor has a real off-diagonal");
+    }
   }
   const int rc = check::report("rigid3d");
   Kokkos::finalize();
