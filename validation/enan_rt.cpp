@@ -155,6 +155,34 @@ bool arg_flag(int argc, char** argv, const char* k) {
 }  // namespace
 
 //------------------------------------------------------------------------------
+// The order parameter as raw float32: three int32 dimensions, then nx*ny*nz of
+// it with x fastest. ONE writer for both products -- the seven tabulated
+// instants and the dense -anim sequence -- so that a reader which works on one
+// works on the other, and a change to the layout cannot reach only half of
+// them. doc/fig/*.bin is gitignored: a snapshot is regenerable output, not
+// tracked reference data.
+template <class HostPhi>
+static void write_phi(const char* path, const HostPhi& hp, const Domain& d,
+                      Index nx, Index ny, Index nz, bool vol) {
+  std::FILE* bf = std::fopen(path, "wb");
+  if (!bf) return;
+  const std::int32_t dims[3] = {std::int32_t(nx), std::int32_t(ny),
+                                std::int32_t(vol ? nz : 1)};
+  std::fwrite(dims, sizeof(std::int32_t), 3, bf);
+  const Index z0 = vol ? Index(0) : (nz > 1 ? nz / 2 : Index(0));
+  const Index z1 = vol ? nz : (z0 + 1);
+  std::vector<float> buf(std::size_t(nx) * std::size_t(ny));
+  for (Index zz = z0; zz < z1; ++zz) {
+    for (Index yy = 0; yy < ny; ++yy)
+      for (Index xx = 0; xx < nx; ++xx)
+        buf[std::size_t(yy) * std::size_t(nx) + std::size_t(xx)] =
+            float(hp(d.id(xx, yy, zz)));
+    std::fwrite(buf.data(), sizeof(float), buf.size(), bf);
+  }
+  std::fclose(bf);
+}
+
+//------------------------------------------------------------------------------
 struct RT {
   std::vector<double> t_star, y_spike, y_bubble, umax;
   double nu, sigma, M, tau, rho_h, t_ref;
@@ -164,7 +192,8 @@ struct RT {
 
 static RT run(Index W, bool three_d, double At, double Re, double Ca, double Pe,
               double U, double iw, double tmax, const char* dump,
-              const char* field, bool volume) {
+              const char* field, bool volume, int anim,
+              const char* animdir) {
   const Index nx = W, ny = 4 * W, nz = three_d ? W : Index(1);
   const double g     = U * U / double(W);           // so sqrt(gW) = U
   const double nu    = double(W) * U / Re;
@@ -249,6 +278,13 @@ static RT run(Index W, bool three_d, double At, double Re, double Ca, double Pe,
   r.tau = nu * 3.0 + 0.5;
 
   // Sampled at the paper's own instants, so the table is a table of theirs.
+  // The -anim sequence below is deliberately NOT sampled there: the seven
+  // instants are where their table is, which is not where a smooth movie's
+  // frames are.
+  const std::size_t anim_every =
+      (anim > 1) ? std::max<std::size_t>(1, nsteps / std::size_t(anim - 1))
+                 : nsteps + 1;
+  std::size_t nframe = 0;
   std::size_t next = 0;
   for (std::size_t step = 0; step <= nsteps; ++step) {
     if (next < 7 && step >= std::size_t(T_STAR[next] * t_ref)) {
@@ -306,23 +342,7 @@ static RT run(Index W, bool three_d, double At, double Re, double Ca, double Pe,
         // is opt-in and why doc/fig/*.bin is gitignored.
         char fp[256];
         std::snprintf(fp, sizeof fp, "doc/fig/rtphi_%s_t%d.bin", field, int(next));
-        if (std::FILE* bf = std::fopen(fp, "wb")) {
-          const bool vol = three_d && volume;
-          const std::int32_t dims[3] = {std::int32_t(nx), std::int32_t(ny),
-                                        std::int32_t(vol ? nz : 1)};
-          std::fwrite(dims, sizeof(std::int32_t), 3, bf);
-          const Index z0 = vol ? 0 : (three_d ? nz / 2 : 0);
-          const Index z1 = vol ? nz : (z0 + 1);
-          std::vector<float> buf(std::size_t(nx) * std::size_t(ny));
-          for (Index zz = z0; zz < z1; ++zz) {
-            for (Index yy = 0; yy < ny; ++yy)
-              for (Index xx = 0; xx < nx; ++xx)
-                buf[std::size_t(yy) * std::size_t(nx) + std::size_t(xx)] =
-                    float(hp(d.id(xx, yy, zz)));
-            std::fwrite(buf.data(), sizeof(float), buf.size(), bf);
-          }
-          std::fclose(bf);
-        }
+        write_phi(fp, hp, d, nx, ny, nz, three_d && volume);
       }
       r.t_star.push_back(T_STAR[next]);
       r.y_spike.push_back(double(spike) / double(W));
@@ -336,6 +356,17 @@ static RT run(Index W, bool three_d, double At, double Re, double Ca, double Pe,
       std::fflush(stdout);
       ++next;
       if (!r.finite) break;
+    }
+    // Opt-in and written outside doc/fig by default: 46 volumes of a
+    // 64 x 256 x 64 grid is 190 MB, which is not something to drop into the
+    // source tree because a flag was left on.
+    if (anim > 1 && nframe < std::size_t(anim) && step % anim_every == 0) {
+      pf.compute_field();
+      auto ha = Kokkos::create_mirror_view_and_copy(HostSpace{}, pf.phi());
+      char fp[256];
+      std::snprintf(fp, sizeof fp, "%s_%04zu.bin", animdir, nframe);
+      write_phi(fp, ha, d, nx, ny, nz, three_d);
+      ++nframe;
     }
     fl.step(true);
     pf.refresh();
@@ -379,6 +410,10 @@ int main(int argc, char** argv) {
   // Order-parameter snapshots for the figures, into doc/fig as raw float32.
   const bool   fieldflag = arg_flag(argc, argv, "-field");
   const bool   volflag   = arg_flag(argc, argv, "-vol");   // full 3-D volume
+  // A dense volume sequence for an animation. -anim is a FRAME COUNT, not a
+  // stride, so the same number of frames comes back whatever -tmax is.
+  const int    anim      = int(arg_num(argc, argv, "-anim", 0.0));
+  const char*  animdir   = arg_str(argc, argv, "-animdir", "doc/fig/rtanim");
 
   Kokkos::initialize(argc, argv);
   int status = 0;
@@ -399,7 +434,7 @@ int main(int argc, char** argv) {
     std::snprintf(tag, sizeof tag, "rt%s_w%d_re%.0f_iw%g",
                   td ? "3d" : "2d", int(W), Re, iw);
     const RT r = run(W, td, At, Re, Ca, Pe, U, iw, tmax, dump ? tag : "",
-                     fieldflag ? tag : "", volflag);
+                     fieldflag ? tag : "", volflag, anim, animdir);
 
     std::printf("\n  nu = %.4e   tau = %.5f   sigma = %.4e   M = %.4e   "
                 "rho_H = %.2f\n", r.nu, r.tau, r.sigma, r.M, r.rho_h);

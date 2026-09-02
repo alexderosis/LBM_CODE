@@ -40,6 +40,32 @@ endif()
 set(LBM_GPU_ARCH "75" CACHE STRING "CUDA architecture, e.g. 75 for a T4")
 option(LBM_DOUBLE "Build in FP64 (slow on consumer cards)" OFF)
 option(LBM_PTXAS_VERBOSE "Report registers and spills per kernel" OFF)
+# OFF, AND THAT IS A MEASUREMENT RATHER THAN A PREFERENCE. --use_fast_math was
+# applied unconditionally here until 2026-09-02, when the 3-D Rayleigh-Taylor
+# case (src/rti3d.cu) was found to leave the parent's answer at t/t0 >= 2:
+# 1.4219 against 1.4375, then 1.1719 against 1.2031, then 0.8750 against 0.9219.
+# The first four instants agreed to every digit, so it reads as a late
+# instability rather than a flag.
+#
+# It is not precision. The parent built in FP32 (-DLBM_PRECISION=float) tracks
+# its own FP64 to every digit through t/t0 = 2, so dropping to single precision
+# does not move this case at all; the difference was here.
+#
+# --use_fast_math is not a rounding mode. It implies --prec-div=false,
+# --prec-sqrt=false and --ftz=true, and the conservative Allen-Cahn source in
+# include/lbm/phasefield.cuh runs BOTH an approximate sqrt and an approximate
+# division at every node of every step:
+#
+#     A = (4/W) phi (1 - phi) G / |G|
+#
+# That is the term which holds the interface at its prescribed width, so the
+# error is a systematic perturbation of the interface NORMAL, not noise in a
+# diagnostic -- and Rayleigh-Taylor amplifies it exponentially.
+#
+# Switch it on to buy back the speed where the physics does not go through a
+# normalised gradient (single-phase, thermal, MHD). Do not switch it on for a
+# phase-field or colour-gradient run and then compare against the parent.
+option(LBM_FAST_MATH "nvcc --use_fast_math: approximate div/sqrt, FTZ" OFF)
 
 if(NOT LBM_HOST_ONLY)
   set(CMAKE_CUDA_ARCHITECTURES ${LBM_GPU_ARCH})
@@ -50,8 +76,10 @@ target_include_directories(lbm_cuda_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/i
 if(LBM_DOUBLE)
   target_compile_definitions(lbm_cuda_core INTERFACE LBM_DOUBLE)
 endif()
-target_compile_options(lbm_cuda_core INTERFACE
-  $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
+if(LBM_FAST_MATH)
+  target_compile_options(lbm_cuda_core INTERFACE
+    $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
+endif()
 if(LBM_PTXAS_VERBOSE)
   # Registers per thread and spill bytes per kernel. Worth switching on whenever
   # a kernel is slower than its arithmetic explains: spilling to local memory is
