@@ -25,6 +25,7 @@
 //==============================================================================
 #include "body.cuh"
 #include "colour.cuh"
+#include "freesurface.cuh"
 #include "magnetic.cuh"
 #include "phasefield.cuh"
 #include "scalar.cuh"
@@ -844,6 +845,125 @@ class Body {
   long N_;
   std::vector<Real> fx_, fy_, fz_;
   const Real *ux_ = nullptr, *uy_ = nullptr;
+};
+
+//==============================================================================
+//  Free surface -- host reference.
+//
+//  Same five passes in the same order, serially. The serial loop supplies for
+//  free the fences the device gets from kernel boundaries, and every pass here
+//  is a gather, so running them in a plain loop is not an approximation to what
+//  the kernels do -- it is the same computation.
+//
+//  This is where a free-surface case should be built first. The failure mode
+//  that matters is a mass ledger that does not balance, and that is visible at
+//  32x32 in a second.
+//==============================================================================
+class FreeSurface {
+ public:
+  FreeSurface(int nx, int ny, int nz, Real nu)
+      : nx_(nx), ny_(ny), nz_(nz), omega_(omega_from_viscosity(nu)) {
+    N_ = long(nx) * ny * nz;
+    fa_.assign(std::size_t(27 * N_), Real(0));
+    fb_.assign(std::size_t(27 * N_), Real(0));
+    fld_.assign(std::size_t(7 * N_), Real(0));
+    flg_.assign(std::size_t(4 * N_), std::uint8_t(FsGas));
+  }
+
+  Real rho_G = Real(1);
+  Real omega_bulk = Real(1);
+  Real fill_offset = Real(1e-3);
+  bool drop_detached = true;
+
+  void set_gravity(Real ax, Real ay, Real az = Real(0)) { gx_ = ax; gy_ = ay; gz_ = az; }
+
+  void set_geometry(const std::vector<std::uint8_t>& flags) {
+    for (long n = 0; n < N_; ++n) flg_[std::size_t(n)] = flags[std::size_t(n)];
+  }
+
+  template <class Init>
+  void initialise_with(Init init) {
+    const FsParams p = params();
+    for (long n = 0; n < N_; ++n) fs_init_node(p, N_, n, init);
+    t_ = 0;
+    close_interface();
+  }
+
+  void step() {
+    const FsParams p = params();
+    for (long n = 0; n < N_; ++n) fs_stream_collide_node(p, N_, n);
+    for (long n = 0; n < N_; ++n) fs_mass_exchange_node(p, N_, n);
+    for (long n = 0; n < N_; ++n) fs_classify_node(p, n);
+    close_interface();
+    fa_.swap(fb_);
+    ++t_;
+  }
+
+  void field_to_host(const Real* src, std::vector<Real>& out) {
+    out.assign(src, src + N_);
+  }
+  void flags_to_host(std::vector<std::uint8_t>& out) {
+    out.assign(flg_.begin(), flg_.begin() + N_);
+  }
+
+  // The one property that can be silently lost. Summed in double even in an
+  // FP32 build; see the banner.
+  double total_mass() const {
+    double s = 0;
+    for (long n = 0; n < N_; ++n) s += double(fld_[std::size_t(n)]);
+    return s;
+  }
+
+  const Real* mass_device() const { return &fld_[0]; }
+  const Real* eps_device()  const { return &fld_[std::size_t(N_)]; }
+  const Real* rho_device()  const { return &fld_[std::size_t(3 * N_)]; }
+  const Real* ux_device()   const { return &fld_[std::size_t(4 * N_)]; }
+  const Real* uy_device()   const { return &fld_[std::size_t(5 * N_)]; }
+  const Real* uz_device()   const { return &fld_[std::size_t(6 * N_)]; }
+  std::size_t timestep() const { return t_; }
+  long nodes() const { return N_; }
+
+ private:
+  void close_interface() {
+    const FsParams p = params();
+    for (long n = 0; n < N_; ++n) fs_promote_node(p, n);
+    for (long n = 0; n < N_; ++n) fs_settle_node(p, N_, n);
+    for (long n = 0; n < N_; ++n) {
+      flg_[std::size_t(n)] = flg_[std::size_t(2 * N_ + n)];
+      flg_[std::size_t(N_ + n)] = flg_[std::size_t(2 * N_ + n)];
+    }
+  }
+
+  FsParams params() {
+    FsParams p;
+    p.src = fa_.data();  p.dst = fb_.data();
+    p.flags  = &flg_[0];
+    p.newf   = &flg_[std::size_t(N_)];
+    p.fin    = &flg_[std::size_t(2 * N_)];
+    p.reinit = &flg_[std::size_t(3 * N_)];
+    p.mass   = &fld_[0];
+    p.eps    = &fld_[std::size_t(N_)];
+    p.excess = &fld_[std::size_t(2 * N_)];
+    p.rho    = &fld_[std::size_t(3 * N_)];
+    p.ux     = &fld_[std::size_t(4 * N_)];
+    p.uy     = &fld_[std::size_t(5 * N_)];
+    p.uz     = &fld_[std::size_t(6 * N_)];
+    p.nx = nx_; p.ny = ny_; p.nz = nz_;
+    p.omega = omega_;  p.omega_bulk = omega_bulk;
+    p.rho_G = rho_G;
+    p.gx = gx_; p.gy = gy_; p.gz = gz_;
+    p.fill_offset = fill_offset;
+    p.drop_detached = drop_detached;
+    return p;
+  }
+
+  int nx_, ny_, nz_;
+  long N_;
+  Real omega_;
+  Real gx_ = 0, gy_ = 0, gz_ = 0;
+  std::vector<Real> fa_, fb_, fld_;
+  std::vector<std::uint8_t> flg_;
+  std::size_t t_ = 0;
 };
 
 //------------------------------------------------------------------------------

@@ -117,10 +117,14 @@ endif()
 #   host_body     the penalised rigid body: the indicator's apex bias, the two
 #                 mass ratios Uhlmann's arrangement cannot express, the reaction
 #                 against -sum F, and a body dragging a fluid.
+#   host_freesurface  the free surface, in the order of what can go silently
+#                 wrong: the mass ledger, hydrostatic equilibrium, the
+#                 Fluid-never-touches-Gas invariant, and a collapsing column
+#                 that exercises all three through several hundred conversions.
 #
 # Run both before trusting anything the device produces.
 #-------------------------------------------------------------------------------
-foreach(t host_check host_physics host_colour host_phasefield host_body)
+foreach(t host_check host_physics host_colour host_phasefield host_body host_freesurface)
   add_executable(${t} test/${t}.cpp)
   target_link_libraries(${t} PRIVATE lbm_cuda_core)
   set_source_files_properties(test/${t}.cpp PROPERTIES LANGUAGE CXX)
@@ -132,3 +136,4 @@ add_test(NAME host_physics COMMAND host_physics)
 add_test(NAME host_colour  COMMAND host_colour)
 add_test(NAME host_phasefield COMMAND host_phasefield)
 add_test(NAME host_body   COMMAND host_body)
+add_test(NAME host_freesurface COMMAND host_freesurface)

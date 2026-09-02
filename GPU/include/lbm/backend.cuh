@@ -28,6 +28,7 @@
 #if defined(__CUDACC__)
   #include "body.cuh"
   #include "colour.cuh"
+  #include "freesurface.cuh"
   #include "magnetic.cuh"
   #include "phasefield.cuh"
   #include "scalar.cuh"
@@ -47,6 +48,7 @@
     // backend::Body<> for a rectangle and backend::Body<lbm::Wedge> for a wedge.
     template <class Shape = lbm::Rect>
     using Body = lbm::PenalisedBody<Shape>;
+    using FreeSurface = lbm::FreeSurfaceSolver;
     inline constexpr bool on_device = true;
 
     // Kernel launches are asynchronous. Without this either side of a timed
@@ -100,6 +102,7 @@
     using PhaseField   = PhaseFieldOn<lbm::DefaultPhaseLattice>;
     template <class Shape = lbm::Rect>
     using Body = lbm::host::Body<Shape>;
+    using FreeSurface = lbm::host::FreeSurface;
     inline constexpr bool on_device = false;
 
     inline void sync() {}                  // the host loop is already ordered
