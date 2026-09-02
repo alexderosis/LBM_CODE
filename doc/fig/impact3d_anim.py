@@ -42,8 +42,17 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from skimage import measure
 
-WATER = "#7a3b52"      # the plum the 2-D renders use for phi = 1
-BODY = "#e08a2e"       # the amber the 2-D renders use for the solid
+# A DARK GROUND, AND THAT IS NOT DECORATION. The water is drawn translucent
+# (see below on why it has to be), and translucency desaturates it toward
+# whatever lies behind: on white, a plum at alpha 0.4 comes out pink and an
+# amber body comes out muddy brown. Against near-black the same alpha reads as
+# glass, and the cavity's curvature is legible because the shading has somewhere
+# dark to fall off to. The 2-D renders keep the plum-on-white palette, which is
+# right there -- they are opaque.
+GROUND = "#12161c"     # near-black, slightly blue
+WATER = "#5b8fb9"      # steel blue
+BODY = "#f0e3c8"       # ivory, the one value that stays clear of the water
+INK = "#c9d3de"        # labels, light enough to read on the ground
 
 
 def load_volume(path):
@@ -73,7 +82,16 @@ def load_body(prefix):
 
 
 def sphere_mesh(cx, cy, cz, R, n=26):
-    """A parametric sphere as a quad mesh, in the plot's (x, z, y) axes."""
+    """A parametric sphere as a quad mesh, returned in PLOT order (x, z, y).
+
+    The arguments are in DOMAIN order -- cy is the height, along gravity -- and
+    the return is in plot order, because the 3-D axes here put the domain's y on
+    the vertical. Those two orders differing is exactly the trap: calling this
+    as (cx, cz, cy, R) puts the body's height on the z axis and its z on the
+    height, and the two are numerically close enough on a loose crop that the
+    sphere still looks roughly right. It took a tighter crop, where the two
+    differ by 17 cells, for the sphere to be visibly outside its own cavity.
+    """
     u = np.linspace(0, 2 * np.pi, n)
     v = np.linspace(0, np.pi, n // 2 + 1)
     xs = cx + R * np.outer(np.cos(u), np.sin(v))
@@ -98,11 +116,21 @@ def main():
     tmp = os.path.join(os.path.dirname(os.path.abspath(out)) or ".", "_i3dframes")
     os.makedirs(tmp, exist_ok=True)
 
-    # One crop for every frame, from the first volume's shape. See the docstring
-    # on why this is fixed rather than tracking the body.
+    # ONE CROP FOR EVERY FRAME, sized from the body's whole trajectory rather
+    # than as a fixed fraction of the domain. A quarter-to-three-quarters band
+    # left a third of the frame as undisturbed water below and still air above;
+    # taking the travel plus a couple of radii of margin fills the picture
+    # without ever clipping the body or the crown. Still FIXED across frames --
+    # a crop that tracked the body would make a sinking sphere look stationary.
     v0 = load_volume(paths[0])
     nz0, ny0, nx0 = v0.shape
-    ylo, yhi = ny0 // 4, (3 * ny0) // 4
+    if body:
+        cys = [p_[1] for p_ in body.values()]
+        rr = max(p_[3] for p_ in body.values())
+        ylo = int(max(0, min(cys) - 2.0 * rr))
+        yhi = int(min(ny0, max(cys) + 2.5 * rr))
+    else:
+        ylo, yhi = ny0 // 4, (3 * ny0) // 4
 
     for k, p in enumerate(paths):
         v = load_volume(p)
@@ -118,8 +146,9 @@ def main():
         # half is z < cz, so that is the half to remove.
         sub = np.ascontiguousarray(v[zcut:, ylo:yhi, :])
 
-        fig = plt.figure(figsize=(5.2, 5.6), dpi=115)
+        fig = plt.figure(figsize=(5.2, 5.6), dpi=115, facecolor=GROUND)
         ax = fig.add_subplot(111, projection="3d")
+        ax.set_facecolor(GROUND)
         try:
             verts, faces, _, _ = measure.marching_cubes(sub, level=0.5)
             verts[:, 0] += zcut          # the slice started at zcut
@@ -137,28 +166,30 @@ def main():
 
         if pose:
             cx, cy, cz, R = pose
-            xs, zs, ys = sphere_mesh(cx, cz, cy - ylo, R)
+            xs, zs, ys = sphere_mesh(cx, cy - ylo, cz, R)
             ax.plot_surface(xs, zs, ys, color=BODY, shade=True,
                             linewidth=0, antialiased=False)
 
         ax.set_xlim(0, nx)
         ax.set_ylim(0, nz)
         ax.set_zlim(0, yhi - ylo)
-        ax.set_box_aspect((1, 1, (yhi - ylo) / float(nx)))
+        # zoom, because a 3-D axes leaves a wide margin by default and the
+        # subject was occupying about a third of the frame.
+        ax.set_box_aspect((1, 1, (yhi - ylo) / float(nx)), zoom=1.45)
         # 24 rather than 16: at a shallower angle the free surface is nearly
         # edge-on and the cavity it makes reads as a line rather than a bowl.
         ax.view_init(elev=24, azim=-62)
         ax.set_axis_off()
         fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
         fig.text(0.5, 0.985, "$t/t_0 = %.2f$" % (k * dt), ha="center",
-                 va="top", fontsize=12)
+                 va="top", fontsize=12, color=INK)
         fig.text(0.015, 0.985, r"$g \downarrow$", ha="left", va="top",
-                 fontsize=10, color="#666666")
+                 fontsize=10, color="#7c8896")
         fig.text(0.5, 0.015, "water cut at the body's centre plane; "
                  "sphere drawn from its pose", ha="center", fontsize=7,
-                 color="#777777")
+                 color="#6b7684")
         fig.savefig(os.path.join(tmp, "f%04d.png" % k), dpi=115,
-                    facecolor="white")
+                    facecolor=GROUND)
         plt.close(fig)
         if (k + 1) % 8 == 0 or k + 1 == len(paths):
             print("  rendered %d/%d" % (k + 1, len(paths)), flush=True)
