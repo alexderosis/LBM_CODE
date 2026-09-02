@@ -110,13 +110,17 @@ endif()
 #                 exact partition -- and then a real droplet driven through all
 #                 three passes, which is what actually exercises Esoteric Pull.
 #   host_phasefield  the conservative Allen-Cahn field and the pressure-based
-#                 fluid: the tanh identity the whole model rests on, and a flat
+#                 fluid: the tanh identity the whole model rests on, a flat
 #                 interface run 600 steps to show it neither spreads nor
-#                 sharpens. Seconds.
+#                 sharpens, and the central-moment operators on D3Q27 -- the
+#                 basis trap pinned in both directions. Seconds.
+#   host_body     the penalised rigid body: the indicator's apex bias, the two
+#                 mass ratios Uhlmann's arrangement cannot express, the reaction
+#                 against -sum F, and a body dragging a fluid.
 #
 # Run both before trusting anything the device produces.
 #-------------------------------------------------------------------------------
-foreach(t host_check host_physics host_colour host_phasefield)
+foreach(t host_check host_physics host_colour host_phasefield host_body)
   add_executable(${t} test/${t}.cpp)
   target_link_libraries(${t} PRIVATE lbm_cuda_core)
   set_source_files_properties(test/${t}.cpp PROPERTIES LANGUAGE CXX)
@@ -127,3 +131,4 @@ add_test(NAME host_check   COMMAND host_check)
 add_test(NAME host_physics COMMAND host_physics)
 add_test(NAME host_colour  COMMAND host_colour)
 add_test(NAME host_phasefield COMMAND host_phasefield)
+add_test(NAME host_body   COMMAND host_body)

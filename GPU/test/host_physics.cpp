@@ -185,37 +185,41 @@ static void poiseuille(Op op, const char* name, double tol_fp64, double tol_fp32
 //  bounce-back puts it at exactly 0.5, between the last fluid node at y = 1 and
 //  the solid at y = 0.
 //
-//  MEASURED, H = 16, u_max = 0.002, 200 000 steps (converged; the drift over the
-//  last 140 000 is 7e-5 at the stiffest point):
+//  MEASURED IN FP64, H = 16, u_max = 0.002, 200 000 steps:
 //
 //      nu       tau      BGK y0      TRT y0 (Lambda = 3/16)
-//      0.005    0.515     0.5249      0.5008
-//      0.02     0.56      0.5156      0.5018
-//      0.1667   1.00      0.5052      0.5105
-//      0.5      2.00      0.3605      0.5315
-//      1.5      5.00     -0.9471      0.5943
+//      0.005    0.515     0.5156      0.500000
+//      0.02     0.56      0.5153      0.500000
+//      0.1667   1.00      0.4948      0.500000
+//      0.5      2.00      0.3299      0.500000
+//      1.5      5.00     -1.0263      0.500000
 //
-//  Read the last row. At tau = 5 BGK places its wall almost a lattice and a half
-//  OUTSIDE the solid node -- the effective channel is nearly three cells wider
-//  than the geometry, so a Reynolds number computed from H is wrong by 18% and
-//  nothing in the run says so. TRT is 0.094 out at the same point and bounded
-//  everywhere. At tau = 1, as predicted, BGK is marginally the better of the two.
+//  TRT at 3/16 is EXACT, to every digit FP64 carries, at every viscosity from
+//  tau = 0.515 to tau = 5. That is the theoretical result and it is worth
+//  seeing it come out clean rather than approximately. BGK is not: at tau = 5
+//  it places its wall a lattice OUTSIDE the solid node, so the effective channel
+//  is three cells wider than the geometry and a Reynolds number computed from H
+//  is 18% wrong with nothing in the run to say so.
 //
-//  TRT AT 3/16 IS NOT EXACT HERE, and the honest reading of the third column is
-//  that the residual grows with tau rather than vanishing. It is not a Mach
-//  effect: dropping u_max by a factor of 100 moves y0 by 1e-3 at tau = 2 and by
-//  1e-3 at tau = 1. The 3/16 result is derived for the Stokes problem with a
-//  pressure gradient in the equilibrium; this runs the compressible D3Q27
-//  equilibrium with Guo forcing, and the exactness does not survive that
-//  intact. What survives -- and is what the operator is actually for -- is that
-//  the wall stays put instead of running away with tau.
+//  AN EARLIER VERSION OF THIS CASE REPORTED TRT AS NOT EXACT -- 0.5008 at
+//  tau = 0.515 drifting to 0.5943 at tau = 5 -- and explained the drift as the
+//  compressible equilibrium and Guo forcing spoiling a result derived for the
+//  Stokes problem. That was wrong, and instructive about how. The velocity the
+//  diagnostic pass reported was missing Guo's half-force shift (see macro_node
+//  in solver.cuh), so every profile was uniformly low by F/(2 rho). A CONSTANT
+//  offset is invisible in a profile shape; what it does is move the fitted
+//  ROOT, and it moves it further the larger the force -- and at fixed u_max the
+//  force grows with the viscosity. So the artefact grew with tau and looked
+//  exactly like a physical trend. It was not a Mach effect, which is what the
+//  earlier version checked and correctly ruled out; ruling out one explanation
+//  is not evidence for another.
 //
 //  THE SECOND HALF OF THE CASE IS THE ONE THAT PINS THE SCHEME: omega_minus is
-//  FREE. Sweeping Lambda over a factor of twelve moves y0 from 0.443 to 0.519
-//  and leaves the implied viscosity at 0.166675 against 0.1666667 -- five parts
-//  in 100 000, the same for every Lambda. If the split leaked into the
-//  symmetric channel, the viscosity would move with it and this is the only
-//  test here that would see it.
+//  FREE. Sweeping Lambda over a factor of twelve moves y0 across a wide range
+//  and leaves the implied viscosity at 0.1666 to a few parts in 100 000, the
+//  same for every Lambda. If the split leaked into the symmetric channel the
+//  viscosity would move with it, and this is the only test here that would see
+//  it.
 //==============================================================================
 static double fit_wall(const std::vector<double>& u, int H, double& curvature) {
   // Least squares u = a + b y + c y^2 over y = 1..H, then the lower root.
@@ -293,9 +297,11 @@ static void wall_position() {
   const double y_trt = channel_wall(Op::TRT, nu, 3.0 / 16.0, H, T, c);
   check(std::fabs(y_bgk - 0.5) > 0.1, "wall at tau = 2: BGK misplaces it by > 0.1",
         y_bgk, 0.5);
-  check(std::fabs(y_trt - 0.5) < 0.05, "wall at tau = 2: TRT holds it to < 0.05",
-        y_trt, 0.5);
-  note("TRT is not exact at 3/16 with this equilibrium and Guo forcing; it is bounded.");
+  // Exact in FP64; the FP32 residual is round-off at u_max = 0.002, which is
+  // close to that precision's floor for this measurement.
+  check(std::fabs(y_trt - 0.5) < (fp64 ? 1e-9 : 2e-3),
+        "wall at tau = 2: TRT puts it at 0.5 exactly", y_trt, 0.5);
+  note("and it does so at every viscosity from tau = 0.515 to 5 -- see the banner");
 
   // omega_minus is free: Lambda moves the wall and NOT the viscosity.
   const double nu0 = 1.0 / 6.0;
@@ -969,17 +975,18 @@ int main() {
   std::printf("  -- geometry and forcing --\n");
   poiseuille(Op::BGK, "BGK", 2e-3, 3e-3);
   poiseuille(Op::CentralMoments, "CM", 2e-3, 3e-3);
-  // TRT gets a WIDER tolerance at this one viscosity, and the reason is not
-  // slack. Case 1 runs at nu = 1/6, i.e. tau = 1, where BGK's implicit magic
-  // parameter (tau - 1/2)^2 = 1/4 is nearer the wall-consistent 3/16 than 3/16
-  // is to whatever this equilibrium and forcing actually want -- case 1b
-  // measures the wall at 0.5052 for BGK against 0.5105 for TRT here. The
-  // amplitude error IS that displacement: a wall out by delta narrows the
-  // effective channel by 2 delta and lowers the fitted amplitude by about
-  // 4 delta / H, which is 0.13% for BGK and 0.26% for TRT against the 0.17%
-  // and 0.33% measured. So this row is TRT being honestly worse at the single
-  // viscosity that flatters BGK, and case 1b is where it is worth having.
-  poiseuille(Op::TRT, "TRT", 4e-3, 5e-3);
+  // TRT gets a HUNDREDFOLD TIGHTER tolerance, and that is the point of having
+  // it. BGK and the central-moment operator both sit at 1.6e-3 here, which is
+  // the wall being 0.005 out of place at tau = 1 (case 1b); TRT at Lambda =
+  // 3/16 puts the wall exactly at 0.5 and its amplitude error drops to 1.4e-5.
+  // Same grid, same forcing, same 20 000 steps -- the only difference is which
+  // rate the antisymmetric part relaxes at.
+  //
+  // This tolerance is a REGRESSION GUARD, not a pass mark: it is set an order
+  // of magnitude above what TRT actually achieves, so that a future change
+  // which quietly reintroduces a wall-position error is caught here rather than
+  // absorbed by a loose bound.
+  poiseuille(Op::TRT, "TRT", 1e-4, 2e-4);
   wall_position();
   closed_box();
 

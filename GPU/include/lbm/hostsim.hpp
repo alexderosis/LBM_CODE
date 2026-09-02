@@ -23,6 +23,7 @@
 //
 //  Slow, and meant to be. Grids of 32^3 in seconds, not 512^3.
 //==============================================================================
+#include "body.cuh"
 #include "colour.cuh"
 #include "magnetic.cuh"
 #include "phasefield.cuh"
@@ -98,13 +99,28 @@ class Fluid {
                            std::vector<Real>& uy, std::vector<Real>& uz) const {
     rho.resize(std::size_t(N_)); ux.resize(std::size_t(N_));
     uy.resize(std::size_t(N_));  uz.resize(std::size_t(N_));
+    if (t_ % 2 == 0) macro_force<0>(rho, ux, uy, uz);
+    else             macro_force<1>(rho, ux, uy, uz);
+  }
+
+  // The macro pass has to know the force, and which KIND it is: the physical
+  // velocity of a forced scheme carries Guo's half shift. See macro_node.
+  template <int P>
+  void macro_force(std::vector<Real>& rho, std::vector<Real>& ux,
+                   std::vector<Real>& uy, std::vector<Real>& uz) const {
     for (long n = 0; n < N_; ++n) {
-      if (t_ % 2 == 0)
-        macro_node<0>(f_.data(), flags_.data(), N_, n, nx_, ny_, nz_,
-                      rho.data(), ux.data(), uy.data(), uz.data());
+      if (fkind_ == ForceUniform)
+        macro_node<P, ForceUniform>(f_.data(), flags_.data(), N_, n, nx_, ny_, nz_,
+                                    force_, rho.data(), ux.data(), uy.data(), uz.data());
+      else if (fkind_ == ForceBoussinesq)
+        macro_node<P, ForceBoussinesq>(f_.data(), flags_.data(), N_, n, nx_, ny_, nz_,
+                                       force_, rho.data(), ux.data(), uy.data(), uz.data());
+      else if (fkind_ == ForceField)
+        macro_node<P, ForceField>(f_.data(), flags_.data(), N_, n, nx_, ny_, nz_,
+                                  force_, rho.data(), ux.data(), uy.data(), uz.data());
       else
-        macro_node<1>(f_.data(), flags_.data(), N_, n, nx_, ny_, nz_,
-                      rho.data(), ux.data(), uy.data(), uz.data());
+        macro_node<P, ForceNone>(f_.data(), flags_.data(), N_, n, nx_, ny_, nz_,
+                                 force_, rho.data(), ux.data(), uy.data(), uz.data());
     }
   }
 
@@ -154,6 +170,8 @@ class Fluid {
       run<P, O, ForceUniform, false>();
     } else if (fkind_ == ForceBoussinesq) {
       run<P, O, ForceBoussinesq, false>();
+    } else if (fkind_ == ForceField) {
+      run<P, O, ForceField, false>();
     } else {
       run<P, O, ForceNone, false>();
     }
@@ -727,6 +745,106 @@ class PhaseField {
   std::size_t t_ = 0;
 };
 
+
+//==============================================================================
+//  A rigid body by volume penalisation -- host reference.
+//
+//  Same interface as PenalisedBody in body.cuh, running the same per-node
+//  functions in a serial loop. The device version's whole difficulty is the
+//  seven-accumulator reduction; here it is a running total, which is exactly
+//  why building a body case on the host first is worth doing -- a wrong sign in
+//  the roll equation looks identical on both and costs nothing to find here.
+//==============================================================================
+template <class Shape = Rect>
+class Body {
+ public:
+  Body(int nx, int ny, int nz) : nx_(nx), ny_(ny), nz_(nz) {
+    N_ = long(nx) * ny * nz;
+    fx_.assign(std::size_t(N_), Real(0));
+    fy_.assign(std::size_t(N_), Real(0));
+    fz_.assign(std::size_t(N_), Real(0));
+  }
+
+  Shape shape;
+  BodyProperties props;
+  Real vx = 0, vy = 0, omega = 0;
+
+  void couple_velocity(const Real* ux, const Real* uy) { ux_ = ux; uy_ = uy; }
+  const Real* fx() const { return fx_.data(); }
+  const Real* fy() const { return fy_.data(); }
+  const Real* fz() const { return fz_.data(); }
+
+  struct Moments { double area = 0, second = 0; };
+  Moments indicator_moments() const {
+    Moments m;
+    for (long n = 0; n < N_; ++n) {
+      int x, y, z;
+      coords(n, nx_, ny_, x, y, z);
+      const double c = double(shape.chi(Real(x), Real(y)));
+      const double rx = double(x) - double(shape.cx), ry = double(y) - double(shape.cy);
+      m.area += c;
+      m.second += c * (rx * rx + ry * ry);
+    }
+    return m;
+  }
+  void set_uniform_density(Real rho_b) {
+    const Moments m = indicator_moments();
+    props.mass    = Real(double(rho_b) * m.area);
+    props.inertia = Real(double(rho_b) * m.second);
+  }
+
+  template <class DensityOf>
+  BodyReaction refresh(DensityOf dens) { return refresh(dens, dens); }
+
+  template <class LiquidOf, class LbmOf>
+  BodyReaction refresh(LiquidOf dens, LbmOf ldens) {
+    const BodySums q = probe(dens, ldens);
+    double dux = 0, duy = 0, dw = 0;
+    body_solve(props, q, dux, duy, dw);
+    if (props.free_translation) { vx += Real(dux); vy += Real(duy); }
+    if (props.free_rotation)    { omega += Real(dw); }
+    apply(dens, ldens);
+    return body_reaction(props, q, dux, duy, dw);
+  }
+
+  void advance() {
+    shape.cx += vx;
+    shape.cy += vy;
+    shape.set_angle(shape.theta + omega);
+  }
+
+  template <class LiquidOf, class LbmOf>
+  BodySums probe(LiquidOf dens, LbmOf ldens) const {
+    const Real r2 = shape.reach() * shape.reach();
+    const BodyState st = state();
+    BodySums q;
+    for (long n = 0; n < N_; ++n)
+      body_probe_node(shape, st, ux_, uy_, fx_.data(), fy_.data(), dens, ldens, n, r2, q);
+    return q;
+  }
+
+  template <class LiquidOf, class LbmOf>
+  void apply(LiquidOf dens, LbmOf ldens) {
+    const Real r2 = shape.reach() * shape.reach();
+    const BodyState st = state();
+    for (long n = 0; n < N_; ++n)
+      body_apply_node(shape, st, ux_, uy_, fx_.data(), fy_.data(), fz_.data(),
+                      dens, ldens, n, r2);
+  }
+
+ private:
+  BodyState state() const {
+    BodyState st;
+    st.cx = shape.cx;  st.cy = shape.cy;
+    st.vx = vx;  st.vy = vy;  st.omega = omega;
+    st.nx = nx_; st.ny = ny_;
+    return st;
+  }
+  int nx_, ny_, nz_;
+  long N_;
+  std::vector<Real> fx_, fy_, fz_;
+  const Real *ux_ = nullptr, *uy_ = nullptr;
+};
 
 //------------------------------------------------------------------------------
 // One step of a fully coupled system, in the order the coupling requires.

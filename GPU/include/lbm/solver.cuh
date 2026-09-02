@@ -103,10 +103,32 @@ LBM_HD LBM_INLINE void fluid_node_update(const FluidParams& p, long N, long n) {
 // Macroscopic readout at one node, for diagnostics. Non-fluid cells report rest
 // at rho0 rather than whatever their storage happens to hold, so a plot of the
 // field does not show wall slots as flow.
+//
+// GUO'S HALF-FORCE SHIFT BELONGS HERE TOO, and its absence was a real bug.
+// The physical velocity of a forced scheme is u = sum_i c_i f_i / rho + F/(2 rho)
+// -- that is what the step kernel collides with and what it writes into ux_out --
+// so a diagnostic pass that omits it reports a DIFFERENT velocity from the one
+// the solver is using, uniformly low by F/(2 rho).
+//
+// Measured on the Poiseuille channel of host_physics case 1, G = 2.604e-4: the
+// two paths differed by exactly 1.302083e-04 = G/2 at every node, to eight
+// digits. It is a constant offset, so it is invisible in a profile SHAPE and
+// shows up only in an amplitude -- which is why it survived: the fitted
+// parabola projects a constant onto the shape function with a coefficient of
+// sum(shape)/sum(shape^2) = 0.0196, turning a 0.26% velocity offset into a
+// 0.33% amplitude error that sat inside a 0.3%-ish tolerance alongside the
+// wall-position error, partly cancelling it.
+//
+// It also mattered more than a diagnostic normally would, because
+// refresh_velocity() runs this pass to seed the velocity a COUPLED field
+// advects with, and a penalised body reads that array to recover u* -- which
+// subtracts F/(2 rho) from a velocity that never contained it. That is the
+// double-counting body.cuh's banner records as diverging in a few hundred
+// steps, arriving through the diagnostic rather than through the body.
 //------------------------------------------------------------------------------
-template <int Parity>
+template <int Parity, int FKind>
 LBM_HD LBM_INLINE void macro_node(const Real* f, const std::uint8_t* flags, long N, long n,
-                                  int nx, int ny, int nz,
+                                  int nx, int ny, int nz, const BodyForce& force,
                                   Real* rho, Real* ux, Real* uy, Real* uz) {
   if (flags[n] != Fluid) {
     rho[n] = Real(1); ux[n] = uy[n] = uz[n] = Real(0);
@@ -116,7 +138,12 @@ LBM_HD LBM_INLINE void macro_node(const Real* f, const std::uint8_t* flags, long
   coords(n, nx, ny, x, y, z);
   Real fl[27];
   gather<Parity>(f, N, x, y, z, nx, ny, nz, fl);
-  const Macro m = macroscopic(fl);
+  Macro m = macroscopic(fl);
+  if (FKind != ForceNone) {
+    Real F[3];
+    force_at<FKind>(force, n, F);
+    shift_velocity(m, F);
+  }
   rho[n] = m.rho; ux[n] = m.ux; uy[n] = m.uy; uz[n] = m.uz;
 }
 
@@ -132,16 +159,16 @@ __global__ void fluid_kernel(FluidParams p, long N) {
   fluid_node_update<Parity, OpKind, FKind, Mhd, HasGeometry>(p, N, n);
 }
 
-template <int Parity>
+template <int Parity, int FKind>
 __global__ void compute_macro(const Real* __restrict__ f,
                               const std::uint8_t* __restrict__ flags,
-                              int nx, int ny, int nz,
+                              int nx, int ny, int nz, BodyForce force,
                               Real* __restrict__ rho, Real* __restrict__ ux,
                               Real* __restrict__ uy, Real* __restrict__ uz) {
   const long N = long(nx) * ny * nz;
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
-  macro_node<Parity>(f, flags, N, n, nx, ny, nz, rho, ux, uy, uz);
+  macro_node<Parity, FKind>(f, flags, N, n, nx, ny, nz, force, rho, ux, uy, uz);
 }
 
 //------------------------------------------------------------------------------
@@ -302,10 +329,7 @@ class Solver {
     if (!ux_) return;
     Real* dr = nullptr;
     LBM_CUDA_CHECK(cudaMalloc(&dr, sizeof(Real) * N_));
-    const int B = 128, G = int((N_ + B - 1) / B);
-    if (t_ % 2 == 0) compute_macro<0><<<G, B>>>(f_, flags_, nx_, ny_, nz_, dr, ux_, uy_, uz_);
-    else             compute_macro<1><<<G, B>>>(f_, flags_, nx_, ny_, nz_, dr, ux_, uy_, uz_);
-    LBM_CUDA_CHECK(cudaGetLastError());
+    macro_launch(dr, ux_, uy_, uz_);
     LBM_CUDA_CHECK(cudaDeviceSynchronize());
     cudaFree(dr);
   }
@@ -320,10 +344,7 @@ class Solver {
     LBM_CUDA_CHECK(cudaMalloc(&dx, sizeof(Real) * N_));
     LBM_CUDA_CHECK(cudaMalloc(&dy, sizeof(Real) * N_));
     LBM_CUDA_CHECK(cudaMalloc(&dz, sizeof(Real) * N_));
-    const int B = 128, G = int((N_ + B - 1) / B);
-    if (t_ % 2 == 0) compute_macro<0><<<G, B>>>(f_, flags_, nx_, ny_, nz_, dr, dx, dy, dz);
-    else             compute_macro<1><<<G, B>>>(f_, flags_, nx_, ny_, nz_, dr, dx, dy, dz);
-    LBM_CUDA_CHECK(cudaGetLastError());
+    macro_launch(dr, dx, dy, dz);
     rho.resize(N_); ux.resize(N_); uy.resize(N_); uz.resize(N_);
     LBM_CUDA_CHECK(cudaMemcpy(rho.data(), dr, sizeof(Real) * N_, cudaMemcpyDeviceToHost));
     LBM_CUDA_CHECK(cudaMemcpy(ux.data(),  dx, sizeof(Real) * N_, cudaMemcpyDeviceToHost));
@@ -354,6 +375,27 @@ class Solver {
   Real omega() const { return omega_; }
 
  private:
+  // The macro pass has to know the force, and which KIND it is, for the same
+  // reason the step does -- see macro_node. Dispatched so an unforced run emits
+  // no force code at all.
+  void macro_launch(Real* dr, Real* dx, Real* dy, Real* dz) {
+    const int B = 128, G = int((N_ + B - 1) / B);
+    if (t_ % 2 == 0) macro_force<0>(G, B, dr, dx, dy, dz);
+    else             macro_force<1>(G, B, dr, dx, dy, dz);
+    LBM_CUDA_CHECK(cudaGetLastError());
+  }
+  template <int P>
+  void macro_force(int G, int B, Real* dr, Real* dx, Real* dy, Real* dz) {
+    if (fkind_ == ForceUniform)
+      compute_macro<P, ForceUniform><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, dr, dx, dy, dz);
+    else if (fkind_ == ForceBoussinesq)
+      compute_macro<P, ForceBoussinesq><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, dr, dx, dy, dz);
+    else if (fkind_ == ForceField)
+      compute_macro<P, ForceField><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, dr, dx, dy, dz);
+    else
+      compute_macro<P, ForceNone><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, dr, dx, dy, dz);
+  }
+
   FluidParams params() {
     FluidParams p;
     p.f = f_; p.flags = flags_;
@@ -384,6 +426,8 @@ class Solver {
       run<P, O, ForceUniform, false>();
     } else if (fkind_ == ForceBoussinesq) {
       run<P, O, ForceBoussinesq, false>();
+    } else if (fkind_ == ForceField) {
+      run<P, O, ForceField, false>();
     } else {
       run<P, O, ForceNone, false>();
     }

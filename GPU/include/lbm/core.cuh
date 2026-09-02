@@ -502,24 +502,40 @@ LBM_HD LBM_INLINE Real guo_source_raw(int i, const Real F[3], Real ux, Real uy, 
 //   ForceNone        no force
 //   ForceUniform     a constant (fx, fy, fz) -- a pressure gradient, gravity
 //   ForceBoussinesq  F = rho0 g beta (T(n) - T0), plus the uniform part
+//   ForceField       an arbitrary per-node field, PLUS the uniform part
 //
 // Boussinesq holds the density constant everywhere except in the buoyancy term,
 // which is why a thermal field couples back into the flow through a force
 // rather than through the equation of state.
+//
+// ForceField is what a penalised rigid body writes into (body.cuh). It carries
+// the uniform part as well rather than replacing it, and deliberately: a falling
+// body needs gravity on the fluid AND its own reaction, and the two arriving
+// through different mechanisms is how they end up inconsistent with each other.
+// The parent makes the same point the other way round -- BodyProperties::bx must
+// be the same vector the collision operator is given, or the buoyancy term does
+// not match the weight.
 //------------------------------------------------------------------------------
-enum ForceKind { ForceNone = 0, ForceUniform = 1, ForceBoussinesq = 2 };
+enum ForceKind { ForceNone = 0, ForceUniform = 1, ForceBoussinesq = 2, ForceField = 3 };
 
 struct BodyForce {
   Real fx = Real(0), fy = Real(0), fz = Real(0);      // uniform part
   const Real* T = nullptr;                            // temperature field
   Real gx = Real(0), gy = Real(-1), gz = Real(0);     // gravity direction
   Real rho0 = Real(1), beta = Real(1), T0 = Real(0);
+  const Real* Fx = nullptr;                           // per-node field
+  const Real* Fy = nullptr;
+  const Real* Fz = nullptr;
 };
 
 template <int Kind>
 LBM_HD LBM_INLINE void force_at(const BodyForce& b, long n, Real F[3]) {
   if (Kind == ForceNone) { F[0] = F[1] = F[2] = Real(0); return; }
   if (Kind == ForceUniform) { F[0] = b.fx; F[1] = b.fy; F[2] = b.fz; return; }
+  if (Kind == ForceField) {
+    F[0] = b.fx + b.Fx[n];  F[1] = b.fy + b.Fy[n];  F[2] = b.fz + b.Fz[n];
+    return;
+  }
   const Real s = b.rho0 * b.beta * (b.T[n] - b.T0);
   F[0] = b.fx + b.gx * s;
   F[1] = b.fy + b.gy * s;

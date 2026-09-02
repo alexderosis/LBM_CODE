@@ -26,6 +26,7 @@
 //==============================================================================
 #include <string>
 #if defined(__CUDACC__)
+  #include "body.cuh"
   #include "colour.cuh"
   #include "magnetic.cuh"
   #include "phasefield.cuh"
@@ -42,6 +43,10 @@
     template <class PL = lbm::DefaultPhaseLattice>
     using PhaseFieldOn = lbm::PhaseFieldSolver<PL>;
     using PhaseField   = PhaseFieldOn<lbm::DefaultPhaseLattice>;
+    // A rigid body by penalisation. Templated on the SHAPE, so a driver writes
+    // backend::Body<> for a rectangle and backend::Body<lbm::Wedge> for a wedge.
+    template <class Shape = lbm::Rect>
+    using Body = lbm::PenalisedBody<Shape>;
     inline constexpr bool on_device = true;
 
     // Kernel launches are asynchronous. Without this either side of a timed
@@ -93,6 +98,8 @@
     template <class PL = lbm::DefaultPhaseLattice>
     using PhaseFieldOn = lbm::host::PhaseField<PL>;
     using PhaseField   = PhaseFieldOn<lbm::DefaultPhaseLattice>;
+    template <class Shape = lbm::Rect>
+    using Body = lbm::host::Body<Shape>;
     inline constexpr bool on_device = false;
 
     inline void sync() {}                  // the host loop is already ordered
