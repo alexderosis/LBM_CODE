@@ -150,10 +150,6 @@ static void simulate(const Params& P) {
   fc.beta  = FColl::beta_from_sigma(Real(P.sigma), Real(P.iw));
   fc.by    = Real(-g);
   FluidSlv fl(d, fc);
-  fl.set_geometry([&](Index, Index y, Index) -> CellType {
-    return (y == 0 || y == ny - 1) ? Solid : Fluid;      // tank floor and lid
-  });
-
   // Hydrostatic pressure, integrated through the diffuse free surface, with the
   // zero AT the surface -- the gauge argument in MultiphasePotentialBGK.hpp.
   auto phiv = pf.phi();
@@ -170,6 +166,32 @@ static void simulate(const Params& P) {
     const Real p = -gr * I;
     const Real r = rl + phiv(n) * (rh - rl);
     return FlowState{p / (r / Real(3)), Real(0), Real(0), Real(0)};
+  });
+
+  // GEOMETRY AFTER THE SEED, DELIBERATELY, AND BOTH SOLVERS GET IT.
+  //
+  // FluidSolver::initialize_field seeds a node from the caller's function only
+  // where the flag is Fluid or RegWall; anywhere else it seeds FlowState{},
+  // which is rho = 0. On this path the populations carry the normalised
+  // pressure p~ rather than a density, so that is not an inert value: it writes
+  // p~ = 0 into the tank floor, against a fluid neighbour one cell away sitting
+  // at the hydrostatic pressure of the full water column. Under Esoteric Pull
+  // the wall's stored slots ARE what the neighbour reads back, and the second
+  // parity's half is not overwritten until the neighbour's second step, so the
+  // bad seed survives two steps and then arrives as a pressure discontinuity.
+  // Measured in validation/enan_rt.cpp, where the same ordering put a spurious
+  // 1.7e-1 velocity -- Ma 0.29, a factor of 13000 -- at the node next to the
+  // wall in quiescent fluid.
+  //
+  // The PHASE FIELD needs the same two planes and was not getting them at all:
+  // only the fluid had a geometry, so phi was transported across the planes the
+  // fluid calls Solid. Zero normal flux is what an impermeable wall imposes on
+  // an order parameter.
+  fl.set_geometry([&](Index, Index y, Index) -> CellType {
+    return (y == 0 || y == ny - 1) ? Solid : Fluid;      // tank floor and lid
+  });
+  pf.set_geometry([&](Index, Index y, Index) -> PhaseCell {
+    return (y == 0 || y == ny - 1) ? PhaseWall : PhaseBulk;
   });
 
   pf.set_velocity(fl.ux(), fl.uy(), fl.uz());
@@ -246,7 +268,12 @@ static void simulate(const Params& P) {
         dump_field(at("uy"),  nx, ny, [&](Index x, Index y) { return hv(d.id(x, y)); });
         const Rect b = body.shape;
         dump_field(at("body"), nx, ny,
-                   [&](Index x, Index y) { return b.chi(Real(x), Real(y)); });
+                   // chi takes three coordinates now that a 3-D shape exists
+                   // (see PenalisedBody.hpp). A Rect is a prism, so z is
+                   // ignored and any value does; zero keeps it explicit.
+                   [&](Index x, Index y) {
+                     return b.chi(Real(x), Real(y), Real(0));
+                   });
       }
       ++frame;
       if (bad) { std::printf("  DIVERGED\n"); break; }

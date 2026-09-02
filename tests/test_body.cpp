@@ -95,11 +95,11 @@ int main(int argc, char** argv) {
       // A point 12 cells out along the body's long axis is inside; the same
       // world point after a quarter turn is outside, and its perpendicular
       // partner has swapped places with it.
-      const Real in0  = b.shape.chi(Real(60), Real(48));
-      const Real out0 = b.shape.chi(Real(48), Real(60));
+      const Real in0  = b.shape.chi(Real(60), Real(48), Real(0));
+      const Real out0 = b.shape.chi(Real(48), Real(60), Real(0));
       b.shape.set_angle(Real(M_PI / 2));
-      const Real in1  = b.shape.chi(Real(48), Real(60));
-      const Real out1 = b.shape.chi(Real(60), Real(48));
+      const Real in1  = b.shape.chi(Real(48), Real(60), Real(0));
+      const Real out1 = b.shape.chi(Real(60), Real(48), Real(0));
       check::near(in0,  Real(1), Real(1e-3), "long axis is inside at theta = 0");
       check::near(out0, Real(0), Real(1e-3), "short axis is outside at theta = 0");
       check::near(in1,  in0,  tol, "a quarter turn carries the inside point round");
@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
       b.shape.set_angle(Real(5 * M_PI / 2));
       check::near(b.shape.theta, Real(5 * M_PI / 2), tol,
                   "theta is unwrapped, not folded by atan2");
-      check::near(b.shape.chi(Real(48), Real(60)), in1, tol,
+      check::near(b.shape.chi(Real(48), Real(60), Real(0)), in1, tol,
                   "and chi is periodic in it anyway");
 
       // Area and second moment are properties of the shape, not the pose.
@@ -299,25 +299,25 @@ int main(int argc, char** argv) {
         w.set_angle(Real(0));
         const double H = double(w.height());
         const std::string at = " at " + std::to_string(int(deg));
-        check::near(double(w.chi(Real(0), Real(0.5 * H))), 1.0, 1e-9,
+        check::near(double(w.chi(Real(0), Real(0.5 * H), Real(0))), 1.0, 1e-9,
                     "chi = 1 inside the wedge" + at);
         // Placed at a fixed FACE-NORMAL distance, not a fixed axial one: chi
         // decays as exp(-2d) in the normal distance, so an axial probe would
         // sit 15 cells out at 0 degrees and 10.6 at 45, and the tolerance
         // would be measuring the deadrise angle rather than the indicator.
         const double below = 15.0 / std::cos(deg * PI / 180.0);
-        check::near(double(w.chi(Real(0), Real(-below))), 0.0, 1e-12,
+        check::near(double(w.chi(Real(0), Real(-below), Real(0))), 0.0, 1e-12,
                     "chi = 0 below the apex" + at);
-        check::near(double(w.chi(Real(0), Real(H + 12))), 0.0, 1e-9,
+        check::near(double(w.chi(Real(0), Real(H + 12), Real(0))), 0.0, 1e-9,
                     "chi = 0 above the knuckle" + at);
         // On a face, away from apex and knuckle, the cap factor is 1 to
         // round-off and the indicator is exactly one half.
         const double xf = 0.5 * double(w.half_beam);
         const double yf = xf * std::tan(deg * PI / 180.0);
-        check::near(double(w.chi(Real(xf), Real(yf))), 0.5, 1e-9,
+        check::near(double(w.chi(Real(xf), Real(yf), Real(0))), 0.5, 1e-9,
                     "chi = 1/2 on the face" + at);
-        check::near(double(w.chi(Real(xf), Real(yf + 3))),
-                    double(w.chi(Real(-xf), Real(yf + 3))), 1e-14,
+        check::near(double(w.chi(Real(xf), Real(yf + 3), Real(0))),
+                    double(w.chi(Real(-xf), Real(yf + 3), Real(0))), 1e-14,
                     "chi is symmetric about the axis" + at);
         // The integral of chi is the nominal area PLUS the apex rounding, and
         // the rounding is pinned rather than tolerated: it is the quantity that
@@ -328,7 +328,7 @@ int main(int argc, char** argv) {
         const int ylo = int(-10.0 / h), yhi = int((H + 10.0) / h);
         for (int i = -xi; i <= xi; ++i)
           for (int j = ylo; j <= yhi; ++j)
-            area += double(w.chi(Real(i * h), Real(j * h))) * h * h;
+            area += double(w.chi(Real(i * h), Real(j * h), Real(0))) * h * h;
         const double ratio = area / (double(w.half_beam) * H);
         check::near(ratio, excess[k], 5e-4,
                     "integral of chi matches the recorded apex excess" + at);

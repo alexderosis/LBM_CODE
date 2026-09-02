@@ -284,7 +284,14 @@ struct Wedge {
   KOKKOS_INLINE_FUNCTION Real reach() const {
     return half_beam / cphi + Real(4) * smooth;
   }
-  KOKKOS_INLINE_FUNCTION Real chi(Real x, Real y) const {
+  // A PRISM: chi does not depend on z, so outside() must not reject on z
+  // either. One shared formula would cull the body to a single plane and the
+  // reduction would silently return 1/nz of its mass.
+  static constexpr bool three_d = false;
+  KOKKOS_INLINE_FUNCTION bool outside(Real rx, Real ry, Real, Real reach2) const {
+    return rx * rx + ry * ry > reach2;
+  }
+  KOKKOS_INLINE_FUNCTION Real chi(Real x, Real y, Real) const {
     const Real dx = x - cx, dy = y - cy;
     const Real X =  ct * dx + st * dy;
     const Real Y = -st * dx + ct * dy;
@@ -331,7 +338,11 @@ struct Rect {
   // from the corners and rounds them slightly -- harmless, and it keeps the
   // function separable and cheap. The point is taken into the body frame first,
   // so the shape turns with theta and the rounding turns with it.
-  KOKKOS_INLINE_FUNCTION Real chi(Real x, Real y) const {
+  static constexpr bool three_d = false;      // a prism; see Wedge::outside
+  KOKKOS_INLINE_FUNCTION bool outside(Real rx, Real ry, Real, Real reach2) const {
+    return rx * rx + ry * ry > reach2;
+  }
+  KOKKOS_INLINE_FUNCTION Real chi(Real x, Real y, Real) const {
     const Real dx = x - cx, dy = y - cy;
     const Real X =  ct * dx + st * dy;
     const Real Y = -st * dx + ct * dy;
@@ -344,7 +355,54 @@ struct Rect {
 };
 
 //------------------------------------------------------------------------------
-// The seven integrals of one sweep over the penalised region. Everything the
+// A SPHERE, and the only shape here that is not a prism.
+//
+// This is the port of lbm::Sphere in ../../GPU/include/lbm/body.cuh, and the two
+// exist deliberately: this tree keeps two independent implementations of the
+// physics so that agreement is evidence and disagreement is a bug in one of
+// them. Until now the 3-D body existed only on the CUDA side, so it had nothing
+// to be checked against.
+//
+// chi is one tanh in the radius -- cheaper than the prisms' two, and with no
+// body frame to rotate into, because a sphere is its own rotation group.
+//
+// WHAT THIS DOES NOT MAKE. Adding a sphere does not turn this into a 3-D rigid
+// body. Rotation is still one angle about z, and for a sphere it is inert: chi
+// is invariant under it, so the roll equation measures nothing and changes
+// nothing. Translation becomes three components, which for a sphere entering on
+// its axis is the whole of the dynamics -- there is no torque about any axis, so
+// 3-DOF translation is EXACT for that case rather than an approximation to a
+// 6-DOF solve. It is not exact for anything asymmetric, and a tilted, spinning
+// or tumbling body is still absent: that needs the quaternion the class banner
+// describes.
+//------------------------------------------------------------------------------
+struct Sphere {
+  Real cx = 0, cy = 0, cz = 0;      // centre
+  Real R = 0;                       // radius
+  Real smooth = Real(1.5);          // indicator smoothing width, in cells
+  // Present so a Sphere satisfies the same interface as the prisms and drops
+  // into PenalisedBody unchanged. Both are inert here; see the banner.
+  Real theta = 0;
+  KOKKOS_INLINE_FUNCTION void set_angle(Real th) { theta = th; }
+
+  static constexpr bool three_d = true;
+
+  KOKKOS_INLINE_FUNCTION Real reach() const { return R + Real(4) * smooth; }
+
+  // The only shape whose cheap rejection is genuinely spherical.
+  KOKKOS_INLINE_FUNCTION bool outside(Real rx, Real ry, Real rz, Real reach2) const {
+    return rx * rx + ry * ry + rz * rz > reach2;
+  }
+
+  KOKKOS_INLINE_FUNCTION Real chi(Real x, Real y, Real z) const {
+    const Real dx = x - cx, dy = y - cy, dz = z - cz;
+    const Real r = Kokkos::sqrt(dx * dx + dy * dy + dz * dz);
+    return Real(0.5) * (Real(1) + Kokkos::tanh((R - r) / smooth));
+  }
+};
+
+//------------------------------------------------------------------------------
+// The NINE integrals of one sweep over the penalised region. Everything the
 // rigid-body solve needs, and nothing else.
 //
 // The constructor and operator+= are written out rather than defaulted because
@@ -354,16 +412,23 @@ struct Rect {
 struct BodySums {
   Real m;             // integral of chi rho              -- fictitious mass
   Real Sx, Sy;        // integral of chi rho r            -- its first moments
-  Real Iz;            // integral of chi rho |r|^2        -- its inertia
+  Real Iz;            // integral of chi rho (rx^2+ry^2)  -- inertia ABOUT z
   Real Px, Py;        // integral of chi rho (u* - rigid) -- momentum deficit
   Real Lz;            // integral of chi rho r x (u* - rigid)
+  // The third translation. Sz is carried for symmetry of the bookkeeping and is
+  // NOT coupled into the roll equation: rotation here is about z alone, so a
+  // first moment along z has no equation to enter. It is reported rather than
+  // used, and for a sphere on its axis it is zero to round-off, which makes it
+  // a free check that the entry really is axisymmetric.
+  Real Sz, Pz;
 
   KOKKOS_INLINE_FUNCTION BodySums()
-      : m(0), Sx(0), Sy(0), Iz(0), Px(0), Py(0), Lz(0) {}
+      : m(0), Sx(0), Sy(0), Iz(0), Px(0), Py(0), Lz(0), Sz(0), Pz(0) {}
 
   KOKKOS_INLINE_FUNCTION void operator+=(const BodySums& o) {
     m += o.m;  Sx += o.Sx;  Sy += o.Sy;  Iz += o.Iz;
     Px += o.Px;  Py += o.Py;  Lz += o.Lz;
+    Sz += o.Sz;  Pz += o.Pz;
   }
 };
 
@@ -381,11 +446,17 @@ namespace lbm {
 template <class L, class Shape = Rect>
 class PenalisedBody {
  public:
-  // Two dimensions, and said in the compiler's voice rather than only in the
-  // limitation list: instantiated on a 3D lattice this would silently model an
-  // infinite prism in z, with a rigid-body solve that carries one angle when it
-  // needs three. A 3D body is a 6x6 and a quaternion, and does not exist here.
-  static_assert(L::D == 2, "PenalisedBody is two-dimensional");
+  // THE GUARD IS NARROWED, NOT REMOVED. It used to say two dimensions flatly.
+  // What it was protecting against is a PRISM on a 3-D lattice: Rect and Wedge
+  // have a chi independent of z, so instantiated on D3Q27 they silently model
+  // an infinite prism with a solve that carries one angle. That is still true
+  // and still refused. A genuinely 3-D shape (Sphere) is now allowed, and its
+  // banner states what it does and does not model -- three translations, one
+  // angle about z, no quaternion. A tilted or tumbling 3-D body remains absent.
+  static_assert(L::D == 2 || Shape::three_d,
+                "a 3-D lattice needs a 3-D shape: Rect and Wedge are prisms in "
+                "z, so on D3Q19/D3Q27 they would model an infinite prism with a "
+                "one-angle solve. Use Sphere, or a 2-D lattice.");
 
   explicit PenalisedBody(const Domain& dom)
       : dom_(dom),
@@ -393,7 +464,15 @@ class PenalisedBody {
         fy_("body_fy", dom.n_padded),
         fz_("body_fz", dom.n_padded) {}
 
-  void set_velocity(View1D<Real> ux, View1D<Real> uy) { ux_ = ux; uy_ = uy; }
+  // The two-argument form leaves the z limb OFF -- uz_ stays empty and every
+  // prism case is the arithmetic it was before a sphere existed. Pass three to
+  // enable it.
+  void set_velocity(View1D<Real> ux, View1D<Real> uy) {
+    ux_ = ux; uy_ = uy; uz_ = View1D<Real>();
+  }
+  void set_velocity(View1D<Real> ux, View1D<Real> uy, View1D<Real> uz) {
+    ux_ = ux; uy_ = uy; uz_ = uz;
+  }
 
   View1D<Real> x() const { return fx_; }
   View1D<Real> y() const { return fy_; }
@@ -401,13 +480,13 @@ class PenalisedBody {
 
   //---- state, public so a driver can prescribe, clamp or read any of it -------
   Shape shape;
-  Real vx = 0, vy = 0;             // centre-of-mass velocity
+  Real vx = 0, vy = 0, vz = 0;     // centre-of-mass velocity
   Real omega = 0;                  // angular velocity about z
 
   //---- properties -------------------------------------------------------------
   Real mass = 0;                   // m_b
   Real inertia = 0;                // I_b about the centre
-  Real bx = 0, by = 0;             // body force per unit mass; the SAME vector
+  Real bx = 0, by = 0, bz = 0;     // body force per unit mass; the SAME vector
                                    // the collision operator is given, or the
                                    // buoyancy term is inconsistent with it
 
@@ -432,14 +511,17 @@ class PenalisedBody {
   Moments indicator_moments() const {
     const Domain d = dom_;
     const Shape b = shape;
-    const Index hx = dom_.hx, hy = dom_.hy;
+    const Index hx = dom_.hx, hy = dom_.hy, hz = dom_.hz;
     Real a = 0, s = 0;
     Kokkos::parallel_reduce("penalised_moments", Range(0, dom_.n_padded),
       KOKKOS_LAMBDA(Index n, Real& acc_a, Real& acc_s) {
         Index px, py, pz; d.coords(n, px, py, pz);
         const Real rx = Real(px - hx) - b.cx, ry = Real(py - hy) - b.cy;
-        const Real c = b.chi(Real(px - hx), Real(py - hy));
+        const Real c = b.chi(Real(px - hx), Real(py - hy), Real(pz - hz));
         acc_a += c;
+        // The second moment is about z, matching BodySums::Iz -- for a sphere
+        // that is its polar moment rather than its full inertia, which is
+        // correct for the only rotation this class has and inert for a sphere.
         acc_s += c * (rx * rx + ry * ry);
       }, a, s);
     return Moments{a, s};
@@ -485,9 +567,12 @@ class PenalisedBody {
   template <class LiquidOf, class LbmOf>
   Reaction refresh(LiquidOf density_of, LbmOf lbm_of) {
     const BodySums q = probe(density_of, lbm_of);
-    Real dux = 0, duy = 0, dw = 0;
-    solve(q, dux, duy, dw);
-    if (free_translation) { vx += dux; vy += duy; }
+    Real dux = 0, duy = 0, dw = 0, duz = 0;
+    solve(q, dux, duy, dw, duz);
+    if (free_translation) {
+      vx += dux; vy += duy;
+      if (uz_.size() > 0) vz += duz;
+    }
     if (free_rotation)    { omega += dw; }
     apply(density_of, lbm_of);
 
@@ -506,8 +591,19 @@ class PenalisedBody {
   void advance() {
     shape.cx += vx;
     shape.cy += vy;
+    bump_z(shape, vz);
     shape.set_angle(shape.theta + omega);
   }
+
+  // A prism has no cz to read or move, so the z limb of the pose is touched
+  // only for a shape that has one. Overloads on three_d rather than a runtime
+  // flag: a Rect that grew a cz member by accident would otherwise start
+  // behaving like a sphere silently.
+  template <class S>
+  KOKKOS_INLINE_FUNCTION static Real shape_cz(const S&) { return Real(0); }
+  KOKKOS_INLINE_FUNCTION static Real shape_cz(const Sphere& sh) { return sh.cz; }
+  template <class S> static void bump_z(S&, Real) {}
+  static void bump_z(Sphere& sh, Real dz) { sh.cz += dz; }
 
   //----------------------------------------------------------------------------
   // The single sweep. Public because it launches a Kokkos lambda, which nvcc
@@ -522,19 +618,26 @@ class PenalisedBody {
     const Shape b = shape;
     const Real bvx = vx, bvy = vy, bw = omega;
     auto ux = ux_, uy = uy_;
-    auto fx = fx_, fy = fy_;
+    auto fx = fx_, fy = fy_, fz = fz_;
     const auto dens = density_of;
     const auto ldens = lbm_of;
-    const Index hx = dom_.hx, hy = dom_.hy;
+    const Index hx = dom_.hx, hy = dom_.hy, hz = dom_.hz;
     const Real reach2 = shape.reach() * shape.reach();
+    const bool have_z = uz_.size() > 0;
+    auto uz = uz_.size() > 0 ? uz_ : ux_;      // never dereferenced when !have_z
+    const Real bvz = vz;
 
     BodySums out;
     Kokkos::parallel_reduce("penalised_body_probe", Range(0, dom_.n_padded),
       KOKKOS_LAMBDA(Index n, BodySums& acc) {
         Index px, py, pz; d.coords(n, px, py, pz);
-        const Real rx = Real(px - hx) - b.cx, ry = Real(py - hy) - b.cy;
-        if (rx * rx + ry * ry > reach2) return;
-        const Real c = b.chi(Real(px - hx), Real(py - hy));
+        const Real X = Real(px - hx), Y = Real(py - hy), Z = Real(pz - hz);
+        const Real rx = X - b.cx, ry = Y - b.cy, rz = Z - shape_cz(b);
+        // THE SHAPE decides the rejection, because a prism must not be culled
+        // in z and a sphere must be. One formula here was the bug this
+        // interface exists to prevent.
+        if (b.outside(rx, ry, rz, reach2)) return;
+        const Real c = b.chi(X, Y, Z);
         if (c < Real(1e-6)) return;
         const Real r = dens(n);              // liquid: force and Newton
         const Real rl = ldens(n);            // LBM: what the fluid divides by
@@ -545,14 +648,21 @@ class PenalisedBody {
         const Real inv = (rl > Real(1e-12)) ? Real(0.5) / rl : Real(0);
         const Real usx = ux(n) - fx(n) * inv;
         const Real usy = uy(n) - fy(n) * inv;
+        // A 2-D caller passes no z velocity at all: an EMPTY view means "no
+        // third component" rather than "a component that happens to be zero",
+        // so the whole z limb folds away and the prism cases stay bit for bit
+        // what they were.
+        const Real usz = have_z ? (uz(n) - fz(n) * inv) : Real(0);
         // ... and measure what is left against the rigid field it should match.
         const Real dx = usx - (bvx - bw * ry);
         const Real dy = usy - (bvy + bw * rx);
+        const Real dz = have_z ? (usz - bvz) : Real(0);
         acc.m  += cr;
         acc.Sx += cr * rx;   acc.Sy += cr * ry;
         acc.Iz += cr * (rx * rx + ry * ry);
         acc.Px += cr * dx;   acc.Py += cr * dy;
         acc.Lz += cr * (rx * dy - ry * dx);
+        acc.Sz += cr * rz;   acc.Pz += cr * dz;
       }, Kokkos::Sum<BodySums>(out));
     Kokkos::fence();
     return out;
@@ -573,24 +683,33 @@ class PenalisedBody {
     auto fx = fx_, fy = fy_, fz = fz_;
     const auto dens = density_of;
     const auto ldens = lbm_of;
-    const Index hx = dom_.hx, hy = dom_.hy;
+    const Index hx = dom_.hx, hy = dom_.hy, hz = dom_.hz;
     const Real reach2 = shape.reach() * shape.reach();
+    const bool have_z = uz_.size() > 0;
+    auto uz = uz_.size() > 0 ? uz_ : ux_;      // never dereferenced when !have_z
+    const Real bvz = vz;
 
     Kokkos::parallel_for("penalised_body_apply", Range(0, dom_.n_padded),
       KOKKOS_LAMBDA(Index n) {
         Index px, py, pz; d.coords(n, px, py, pz);
-        fz(n) = Real(0);
-        const Real rx = Real(px - hx) - b.cx, ry = Real(py - hy) - b.cy;
-        if (rx * rx + ry * ry > reach2) { fx(n) = Real(0); fy(n) = Real(0); return; }
-        const Real c = b.chi(Real(px - hx), Real(py - hy));
-        if (c < Real(1e-6)) { fx(n) = Real(0); fy(n) = Real(0); return; }
+        const Real X = Real(px - hx), Y = Real(py - hy), Z = Real(pz - hz);
+        const Real rx = X - b.cx, ry = Y - b.cy, rz = Z - shape_cz(b);
+        if (b.outside(rx, ry, rz, reach2)) {
+          fx(n) = Real(0); fy(n) = Real(0); fz(n) = Real(0); return;
+        }
+        const Real c = b.chi(X, Y, Z);
+        if (c < Real(1e-6)) {
+          fx(n) = Real(0); fy(n) = Real(0); fz(n) = Real(0); return;
+        }
         const Real r = dens(n);
         const Real rl = ldens(n);
         const Real inv = (rl > Real(1e-12)) ? Real(0.5) / rl : Real(0);
         const Real usx = ux(n) - fx(n) * inv;
         const Real usy = uy(n) - fy(n) * inv;
+        const Real usz = have_z ? (uz(n) - fz(n) * inv) : Real(0);
         fx(n) = c * Real(2) * r * ((bvx - bw * ry) - usx);
         fy(n) = c * Real(2) * r * ((bvy + bw * rx) - usy);
+        fz(n) = have_z ? (c * Real(2) * r * (bvz - usz)) : Real(0);
       });
     Kokkos::fence();
   }
@@ -600,6 +719,17 @@ class PenalisedBody {
   // mass and inertia -- see the header -- so there is no pivoting and no case
   // where this has to give up.
   //----------------------------------------------------------------------------
+  // duz is the third TRANSLATION and is deliberately uncoupled from the roll
+  // equation: rotation here is about z, so a z-translation exerts no moment on
+  // it and receives none. That is exact, but exact only BECAUSE rotation is
+  // 2-D -- a genuine 3-D body would couple all six.
+  void solve(const BodySums& q, Real& dux, Real& duy, Real& dw, Real& duz) const {
+    solve(q, dux, duy, dw);
+    const Real A = mass + q.m;
+    duz = (A > Real(0) && free_translation)
+              ? (Real(2) * q.Pz + (mass - q.m) * bz) / A : Real(0);
+  }
+
   void solve(const BodySums& q, Real& dux, Real& duy, Real& dw) const {
     const Real A = mass + q.m;
     const Real B = inertia + q.Iz;
@@ -626,7 +756,7 @@ class PenalisedBody {
  private:
   Domain dom_;
   View1D<Real> fx_, fy_, fz_;
-  View1D<Real> ux_, uy_;
+  View1D<Real> ux_, uy_, uz_;
 };
 
 }  // namespace lbm
