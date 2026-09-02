@@ -340,6 +340,33 @@ int main(int argc, char** argv) {
                 float(phi[std::size_t(node_id(x, y, nz / 2, nx, ny))]);
         std::fwrite(pl.data(), sizeof(float), pl.size(), f);
         std::fclose(f);
+
+        // THE SOLID INDICATOR, AS A SECOND PLANE. phi alone cannot tell a
+        // sphere from the air around it -- the phase field knows nothing about
+        // the body -- so a plot of phi shows the sphere and its cavity as one
+        // white blob when it is submerged, and shows NOTHING at all when it
+        // rides at the surface inside the air. chi is what the penalisation
+        // itself uses, so this is the honest overlay rather than a drawn-on
+        // circle, and it works for a wedge or a rectangle unchanged.
+        //
+        // Written as a SEPARATE file in the same layout rather than as a second
+        // field in the same one, so every existing reader of these planes keeps
+        // working. Evaluated on the host from the shape: chi is analytic and
+        // LBM_HD, so this costs nothing and needs nothing from the device.
+        if (!nobody) {
+          char cp[256];
+          std::snprintf(cp, sizeof cp, "%s_chi_%04d.bin", dump, nframe);
+          if (std::FILE* c = std::fopen(cp, "wb")) {
+            std::fwrite(hdr, sizeof(int), 2, c);
+            std::vector<float> cl(std::size_t(nx) * ny);
+            for (int y = 0; y < ny; ++y)
+              for (int x = 0; x < nx; ++x)
+                cl[std::size_t(y) * nx + x] =
+                    float(body.shape.chi(Real(x), Real(y), Real(nz / 2)));
+            std::fwrite(cl.data(), sizeof(float), cl.size(), c);
+            std::fclose(c);
+          }
+        }
         ++nframe;
       }
     }
