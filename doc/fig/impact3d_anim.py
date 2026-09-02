@@ -110,14 +110,25 @@ def main():
         pose = body.get(k)
         zcut = int(round(pose[2])) if pose else nz // 2
         zcut = max(2, min(nz - 1, zcut))
-        sub = np.ascontiguousarray(v[:zcut, ylo:yhi, :])
+        # THE FAR HALF IS KEPT, NOT THE NEAR ONE, and getting this backwards
+        # produces a render that looks right and shows nothing: matplotlib does
+        # not depth-sort a Poly3DCollection against a plot_surface, so whichever
+        # half of the water is between the camera and the body draws OVER it and
+        # the sphere disappears behind its own cavity. At azim = -62 the near
+        # half is z < cz, so that is the half to remove.
+        sub = np.ascontiguousarray(v[zcut:, ylo:yhi, :])
 
         fig = plt.figure(figsize=(5.2, 5.6), dpi=115)
         ax = fig.add_subplot(111, projection="3d")
         try:
             verts, faces, _, _ = measure.marching_cubes(sub, level=0.5)
+            verts[:, 0] += zcut          # the slice started at zcut
             # verts are (z, y, x); the plot's axes are (x, z, y).
-            mesh = Poly3DCollection(verts[faces][:, :, [2, 0, 1]], alpha=1.0)
+            # TRANSLUCENT, because cutting alone cannot expose the body: once
+            # the cavity closes it is a POCKET around the sphere, so its far
+            # wall faces inward and occludes the ball from every angle. Alpha
+            # lets the cavity keep its shape while the body shows through it.
+            mesh = Poly3DCollection(verts[faces][:, :, [2, 0, 1]], alpha=0.42)
             mesh.set_facecolor(WATER)
             mesh.set_edgecolor("none")
             ax.add_collection3d(mesh)
