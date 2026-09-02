@@ -20,19 +20,37 @@
 //  THE DISCRETE PROBLEM DOES, and the reason is worth stating rather than
 //  discovering: a three-fold axis cannot be aligned with D3Q27, whose symmetry
 //  about y is four-fold. The three faces meeting at the lower corner therefore
-//  sit at azimuths the grid does not treat alike, and the measured torque at
-//  -tilt 0 is not zero -- it is a discretisation residual. At D = 12 it turns
-//  the diagonal by 0.016 deg over t/t0 = 1.8, which is the number to beat: it
-//  should shrink with D, and anything of order the tilt itself would mean the
-//  6-DOF path is manufacturing torque rather than measuring it. That is what
-//  the -tilt 0 run is for, and it is a bound rather than an exact zero.
+//  sit at azimuths the grid does not treat alike, so the -tilt 0 run turns
+//  slowly instead of not at all.
 //
-//  The interesting run is -tilt a few degrees. Then the question is whether the
-//  equilibrium restores or runs away, which is a genuinely 3-D question with no
-//  answer available from a 2-D section: the restoring couple, if there is one,
-//  acts about a horizontal axis that is not a symmetry axis of the tilted body.
-//  Both runs are printed with the same diagnostics so the pair is a comparison
-//  rather than two separate stories.
+//  IT IS NOT A DISCRETISATION FLOOR, AND THAT WAS THE SURPRISE. A residual of
+//  that kind should shrink with D. This one does not: at matched t/t0 = 2.7 it
+//  is 0.027 deg at D = 12 and 0.042 deg at D = 20 -- LARGER on the finer grid.
+//  What is reproducible is the RATIO to the response of a deliberate 5 deg
+//  tilt, measured on both grids over the same window:
+//
+//      D    t/t0    tilt 0     tilt 5 minus 5 deg    ratio
+//      12   1.75    0.015 deg        0.154 deg       10.3
+//      20   1.61    0.019            0.194           10.2
+//      20   1.98    0.027            0.305           11.3
+//      12   2.75    0.027            0.333           12.3
+//      20   2.73    0.042            0.546           13.0
+//
+//  A ratio that holds to 1 % across a resolution change while both of its terms
+//  move by 60 % is the signature of an UNSTABLE equilibrium: the pose amplifies
+//  whatever seed it is given, the amplification is a property of the flow rather
+//  than of the grid, and the -tilt 0 run is that same instability growing from a
+//  seed the lattice supplies. So the right reading of the pair is not
+//  "signal against noise" but two seed amplitudes of one mechanism -- and the
+//  answer to the question the case was written to ask is that a corner-down cube
+//  entering water TIPS FURTHER. It does not right itself.
+//
+//  WHAT IS STILL NOT CONVERGED is the drag, and it is the larger error of the
+//  two: at t/t0 = 2.75 the cube has fallen 1.492 D at D = 12 and 1.765 D at
+//  D = 20, an 18 % difference, with the sinking speed 0.296 U against 0.402 U.
+//  The sphere behaves the same way (D = 24 and D = 32 differ by 27 % in minimum
+//  speed), so this is the body coupling's known resolution appetite and not
+//  something the cube introduced. Read the tilt, not the depth.
 //
 //  THE MOBILITY IS THE BINDING CONSTRAINT, NOT THE BODY. sphere_entry.cpp's
 //  Pe = 128 diverges here, and it does so through the PHASE FIELD rather than
@@ -58,6 +76,17 @@
 //  corner. At D = 24 and smooth = 1.5 the rounding radius is about 6 % of the
 //  edge. The volume is measured from chi rather than taken as D^3 for exactly
 //  this reason, and the driver prints both.
+//
+//  THE TWO RUNS, so the numbers quoted above and in doc/m3lb.tex's limitation
+//  can be reproduced rather than taken on trust. Neither is a ctest case: the
+//  first is twelve minutes on four threads, which is an analysis run and not a
+//  test.
+//      ./cube_entry -d 12 -span 4 -tmax 6 -tilt 0 -frames 1 --kokkos-num-threads=4
+//      ./cube_entry -d 12 -span 4 -tmax 6 -tilt 5 -frames 1 --kokkos-num-threads=4
+//  And nothing past t/t0 ~ 4 at D = 12 is physics: the cube stalls and begins
+//  to rise at t/t0 = 5.75 despite being twice the density of water, which is
+//  the same resolution artefact already established for the sphere -- D = 24
+//  and D = 32 there turn at t/t0 = 3.50 and re-accelerate, D = 12 does not.
 //
 //  THE PHASES, THE RATIO, AND THE VISCOSITY MATCH are sphere_entry.cpp's and
 //  argued there: phi = 1 is water, ratio 100 (not water-against-air's 830,

@@ -8174,14 +8174,19 @@ the fitted rate is blamed on the scheme.
   on a planar problem to $1.7\times10^{-18}$, so the generalisation carries the
   older code's validation --- but only for the planar limb. What the new three
   degrees of freedom do in a flow has \emph{no} closed-form check in this tree:
-  \code{demonstrator/cube\_entry} is a demonstrator, and the honest bound on it
-  is its own symmetry run. A cube released exactly corner-down has a three-fold
-  symmetry axis, which cannot be aligned with D3Q27's four-fold axis about $y$,
-  so the discrete torque is not zero: at $D=12$ it turns the body diagonal by
-  $0.095^\circ$ over $t/t_0=6$, against a $0.44^\circ$ response to a
-  deliberate $5^\circ$ tilt. The response is resolved by a factor of about
-  $4.5$ and no more, so the \emph{sign} of that response is a result and its
-  magnitude is not.
+  \code{demonstrator/cube\_entry} is a demonstrator. A cube released exactly
+  corner-down has a three-fold symmetry axis, which cannot be aligned with
+  D3Q27's four-fold axis about $y$, so the discrete torque is not zero --- and
+  it does not refine away either: at matched $t/t_0=2.7$ the untilted cube's
+  diagonal has moved $0.027^\circ$ at $D=12$ and $0.042^\circ$ at $D=20$. What
+  is reproducible is its ratio to the response of a deliberate $5^\circ$ tilt,
+  which is $10.3$ at $D=12$ and $10.2$ at $D=20$ over a matched window and rises
+  to $13$ in both by $t/t_0=2.7$. A ratio holding to $1\,\%$ across a resolution
+  change while both of its terms move by $60\,\%$ says the pose is an unstable
+  equilibrium seeded by the lattice, so a corner-down cube entering water tips
+  further rather than righting itself. The drag is the larger error: the cube has
+  fallen $1.492D$ at $D=12$ against $1.765D$ at $D=20$ by $t/t_0=2.75$, an
+  $18\,\%$ difference, matching the sphere's own appetite for resolution.
 
 \item \textbf{The body is of uniform density.} Its centre of mass is taken to be
   the centre of the rectangle, which is what lets its own weight drop out of the
