@@ -40,3 +40,9 @@ results/I_channel/*_contour.dat
 results/J_zhou_thermal/*_temp.dat
 results/J_zhou_thermal/*_ux.dat
 results/J_zhou_thermal/*_uy.dat
+
+# Rendered animations. Regenerable from doc/fig/*.py given a dump, and a dump
+# is itself ignored -- so these are two steps from anything tracked. doc/m3lb.pdf
+# is the tracked binary here because it is the deliverable; a video of a
+# demonstrator is not.
+doc/video/
