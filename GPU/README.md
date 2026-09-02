@@ -17,6 +17,20 @@ next section. The build was clean first try and every physics result reproduced
 what the host had predicted, including one it predicted would appear only at
 higher resolution. Read the scope table before assuming anything works.
 
+*TRT, central moments for both multiphase distributions, the open scalar
+boundary, the magnetic wall, the penalised rigid body, the free surface and
+shifted storage* were added last, closing every gap the parent's `CLAUDE.md`
+listed against this tree bar one (regularised walls). They were written the same
+way — host first, `hostsim.hpp`, six test binaries — and the host build is what
+the numbers quoted for them come from unless a section says otherwise.
+
+That work also found a **pre-existing bug in this code**: `compute_macro` did
+not apply Guo's half-force shift while the step kernel did, so every forced run
+reported a velocity uniformly low by `F/(2ρ)` — exactly `G/2` at every node, to
+eight digits. It is fixed. A constant offset is invisible in a profile *shape*,
+which is how it survived; what it moved was the fitted wall position, and it had
+led to a wrong conclusion about TRT that is retracted below.
+
 ## Measured, on a Tesla T4 (sm_75, CUDA 12.8, FP32)
 
 | operator | grid | MLUPS | GB/s | mass drift |
@@ -457,40 +471,39 @@ every driver alongside the device ones.
 
 | | this code | parent (Kokkos) |
 |---|---|---|
-| lattices | D3Q27 fluid, D3Q7 scalar and field | D2Q9, D2Q5, D3Q7, D3Q19, D3Q27 |
-| collision | BGK, central moments | BGK, TRT, raw MRT, central moments |
-| streaming | Esoteric Pull | Esoteric Pull, two-lattice |
-| storage | raw | raw, shifted |
-| boundaries | periodic, bounce-back, scalar adiabatic and Dirichlet | + regularised, outflow, moment-based |
-| forcing | Guo: uniform and Boussinesq | Guo, high-order Hermite |
+| lattices | D3Q27 fluid, D3Q7 or D3Q27 phase, D3Q7 scalar and field | D2Q9, D2Q5, D3Q7, D3Q19, D3Q27 |
+| collision | BGK, TRT, central moments | BGK, TRT, raw MRT, central moments |
+| streaming | Esoteric Pull; two-lattice for the free surface | Esoteric Pull, two-lattice |
+| storage | raw, shifted | raw, shifted |
+| boundaries | periodic, bounce-back, scalar adiabatic / Dirichlet / outflow, magnetic moment-based | + regularised |
+| forcing | Guo: uniform, Boussinesq, arbitrary per-node field | Guo, high-order Hermite |
 | thermal | advection–diffusion + Boussinesq | same |
-| MHD | Dellar induction + Maxwell stress, BGK and central moments | + the published D2Q9 scheme |
-| multiphase | colour gradient (central moments) + conservative Allen–Cahn phase field (BGK, pressure form) | + the phase field's central-moment operator, free surface |
+| MHD | Dellar induction + Maxwell stress, BGK and central moments, moment-based walls | + the published D2Q9 scheme |
+| multiphase | colour gradient + phase field, each with BGK **and** central moments; free surface | same, + D2Q9/D3Q19 |
+| rigid body | volume penalisation, Rect and Wedge | same, + a moving obstacle in the free surface |
 | geometry | arbitrary voxel input | arbitrary voxel input |
 | cases | 8 drivers | ~20 validation cases |
 
 Still absent, not merely untested:
 
-* **shifted storage.** The fluid stores raw populations, and it costs accuracy in
-  FP32 — see the Poiseuille row below, where FP32 loses the clean second-order
-  convergence FP64 shows at H = 32.
-* **the scalar's open boundary.** Outflow needs a donor map and a second kernel
-  after a fence; reading a donor inside the main kernel is a genuine race under
-  Esoteric Pull, because the two slots a node reads are the two it writes.
-* **magnetic wall conditions.** A non-fluid cell is skipped, which on this
-  storage means bounce-back on the induction distribution — and that is neither
-  the perfectly conducting nor the insulating condition. Dellar's moment-based
-  wall is what those need. Every MHD case here is periodic. Do not read a
-  wall-bounded MHD result off this code.
-* **the free-surface engine**, and the reason is streaming rather than effort.
-  It static_asserts *against* Esoteric Pull, because its population
-  reconstruction reads a slot the in-place scheme has already overwritten —
-  the same class of race as the scalar outflow above — so porting it means
-  adding a two-lattice storage path plus five kernel launches with a fence
-  between each.
-* **central moments for the phase field's fluid operator.** The parent has
-  `MultiphaseCentralMoments.hpp`; what is here is the BGK potential form.
-* **D3Q19, TRT, raw MRT, regularised walls, the aorta, height-field input.**
+* **regularised (on-node) velocity walls.** This has halfway bounce-back only,
+  which puts the no-slip plane half a cell outside the last fluid node — while
+  the magnetic moment condition puts B exactly *on* it. Mixing them is a
+  half-cell disagreement about the channel width, which is precisely the error
+  the moment condition exists to avoid, so **a wall-bounded MHD benchmark such
+  as Hartmann still wants the parent.** The magnetic wall itself is here and
+  measured; what is missing is its velocity counterpart.
+* **a moving obstacle in the free surface.** Deliberately not ported: the
+  parent's own banner records two measured defects that are left in because
+  fixing either makes its demonstrator fail *sooner*, so its reach depends on
+  those errors cancelling something unidentified. Static walls are here.
+* **surface tension and gas dynamics in the free surface**, which is the method
+  rather than an omission — see the banner in `freesurface.cuh`.
+* **conducting and insulating magnetic walls.** `MagDirichlet` imposes a
+  prescribed external field and `MagOutflow` a zero gradient; neither is a wall
+  coupled to a wall current or matched onto an exterior vacuum field.
+* **wetting / contact angle** for the phase field, and any open boundary for φ.
+* **D3Q19, raw MRT, the aorta, height-field input.**
 
 ## The colour gradient — confirmed on a T4
 

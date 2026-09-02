@@ -286,10 +286,18 @@ Do not spend time on these without saying so first; several are deliberate.
   `transfer_covered_mass()` and `settle()`, is written up in the module banner
   with measurements, and is not a caller error. Do not present a run with a
   moving obstacle as a result.
-- **`GPU/` covers a fraction of `src/`**: D3Q27 only, raw storage only, no open
-  scalar boundary, no physical magnetic wall (so every MHD case there is
-  periodic — do not read a wall-bounded MHD result off `GPU/`), no free surface.
-  The parent's `hartmann` case *is* wall-bounded MHD and is fine.
+- **`GPU/` is D3Q27 only**, and that is now the main thing it does not share
+  with `src/`. As of 2026-09-02 it also has TRT, shifted storage, central
+  moments for *both* multiphase distributions (its phase field runs on D3Q7 or
+  D3Q27, and the central-moment operator needs the latter), the open scalar
+  boundary, Dellar's moment-based magnetic wall, the penalised rigid body with
+  both shapes, and the free surface.
+  What it still lacks: **regularised (on-node) velocity walls** — so it has
+  halfway bounce-back only, and mixing that with the on-node magnetic wall is a
+  half-cell disagreement about the channel width. **A wall-bounded MHD
+  benchmark such as `hartmann` therefore still belongs to `src/`.** It also has
+  no moving obstacle in the free surface, deliberately: see that module's
+  banner, and the entry above.
 - **The rigid body is 2-D and of uniform density**; there is no collision model,
   so bodies interpenetrate.
 
