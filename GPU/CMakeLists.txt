@@ -40,16 +40,8 @@ endif()
 set(LBM_GPU_ARCH "75" CACHE STRING "CUDA architecture, e.g. 75 for a T4")
 option(LBM_DOUBLE "Build in FP64 (slow on consumer cards)" OFF)
 option(LBM_PTXAS_VERBOSE "Report registers and spills per kernel" OFF)
-# OFF, AND THAT IS A MEASUREMENT RATHER THAN A PREFERENCE. --use_fast_math was
-# applied unconditionally here until 2026-09-02, when the 3-D Rayleigh-Taylor
-# case (src/rti3d.cu) was found to leave the parent's answer at t/t0 >= 2:
-# 1.4219 against 1.4375, then 1.1719 against 1.2031, then 0.8750 against 0.9219.
-# The first four instants agreed to every digit, so it reads as a late
-# instability rather than a flag.
-#
-# It is not precision. The parent built in FP32 (-DLBM_PRECISION=float) tracks
-# its own FP64 to every digit through t/t0 = 2, so dropping to single precision
-# does not move this case at all; the difference was here.
+# OFF BY DEFAULT, ON PRECAUTIONARY GROUNDS -- AND THE MEASUREMENT SAYS SO
+# EXPLICITLY, BECAUSE THE FIRST VERSION OF THIS NOTE CLAIMED MORE THAN IT COULD.
 #
 # --use_fast_math is not a rounding mode. It implies --prec-div=false,
 # --prec-sqrt=false and --ftz=true, and the conservative Allen-Cahn source in
@@ -58,13 +50,21 @@ option(LBM_PTXAS_VERBOSE "Report registers and spills per kernel" OFF)
 #
 #     A = (4/W) phi (1 - phi) G / |G|
 #
-# That is the term which holds the interface at its prescribed width, so the
-# error is a systematic perturbation of the interface NORMAL, not noise in a
-# diagnostic -- and Rayleigh-Taylor amplifies it exponentially.
+# That is the term holding the interface at its prescribed width, so an error
+# there perturbs the interface NORMAL rather than a diagnostic. Approximating it
+# to buy speed is a bad trade in a scheme whose answer is an interface position.
 #
-# Switch it on to buy back the speed where the physics does not go through a
-# normalised gradient (single-phase, thermal, MHD). Do not switch it on for a
-# phase-field or colour-gradient run and then compare against the parent.
+# WHAT IT DOES NOT EXPLAIN. This flag was switched off while chasing a 3-D
+# Rayleigh-Taylor discrepancy against the Kokkos parent (1.4219 against 1.4375
+# at t/t0 = 2, then 1.1719/1.2031, then 0.8750/0.9219). It is NOT the cause.
+# Rebuilt without it, the T4 reproduces the fast-math numbers exactly -- same
+# spike, same bubble, same max|u| to the last digit at all seven instants.
+# Precision is not the cause either: the parent in FP32 tracks its own FP64 to
+# every digit through t/t0 = 2.
+#
+# The cause is a genuine difference at the phi = 1 wall, which
+# validation/phase_wall.cpp in the parent now records. Do not let this option's
+# name suggest the question is closed.
 option(LBM_FAST_MATH "nvcc --use_fast_math: approximate div/sqrt, FTZ" OFF)
 
 if(NOT LBM_HOST_ONLY)

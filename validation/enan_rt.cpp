@@ -253,6 +253,15 @@ static RT run(Index W, bool three_d, double At, double Re, double Ca, double Pe,
   fl.set_geometry([&](Index, Index y, Index) -> CellType {
     return (y == 0 || y == ny - 1) ? Solid : Fluid;
   });
+  // THE PHASE FIELD NEEDS THE SAME TWO PLANES, and until 2026-09-02 it did not
+  // get them: only the fluid was given a geometry, so phi was transported
+  // across the planes the fluid calls Solid. Zero normal flux is the condition
+  // an impermeable wall imposes on an order parameter -- no phase leaves the
+  // box -- and leaving it off is not a small boundary detail. It was found by
+  // diffing phi against the CUDA port, which does set both.
+  pf.set_geometry([&](Index, Index y, Index) -> PhaseCell {
+    return (y == 0 || y == ny - 1) ? PhaseWall : PhaseBulk;
+  });
 
   auto phiv = pf.phi();
   const Real rl = Real(rho_l), rh = Real(rho_h), gr = Real(g);

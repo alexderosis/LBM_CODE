@@ -1,4 +1,4 @@
-foreach(v claudemd_skeleton_check poiseuille decaying_flows galilean thermal mhd regularized hartmann scalar_walls scalar_mass gaussian_plume height_field laplace layered_poiseuille floating_body gravity_wave)
+foreach(v claudemd_skeleton_check phase_wall poiseuille decaying_flows galilean thermal mhd regularized hartmann scalar_walls scalar_mass gaussian_plume height_field laplace layered_poiseuille floating_body gravity_wave)
   add_executable(${v} ${v}.cpp)
   target_link_libraries(${v} PRIVATE lbm)
   if(LBM_BUILD_TESTS)

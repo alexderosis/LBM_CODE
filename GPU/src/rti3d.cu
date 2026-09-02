@@ -77,10 +77,16 @@ static const double T_STAR[7] = {0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0};
 struct RtInit {
   Real half, amp, k, iw, rl, rh, g;
   int nx, nz;
+  // In 2-D the z cosine must go, not merely evaluate at z = 0: cos(0) = 1
+  // would add a CONSTANT amp to the interface height, displacing it half a
+  // wavelength instead of leaving a single-mode perturbation of amplitude amp.
+  bool two_d;
 
   LBM_HD void operator()(int x, int y, int z, Real& ph, Real& pt) const {
     const float fx = float(x), fy = float(y), fz = float(z);
-    const float yi = float(half) + float(amp) * (cosf(float(k) * fx) + cosf(float(k) * fz));
+    const float pert = two_d ? cosf(float(k) * fx)
+                             : cosf(float(k) * fx) + cosf(float(k) * fz);
+    const float yi = float(half) + float(amp) * pert;
     const float dz = fy - yi;
     ph = Real(0.5f * (1.0f + tanhf(2.0f * dz / float(iw))));
 
@@ -101,6 +107,12 @@ int main(int argc, char** argv) {
   double Re = 256.0, At = 0.5, Ca = 960.0, Pe = 1024.0, U = 0.04, iw = 5.0, tmax = 3.0;
   const char* dump = "";
   bool cm = true, vol = false;
+  // 2-D means ONE periodic cell in z on the same D3Q27 lattice, which is how
+  // the parent runs its 2-D cases too (validation/enan_rt.cpp). -aspect sets
+  // ny/W, because the 4:1 column of the 3-D table is not the only shape asked
+  // for; 1000 x 2000 is -w 1000 -aspect 2.
+  bool two_d = false;
+  double aspect = 4.0;
 
   for (int i = 1; i < argc; ++i) {
     auto num = [&](double& v) { if (i + 1 < argc) v = std::atof(argv[++i]); };
@@ -115,24 +127,38 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "-tmax"))   num(tmax);
     else if (!std::strcmp(argv[i], "-bgk"))    cm = false;
     else if (!std::strcmp(argv[i], "-vol"))    vol = true;
+    else if (!std::strcmp(argv[i], "-2d"))     two_d = true;
+    else if (!std::strcmp(argv[i], "-aspect")) num(aspect);
     else if (!std::strcmp(argv[i], "-dump") && i + 1 < argc) dump = argv[++i];
   }
 
-  const int nx = W, ny = 4 * W, nz = W;
+  const int nx = W, ny = int(aspect * double(W) + 0.5), nz = two_d ? 1 : W;
   const double g     = U * U / double(W);            // so sqrt(gW) = U
   const double nu    = double(W) * U / Re;
   const double rho_l = 1.0, rho_h = (1.0 + At) / (1.0 - At);
   const double sigma = nu * U / Ca;                  // NO rho_H -- see the banner
   const double M     = U * double(W) / Pe;           // domain-based
-  const double t_ref = std::sqrt(double(W) / g);     // NO Atwood factor in 3-D
+  // THE REFERENCE TIME DIFFERS BETWEEN 2-D AND 3-D IN THEIR OWN DRIVERS, and
+  // the parent's banner records why: their 3-D drivers use sqrt(W/g) with no
+  // Atwood factor, their 2-D ones sqrt(W/(g At)). Using the 3-D form in 2-D
+  // shortens the clock by sqrt(At) = 0.71, so a spike quoted at t/t0 = 3 would
+  // not be theirs. Same convention here, so the two codes' clocks agree.
+  const double t_ref = two_d ? std::sqrt(double(W) / (g * At))
+                             : std::sqrt(double(W) / g);
   const std::size_t nsteps = std::size_t(tmax * t_ref);
 
   const backend::DeviceInfo dev = backend::device_info();
-  std::printf("Rayleigh-Taylor 3-D   phase field %s + fluid %s   %s, %s\n",
+  std::printf("Rayleigh-Taylor %s   phase field %s + fluid %s   %s, %s\n",
+              two_d ? "2-D" : "3-D",
               cm ? "CM" : "BGK", cm ? "CM" : "BGK", dev.name.c_str(),
               sizeof(Real) == 4 ? "FP32" : "FP64");
   std::printf("  %d x %d x %d   Re %g   At %g   Ca %g   Pe %g   xi %g\n",
               nx, ny, nz, Re, At, Ca, Pe, iw);
+  // tau against its floor, printed because Re = 30000 at this W puts it close:
+  // nu = W U / Re, so a large Re is bought with a small viscosity and tau -> 1/2
+  // is where the scheme stops. Reading it back is the parent's standing rule.
+  std::printf("  tau %.6f   (stability floor 0.5; margin %.2e)\n",
+              3.0 * nu + 0.5, 3.0 * nu);
   std::printf("  nu %.6e   sigma %.6e   M %.6e   rho_H %.2f   g %.6e\n",
               nu, sigma, M, rho_h, g);
   std::printf("  t_ref %.1f   steps %zu\n\n", t_ref, nsteps);
@@ -174,6 +200,7 @@ int main(int argc, char** argv) {
   init.g    = Real(g);
   init.nx   = nx;
   init.nz   = nz;
+  init.two_d = two_d;
   pf.initialise_with(init);
 
   //---- march, measuring at their instants and dumping frames -----------------
@@ -268,9 +295,19 @@ int main(int argc, char** argv) {
   std::printf("\n  %s   %d frame(s) written%s%s\n",
               finite ? "finite throughout" : "NON-FINITE VALUES APPEARED",
               nframe, *dump ? " to " : "", dump);
-  std::printf("  Their Table IX (3-D, Re=256): "
-              "1.898 1.858 1.741 1.553 1.304 1.001 0.648\n");
-  std::printf("  Kokkos M3LB, W=64 xi=5:       "
-              "1.9062 1.8750 1.7969 1.6406 1.4375 1.2031 0.9219\n");
+  // The reference row must MATCH THE CASE, or the comparison is decoration. A
+  // 2-D run printed against the 3-D Table IX invites reading a difference that
+  // is a difference of dimensionality.
+  if (two_d) {
+    std::printf("  Their Table VIII (2-D, Re=30000): "
+                "1.900 1.829 1.620 1.365 1.118 0.863 0.575\n");
+    std::printf("  (their tabulated instants stop at t/t0 = 3; anything past "
+                "that is unreferenced)\n");
+  } else {
+    std::printf("  Their Table IX (3-D, Re=256): "
+                "1.898 1.858 1.741 1.553 1.304 1.001 0.648\n");
+    std::printf("  Kokkos M3LB, W=64 xi=5:       "
+                "1.9062 1.8750 1.7969 1.6406 1.4375 1.2031 0.9219\n");
+  }
   return finite ? 0 : 1;
 }
