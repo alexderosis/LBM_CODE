@@ -292,12 +292,15 @@ Do not spend time on these without saying so first; several are deliberate.
   D3Q27, and the central-moment operator needs the latter), the open scalar
   boundary, Dellar's moment-based magnetic wall, the penalised rigid body with
   both shapes, and the free surface.
-  What it still lacks: **regularised (on-node) velocity walls** — so it has
-  halfway bounce-back only, and mixing that with the on-node magnetic wall is a
-  half-cell disagreement about the channel width. **A wall-bounded MHD
-  benchmark such as `hartmann` therefore still belongs to `src/`.** It also has
-  no moving obstacle in the free surface, deliberately: see that module's
-  banner, and the entry above.
+  regularised (on-node) velocity walls, and `hartmann` — so a wall-bounded MHD
+  benchmark now runs there too.
+  What it still lacks: an open boundary for the FLUID (the parent's `NrmOutXp` /
+  `NrmOutFree`), D3Q19, raw MRT, and a moving obstacle in the free surface — the
+  last deliberately, see that module's banner and the entry above.
+  One property to know rather than a gap: **regularised walls are not mass
+  conserving**, since BC3 overwrites populations. A closed box holds its mass
+  exactly; a driven cavity leaks linearly and does not saturate (−1.7e-2 over
+  20000 steps at 32²). Do not read an absolute pressure off a long cavity run.
 - **The rigid body is 2-D and of uniform density**; there is no collision model,
   so bodies interpenetrate.
 

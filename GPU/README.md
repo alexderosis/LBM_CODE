@@ -31,6 +31,49 @@ eight digits. It is fixed. A constant offset is invisible in a profile *shape*,
 which is how it survived; what it moved was the fitted wall position, and it had
 led to a wrong conclusion about TRT that is retracted below.
 
+## Regularised walls, and Hartmann
+
+The wall is **on the node**, not half a cell away. That is the whole difference
+from bounce-back and it is what lets the fluid and the magnetic field agree
+about where the channel is.
+
+| | measured |
+|---|---|
+| Couette profile | exact, 7e-14 — and both wall NODES hold their imposed velocity to the last bit |
+| forced Poiseuille, l2/u_max at τ = 2 | second order, 1.91 → 1.95 → 1.98 |
+| … BGK at L = 9 / 15 / 31 / 63 | 1.178e-01 / 4.435e-02 / 1.075e-02 / 2.645e-03 |
+| … TRT at the same | 3.681e-03 / 1.386e-03 / 3.358e-04 / 8.266e-05 |
+| … CM at the same | 2.945e-02 / 1.109e-02 / 2.687e-03 / 6.613e-04 |
+| closed box, all walls at rest | stays at rest to 5.8e-16 (local corners), 8.9e-15 (FD) |
+
+**TRT is 32× more accurate than BGK at every resolution.** That is the same
+story the bounce-back table above tells, arriving through a completely
+different boundary condition: what a wall costs depends on the free relaxation
+rate, not on the wall alone.
+
+**`src/hartmann.cu`** is the case this unlocks — Dellar's Sec. 3–4, the twin of
+`../validation/hartmann.cpp`. Two different boundary mechanisms meet: a
+regularised velocity wall and a moment-based magnetic wall, both on the node.
+
+| Ha = 10 | l2 error in u | l2 error in b | u, b at the wall |
+|---|---|---|---|
+| L = 15 | 5.18e-03 | 1.27e-02 | 0.000e+00 |
+| L = 31 | 9.45e-04 | 4.36e-03 | 0.000e+00 |
+
+**THE ERROR IS NOT A SLIP LENGTH**, which is what it looked like first. The
+Poiseuille error reads as a uniform velocity pedestal, and fitting the
+parabola's root gives an apparent slip of 0.176 cells at L = 15 — but that
+apparent slip halves when L doubles (0.287, 0.176, 0.086, 0.042), so it is a
+fixed *absolute* velocity error, i.e. O(1/L²) against u_max. A real slip length
+would not move with L.
+
+**And the plane beyond each wall must be marked `Excluded`.** This code's
+indexing is periodic on every axis, so "outside the fluid" is a geometry flag
+and nothing else; without it the unknown-direction mask comes out empty and the
+wall reconstructs against directions that really did stream. Measured before the
+setup was fixed: a uniform 15%-of-u_max slip, with a profile that still looked
+like a parabola.
+
 ## The last seven features — confirmed on a T4
 
 TRT, shifted storage, central moments for both multiphase distributions, the
@@ -525,24 +568,17 @@ every driver alongside the device ones.
 | collision | BGK, TRT, central moments | BGK, TRT, raw MRT, central moments |
 | streaming | Esoteric Pull; two-lattice for the free surface | Esoteric Pull, two-lattice |
 | storage | raw, shifted | raw, shifted |
-| boundaries | periodic, bounce-back, scalar adiabatic / Dirichlet / outflow, magnetic moment-based | + regularised |
+| boundaries | periodic, bounce-back, **regularised (on-node) velocity**, scalar adiabatic / Dirichlet / outflow, magnetic moment-based | same |
 | forcing | Guo: uniform, Boussinesq, arbitrary per-node field | Guo, high-order Hermite |
 | thermal | advection–diffusion + Boussinesq | same |
 | MHD | Dellar induction + Maxwell stress, BGK and central moments, moment-based walls | + the published D2Q9 scheme |
 | multiphase | colour gradient + phase field, each with BGK **and** central moments; free surface | same, + D2Q9/D3Q19 |
 | rigid body | volume penalisation, Rect and Wedge | same, + a moving obstacle in the free surface |
 | geometry | arbitrary voxel input | arbitrary voxel input |
-| cases | 8 drivers | ~20 validation cases |
+| cases | 10 drivers, including `hartmann` | ~20 validation cases |
 
 Still absent, not merely untested:
 
-* **regularised (on-node) velocity walls.** This has halfway bounce-back only,
-  which puts the no-slip plane half a cell outside the last fluid node — while
-  the magnetic moment condition puts B exactly *on* it. Mixing them is a
-  half-cell disagreement about the channel width, which is precisely the error
-  the moment condition exists to avoid, so **a wall-bounded MHD benchmark such
-  as Hartmann still wants the parent.** The magnetic wall itself is here and
-  measured; what is missing is its velocity counterpart.
 * **a moving obstacle in the free surface.** Deliberately not ported: the
   parent's own banner records two measured defects that are left in because
   fixing either makes its demonstrator fail *sooner*, so its reach depends on
@@ -553,7 +589,18 @@ Still absent, not merely untested:
   prescribed external field and `MagOutflow` a zero gradient; neither is a wall
   coupled to a wall current or matched onto an exterior vacuum field.
 * **wetting / contact angle** for the phase field, and any open boundary for φ.
+* **an open boundary for the FLUID** — the parent's `NrmOutXp` / `NrmOutFree`
+  pressure and free outlets. A different feature from a velocity wall, with its
+  own failure mode (the parent measures a zero-gradient outlet settling at
+  ρ ≈ 181), and not what "regularised walls" means.
 * **D3Q19, raw MRT, the aorta, height-field input.**
+
+And one property rather than an omission: **regularised walls are not mass
+conserving**, because BC3 overwrites populations. At rest that costs nothing —
+a closed box holds its mass exactly and stays at rest to 6e-16 — but a driven
+cavity leaks linearly and does not saturate: −1.7e-2 over 20000 steps at 32²
+with the local corner closure, −3.2e-2 with the finite-difference one. Do not
+read an absolute pressure off a long cavity run.
 
 ## The colour gradient — confirmed on a T4
 
