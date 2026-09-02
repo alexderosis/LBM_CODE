@@ -31,6 +31,41 @@ eight digits. It is fixed. A constant offset is invisible in a profile *shape*,
 which is how it survived; what it moved was the fitted wall position, and it had
 led to a wrong conclusion about TRT that is retracted below.
 
+## The 3-D Rayleigh–Taylor case, against the Kokkos run
+
+`src/rti3d.cu` is De Rosis & Enan's Sec. III I (Table IX) — W = 64, Re = 256,
+At = 0.5, Ca = 960, Pe = 1024, ξ = 5, phase field **and** fluid on D3Q27 central
+moments — run on this implementation and on the parent's, from the same paper,
+with **no shared headers**.
+
+| t/t₀ | CUDA, T4, FP32 | Kokkos M3LB, FP64 | difference | their Table IX |
+|---|---|---|---|---|
+| 0.0 | 1.9062 | 1.9062 | — | 1.898 |
+| 0.5 | 1.8750 | 1.8750 | — | 1.858 |
+| 1.0 | 1.7969 | 1.7969 | — | 1.741 |
+| 1.5 | 1.6406 | 1.6406 | — | 1.553 |
+| 2.0 | 1.4219 | 1.4375 | 1 cell | 1.304 |
+| 2.5 | 1.1719 | 1.2031 | 2 cells | 1.001 |
+| 3.0 | 0.8750 | 0.9219 | 3 cells | 0.648 |
+
+**Identical for the first four instants**, then apart by exactly 1, 2 and 3
+lattice cells. The reported quantity is quantised to 1/W = 0.0156, so those are
+the smallest differences expressible at all — FP32 against FP64, on a nonlinear
+instability, at late time. All three spike measures (global, on-axis,
+population-thresholded) agree exactly at every instant in both codes, so there
+is no fragmentation artefact on either side.
+
+The Kokkos numbers were **re-run rather than quoted**, and reproduced
+`results/L_enan/enan_rt.dat` to every digit. That run took **13m43s on four
+threads**; the T4 did the same 4800 steps on 1.05M nodes in **16.8 s** — 49×.
+
+Both sit well above Table IX (+35.0% and +42.3% at t/t₀ = 3) and above the
+eight-model spread [0.648, 0.863] the paper itself tabulates. That is the
+parent's existing finding, unchanged and now independently reproduced: it is a
+property of the case at W = 64, not of either implementation. `-vol` writes the
+volumes for the φ = 1/2 isosurface, which is the view the paper's Fig. 15 shows
+and which a mid-plane slice cannot give once the spike rolls up.
+
 ## Regularised walls, and Hartmann
 
 The wall is **on the node**, not half a cell away. That is the whole difference
