@@ -14,6 +14,8 @@
 //
 //    1  Poiseuille flow between bounce-back walls   geometry, forcing, and where
 //                                                   the no-slip plane really sits
+//    1d regularised walls                     the wall ON the node, and what
+//                                                   BC3 costs in mass
 //    1c shifted storage                        f_i - w_i, and the three decades
 //                                                   of FP32 amplitude it recovers
 //    2  a closed box                                that geometry writes every
@@ -428,6 +430,216 @@ static void shifted_storage() {
   }
   std::printf("        (A=1e-2: raw %+.3e shifted %+.3e | A=1e-5: raw %+.3e shifted %+.3e)\n",
               big_raw, big_shf, sml_raw, sml_shf);
+}
+
+//==============================================================================
+//  1d. REGULARISED WALLS: the wall is ON the node.
+//
+//  Latt et al.'s BC3 (regularized.cuh). Halfway bounce-back puts the no-slip
+//  plane midway between the last fluid node and the first solid node; this puts
+//  it ON the boundary node, because that is the node whose velocity is imposed.
+//  A channel of nodes w0..w1 is therefore w1 - w0 wide, not w1 - w0 + 1.
+//
+//  THE PLANE BEYOND EACH WALL MUST BE MARKED Excluded, and that is not a
+//  formality. This code's indexing is periodic on every axis -- "outside the
+//  fluid" is a geometry flag and nothing else -- so without it the
+//  unknown-direction mask comes out EMPTY and the wall reconstructs against
+//  directions that really did stream. Measured before the setup was fixed: a
+//  uniform 15%-of-u_max slip, with a profile that still looked like a parabola.
+//
+//  1. COUETTE IS EXACT. Two walls, one moving, no body force: the linear profile
+//     is machine-exact (7e-14) and both wall nodes hold their imposed velocity
+//     to the last bit. Bounce-back cannot do either -- its wall is half a cell
+//     away, so the node itself is never at the imposed value.
+//
+//  2. FORCED POISEUILLE CONVERGES AT SECOND ORDER. l2 profile error / u_max,
+//     nu = 0.5 (tau = 2), 30 000 steps, FP64:
+//
+//         L     BGK        order    TRT        order    CM         order
+//          9    1.178e-01    --     3.681e-03    --     2.945e-02    --
+//         15    4.435e-02   1.91    1.386e-03   1.91    1.109e-02   1.91
+//         31    1.075e-02   1.95    3.358e-04   1.95    2.687e-03   1.95
+//         63    2.645e-03   1.98    8.266e-05   1.98    6.613e-04   1.98
+//
+//     Second order for all three, and TRT is THIRTY-TWO TIMES more accurate
+//     than BGK at every resolution, CM four times. That is the same story case
+//     1b tells about bounce-back, arriving through a completely different
+//     boundary condition: what the wall costs depends on the free relaxation
+//     rate, not on the wall alone.
+//
+//     THE ERROR IS NOT A SLIP LENGTH, which is what it looked like at first. It
+//     reads as a uniform velocity pedestal, and fitting the parabola's root
+//     gives an apparent slip of 0.176 cells at L = 15 -- but that apparent slip
+//     halves when L doubles (0.287, 0.176, 0.086, 0.042), so it is a fixed
+//     absolute velocity error, i.e. O(1/L^2) against u_max. A real slip length
+//     would not move with L. It is also independent of u_max over two decades,
+//     so it is linear, and it grows with tau.
+//
+//  3. CORNERS. A closed box with every wall at rest must stay at rest, and does:
+//     max|u| is 5.8e-16 with the local closure and 8.9e-15 with the
+//     finite-difference route. That is the sharpest corner test available,
+//     because a corner rho extrapolated wrongly or a Pi built from a wrong
+//     gradient both show up immediately as a flow out of nothing.
+//
+//  4. AND A WARNING THAT BELONGS WITH THEM. Regularised walls OVERWRITE
+//     populations, so they are NOT mass conserving. At rest that costs nothing
+//     -- the closed box holds its mass exactly -- but in a driven flow it leaks
+//     steadily and does NOT saturate. Measured on the Re = 80 lid-driven cavity
+//     at 32x32, as relative mass drift:
+//
+//         steps    4000     8000    12000    16000    20000
+//         local   -3.4e-3  -6.8e-3 -1.02e-2 -1.36e-2 -1.70e-2
+//         FD      -4.4e-3  -9.7e-3 -1.60e-2 -2.35e-2 -3.25e-2
+//
+//     Linear in time for the local closure, slightly worse than linear for the
+//     FD route. A long cavity run therefore drifts in density and needs either
+//     a pressure anchor or a renormalisation; do not read an absolute pressure
+//     off one. This is a property of BC3, not a defect in this port -- the
+//     parent says the same thing about its own boundary nodes -- but it is the
+//     kind of property that is only discovered at the end of a long run.
+//==============================================================================
+static void reg_channel(std::vector<RegWallSpec>& spec, std::vector<std::uint8_t>& geo,
+                        int nx, int ny, int nz, int w0, int w1, double Utop) {
+  geo.assign(std::size_t(nx) * ny * nz, std::uint8_t(Fluid));
+  spec.assign(std::size_t(nx) * ny * nz, RegWallSpec{});
+  for (int z = 0; z < nz; ++z)
+    for (int x = 0; x < nx; ++x) {
+      geo[std::size_t(node_id(x, w0 - 1, z, nx, ny))] = Excluded;
+      geo[std::size_t(node_id(x, w1 + 1, z, nx, ny))] = Excluded;
+      spec[std::size_t(node_id(x, w0, z, nx, ny))] = RegWallSpec{NrmYm, 0, 0, 0};
+      spec[std::size_t(node_id(x, w1, z, nx, ny))] = RegWallSpec{NrmYp, Real(Utop), 0, 0};
+    }
+}
+
+// l2 profile error / u_max for a forced channel on regularised walls.
+static double reg_poiseuille(Op op, int ny, double nu, double umax) {
+  const int nx = 4, nz = 4, w0 = 1, w1 = ny - 2;
+  const double L = double(w1 - w0);
+  const double G = 8.0 * nu * umax / (L * L);
+
+  host::Fluid fl(nx, ny, nz, op, Real(nu));
+  if (op == Op::TRT) fl.set_magic(Real(3.0 / 16.0));
+  std::vector<std::uint8_t> geo;
+  std::vector<RegWallSpec> spec;
+  reg_channel(spec, geo, nx, ny, nz, w0, w1, 0.0);
+  fl.set_geometry(geo);
+  fl.set_regularized_walls(spec);
+
+  BodyForce b;  b.fx = Real(G);
+  fl.set_force(b, ForceUniform);
+  fl.initialise_with([](int, int, int) { Macro m; m.rho = Real(1); return m; });
+  for (int t = 0; t < 30000; ++t) fl.step();
+
+  std::vector<Real> rho, ux, uy, uz;
+  fl.macroscopic_to_host(rho, ux, uy, uz);
+  double s = 0;
+  int cnt = 0;
+  for (int y = w0; y <= w1; ++y) {
+    double u = 0;
+    for (int z = 0; z < nz; ++z)
+      for (int x = 0; x < nx; ++x) u += double(ux[std::size_t(node_id(x, y, z, nx, ny))]);
+    u /= double(nx) * nz;
+    const double yy = double(y - w0);
+    const double e = (G / (2.0 * nu)) * yy * (L - yy);
+    s += (u - e) * (u - e);  ++cnt;
+  }
+  return std::sqrt(s / cnt) / umax;
+}
+
+static void regularized_walls() {
+  const int nx = 4, nz = 4;
+
+  // ---- 1. Couette is exact, and the wall node holds its velocity ------------
+  {
+    const int ny = 18, w0 = 1, w1 = ny - 2;
+    const double nu = 0.5, U = 0.01, L = double(w1 - w0);
+    host::Fluid fl(nx, ny, nz, Op::BGK, Real(nu));
+    std::vector<std::uint8_t> geo;
+    std::vector<RegWallSpec> spec;
+    reg_channel(spec, geo, nx, ny, nz, w0, w1, U);
+    fl.set_geometry(geo);
+    fl.set_regularized_walls(spec);
+    fl.initialise_with([](int, int, int) { Macro m; m.rho = Real(1); return m; });
+    for (int t = 0; t < 60000; ++t) fl.step();
+
+    std::vector<Real> rho, ux, uy, uz;
+    fl.macroscopic_to_host(rho, ux, uy, uz);
+    double worst = 0;
+    for (int y = w0; y <= w1; ++y) {
+      double u = 0;
+      for (int z = 0; z < nz; ++z)
+        for (int x = 0; x < nx; ++x) u += double(ux[std::size_t(node_id(x, y, z, nx, ny))]);
+      u /= double(nx) * nz;
+      worst = std::fmax(worst, std::fabs(u - U * double(y - w0) / L) / U);
+    }
+    check(worst < (fp64 ? 1e-10 : 1e-4),
+          "Couette on regularised walls is EXACT", worst, 0.0);
+    const double ub = double(ux[std::size_t(node_id(0, w0, 0, nx, ny))]);
+    const double ut = double(ux[std::size_t(node_id(0, w1, 0, nx, ny))]);
+    check(std::fabs(ub) < 1e-12 && std::fabs(ut - U) < (fp64 ? 1e-12 : 1e-8),
+          "  ... and both wall NODES hold their imposed velocity", ut, U);
+    note("bounce-back can do neither: its wall is half a cell from any node");
+  }
+
+  // ---- 2. forced Poiseuille: second order, and TRT is far better ------------
+  {
+    const double e15b = reg_poiseuille(Op::BGK, 18, 0.5, 0.002);
+    const double e31b = reg_poiseuille(Op::BGK, 34, 0.5, 0.002);
+    const double e31t = reg_poiseuille(Op::TRT, 34, 0.5, 0.002);
+    const double order = std::log(e15b / e31b) / std::log(31.0 / 15.0);
+    check(order > 1.8 && order < 2.15,
+          "forced Poiseuille converges at second order", order, 2.0);
+    check(e31b / e31t > 10.0,
+          "  ... and TRT beats BGK at the wall by more than 10x", e31b / e31t, 32.0);
+    std::printf("        (l2/u_max: BGK %.3e -> %.3e, order %.2f; TRT %.3e at L=31)\n",
+                e15b, e31b, order, e31t);
+  }
+
+  // ---- 3. corners: a closed box must stay closed ---------------------------
+  {
+    const int n = 34, nzz = 4, a = 1, b = n - 2;
+    for (int route = 0; route < 2; ++route) {
+      host::Fluid fl(n, n, nzz, Op::BGK, Real(0.02));
+      fl.set_fd_corners(route == 0);
+      std::vector<std::uint8_t> geo(std::size_t(n) * n * nzz, std::uint8_t(Fluid));
+      std::vector<RegWallSpec> spec(std::size_t(n) * n * nzz);
+      for (int z = 0; z < nzz; ++z)
+        for (int y = 0; y < n; ++y)
+          for (int x = 0; x < n; ++x) {
+            const long id = node_id(x, y, z, n, n);
+            if (x == 0 || x == n - 1 || y == 0 || y == n - 1) {
+              geo[std::size_t(id)] = Excluded;  continue;
+            }
+            const bool xw = (x == a || x == b), yw = (y == a || y == b);
+            if (xw && yw)  spec[std::size_t(id)] = RegWallSpec{NrmCorner, 0, 0, 0};
+            else if (yw)   spec[std::size_t(id)] = RegWallSpec{std::uint8_t(y == a ? NrmYm : NrmYp), 0, 0, 0};
+            else if (xw)   spec[std::size_t(id)] = RegWallSpec{std::uint8_t(x == a ? NrmXm : NrmXp), 0, 0, 0};
+          }
+      fl.set_geometry(geo);
+      fl.set_regularized_walls(spec);
+      fl.initialise_with([](int, int, int) { Macro m; m.rho = Real(1); return m; });
+      const double m0 = fl.total_mass();
+      for (int t = 0; t < 3000; ++t) fl.step();
+      std::vector<Real> rho, ux, uy, uz;
+      fl.macroscopic_to_host(rho, ux, uy, uz);
+      double umax = 0;
+      for (int y = a; y <= b; ++y)
+        for (int x = a; x <= b; ++x) {
+          const long id = node_id(x, y, nzz / 2, n, n);
+          umax = std::fmax(umax, std::fabs(double(ux[std::size_t(id)]))
+                               + std::fabs(double(uy[std::size_t(id)])));
+        }
+      char buf[128];
+      std::snprintf(buf, sizeof buf, "closed box, %s corners: stays at rest",
+                    route == 0 ? "FD   " : "local");
+      check(umax < (fp64 ? 1e-12 : 1e-6), buf, umax, 0.0);
+      std::snprintf(buf, sizeof buf, "  ... and holds its mass exactly");
+      check(std::fabs((fl.total_mass() - m0) / m0) < (fp64 ? 1e-12 : 1e-5), buf,
+            (fl.total_mass() - m0) / m0, 0.0);
+    }
+    note("a driven cavity does NOT hold its mass -- BC3 overwrites populations; "
+         "see the banner");
+  }
 }
 
 //==============================================================================
@@ -1104,6 +1316,7 @@ int main() {
   poiseuille(Op::TRT, "TRT", 1e-4, 2e-4);
   wall_position();
   shifted_storage();
+  regularized_walls();
   closed_box();
 
   std::printf("\n  -- the passive scalar --\n");

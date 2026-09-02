@@ -328,6 +328,23 @@ LBM_HD LBM_INLINE Real feq_shifted(int i, Real dens, Real rho,
   return D3Q27::w(i) * (dens + rho * phi);
 }
 
+//------------------------------------------------------------------------------
+// The PRODUCT-FORM equilibrium, as populations: the inverse transform of
+// k = (rho, 0, ..., 0). This is what the central-moment operator relaxes
+// toward, and it differs from `feq` at O(u^3).
+//
+// It lives here, once, because three places need it -- the free surface's
+// gas-facing reconstruction, the regularised wall, and anything seeding a CM
+// run -- and a second copy under a second name is exactly the thing that drifts
+// out of step with the operator it is supposed to match.
+//------------------------------------------------------------------------------
+LBM_HD LBM_INLINE void product_equilibrium(Real rho, const Real u[3], Real f[27]) {
+  Real k[27];
+  for (int n = 0; n < 27; ++n) k[n] = Real(0);
+  k[mi(0, 0, 0)] = rho;
+  to_populations(k, u, f);
+}
+
 // One name for both, so a collision does not branch in three places.
 LBM_HD LBM_INLINE Real feq_of(int i, const Macro& m, bool shifted) {
   return shifted ? feq_shifted(i, m.dens, m.rho, m.ux, m.uy, m.uz)

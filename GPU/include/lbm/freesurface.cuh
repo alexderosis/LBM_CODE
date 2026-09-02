@@ -137,20 +137,13 @@ enum FsCell : std::uint8_t {
   FsSolid     = 13,   // wall: halfway bounce-back
 };
 
-//------------------------------------------------------------------------------
-// The product-form equilibrium, as populations.
-//
-// Reached by inverse-transforming k_eq = (rho, 0, ..., 0) rather than by
-// evaluating a Hermite series -- cheaper, and exactly consistent with what the
-// central-moment collision relaxes toward, so the free-surface boundary
-// condition and the operator agree about what equilibrium means. Getting those
-// two out of step puts a permanent source at every gas-facing link.
-//------------------------------------------------------------------------------
+// cm_equilibrium is core.cuh's product_equilibrium under the name this module
+// used before it was shared. It IS the equilibrium the central-moment collision
+// relaxes toward, which is what makes the gas-facing reconstruction and the
+// operator agree about what equilibrium means -- getting those out of step puts
+// a permanent source at every gas-facing link.
 LBM_HD LBM_INLINE void cm_equilibrium(Real rho, const Real u[3], Real f[27]) {
-  Real k[27];
-  for (int n = 0; n < 27; ++n) k[n] = Real(0);
-  k[mi(0, 0, 0)] = rho;
-  to_populations(k, u, f);
+  product_equilibrium(rho, u, f);
 }
 
 //------------------------------------------------------------------------------

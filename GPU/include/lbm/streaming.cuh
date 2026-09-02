@@ -89,10 +89,22 @@ namespace lbm {
 //  and carries a runtime `if (p.ux_out)` for the coupled-velocity write. `ncu
 //  --set full` on one kernel would settle it; measure before theorising.
 //==============================================================================
+//  RegWall  a REGULARISED velocity wall: the node is a FLUID node whose
+//           populations are all replaced before it collides, so the imposed
+//           velocity holds exactly AT the node rather than half a cell away.
+//           See regularized.cuh.
+//
+//  THE ASYMMETRY WITH Solid IS THE POINT, and it is a live trap. A Solid cell
+//  does not collide and is not forced; a RegWall cell does both. The parent's
+//  CLAUDE.md records what mixing them cost there: a Boussinesq force reads
+//  T = 0 at a RegWall node against the intended T0 and drives a body force
+//  along the whole wall. Whatever reads a field at a wall has to know which of
+//  the two families it is looking at.
 enum CellType : std::uint8_t {
   Fluid    = 0,
   Solid    = 1,
   Excluded = 2,
+  RegWall  = 3,
 };
 
 //------------------------------------------------------------------------------

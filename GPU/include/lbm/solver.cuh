@@ -29,6 +29,7 @@
 //  over 27 populations to recover u, where refreshing T costs 7 and B costs 21.
 //  The fluid writes u as a by-product of a gather it was doing anyway.
 //==============================================================================
+#include "regularized.cuh"
 #include "streaming.cuh"
 
 namespace lbm {
@@ -52,6 +53,17 @@ struct FluidParams {
   Real omega = Real(1), omega_bulk = Real(1);
   Real omega_minus = Real(1);               // TRT only
   bool shifted = false;                     // storage: f_i, or f_i - w_i
+
+  //---- regularised walls; all null unless set_regularized_walls was called ----
+  const std::uint8_t*  bc_nrm = nullptr;    // outward normal code, per node
+  const std::uint16_t* bc_tag = nullptr;    // index into wall_u
+  const std::uint32_t* bc_unk = nullptr;    // which directions streamed from outside
+  const std::uint8_t*  bc_ext = nullptr;    // corner rho stencil direction
+  const Real*          wall_u = nullptr;    // 3 per state
+  Real* bc_rho = nullptr;                   // written by the wall passes
+  Real* bc_pi  = nullptr;                   // 6 per node, corners only
+  Real  bc_shear_omega = Real(1);           // for the FD corner route
+  bool  fd_corners = true;
 };
 
 //------------------------------------------------------------------------------
@@ -68,19 +80,55 @@ struct FluidParams {
 // step in a slot the WALL owns, so a sum over fluid cells alone does not see it.
 // Nothing is lost; the macroscopic field is what is missing it.
 //------------------------------------------------------------------------------
-template <int Parity, int OpKind, int FKind, bool Mhd, bool HasGeometry>
+template <int Parity, int OpKind, int FKind, bool Mhd, bool HasGeometry, bool HasWalls = false>
 LBM_HD LBM_INLINE void fluid_node_update(const FluidParams& p, long N, long n) {
   // Short-circuit on a compile-time constant: with HasGeometry false the load
   // is not merely predicted away, it is never emitted. Measured worth 5.6% on a
   // T4 -- see the note in streaming.cuh on why a one-byte-per-node array costs
   // ten times what its byte count suggests.
-  if (HasGeometry && p.flags[n] != Fluid) return;
+  const std::uint8_t cell = HasGeometry ? p.flags[n] : std::uint8_t(Fluid);
+  if (HasGeometry && cell != Fluid && cell != RegWall) return;
 
   int x, y, z;
   coords(n, p.nx, p.ny, x, y, z);
 
   Real f[27];
   gather<Parity>(p.f, N, x, y, z, p.nx, p.ny, p.nz, f);
+
+  // A REGULARISED WALL REPLACES EVERY POPULATION AND THEN COLLIDES NORMALLY.
+  // It is a fluid node, not a skipped one -- see the note on CellType in
+  // streaming.cuh for why that asymmetry with Solid is a live trap.
+  //
+  // The reconstruction works on RAW populations, so shifted storage is undone
+  // around it -- one add and one subtract, on the wall nodes alone.
+  if (HasWalls && cell == RegWall) {
+    const std::uint8_t code = p.bc_nrm[n];
+    if (code != NrmNone) {
+      if (p.shifted) for (int i = 0; i < 27; ++i) f[i] += D3Q27::w(i);
+
+      const int tg = int(p.bc_tag[n]);
+      const Real ur[3] = {p.wall_u[3 * tg], p.wall_u[3 * tg + 1], p.wall_u[3 * tg + 2]};
+
+      Real F[3] = {Real(0), Real(0), Real(0)};
+      if (FKind != ForceNone) force_at<FKind>(p.force, n, F);
+      const Real* Fv = (FKind != ForceNone) ? F : nullptr;
+      constexpr bool product = (OpKind == 1);   // the CM operator's own equilibrium
+
+      if (code == NrmCorner) {
+        // rho was extrapolated along a wall in the corner pass: Eq. (27) needs a
+        // single normal and a corner has none.
+        const Real rw = p.bc_rho[n];
+        if (p.fd_corners && p.bc_pi) reg_apply_with_stress(f, rw, ur, &p.bc_pi[6 * n], product);
+        else                         reg_apply(f, rw, ur, p.bc_unk[n], Fv, product);
+      } else {
+        int nrm[3];  normal_of(code, nrm);
+        const Real rw = reg_density(f, nrm, ur);
+        reg_apply(f, rw, ur, p.bc_unk[n], Fv, product);
+      }
+
+      if (p.shifted) for (int i = 0; i < 27; ++i) f[i] -= D3Q27::w(i);
+    }
+  }
 
   Macro m = macroscopic(f, p.shifted);
 
@@ -128,25 +176,163 @@ LBM_HD LBM_INLINE void fluid_node_update(const FluidParams& p, long N, long n) {
 // steps, arriving through the diagnostic rather than through the body.
 //------------------------------------------------------------------------------
 template <int Parity, int FKind>
-LBM_HD LBM_INLINE void macro_node(const Real* f, const std::uint8_t* flags, long N, long n,
-                                  int nx, int ny, int nz, const BodyForce& force,
-                                  bool shifted,
+LBM_HD LBM_INLINE void macro_node(const FluidParams& p, long N, long n,
                                   Real* rho, Real* ux, Real* uy, Real* uz) {
-  if (flags[n] != Fluid) {
+  const std::uint8_t cell = p.flags[n];
+  if (cell != Fluid && cell != RegWall) {
     rho[n] = Real(1); ux[n] = uy[n] = uz[n] = Real(0);
     return;
   }
   int x, y, z;
-  coords(n, nx, ny, x, y, z);
+  coords(n, p.nx, p.ny, x, y, z);
   Real fl[27];
-  gather<Parity>(f, N, x, y, z, nx, ny, nz, fl);
-  Macro m = macroscopic(fl, shifted);
+  gather<Parity>(p.f, N, x, y, z, p.nx, p.ny, p.nz, fl);
+
+  // AT A REGULARISED WALL THE STREAMED POPULATIONS ARE NOT A STATE. This pass
+  // runs between steps, so the unknown directions hold whatever was last left
+  // in those slots -- the step kernel rebuilds them at the START of a step and
+  // they are stale by the time anyone reads the field. Their raw moments are
+  // therefore meaningless, and reporting them is not a small error: measured on
+  // a forced channel it put a uniform 15%-of-u_max slip into the profile, which
+  // looks exactly like a boundary condition that does not hold.
+  //
+  // The velocity there is the IMPOSED one, by definition. The density comes
+  // from the same closure Eq. (27) the wall itself uses, so the reported state
+  // is the one the wall is enforcing rather than a snapshot of the plumbing.
+  if (cell == RegWall && p.bc_nrm) {
+    const std::uint8_t code = p.bc_nrm[n];
+    const int tg = int(p.bc_tag[n]);
+    const Real uw[3] = {p.wall_u[3 * tg], p.wall_u[3 * tg + 1], p.wall_u[3 * tg + 2]};
+    if (p.shifted) for (int i = 0; i < 27; ++i) fl[i] += D3Q27::w(i);
+    int nrm[3];  normal_of(code, nrm);
+    rho[n] = (code == NrmCorner) ? (p.bc_rho ? p.bc_rho[n] : Real(1))
+                                 : reg_density(fl, nrm, uw);
+    ux[n] = uw[0];  uy[n] = uw[1];  uz[n] = uw[2];
+    return;
+  }
+
+  Macro m = macroscopic(fl, p.shifted);
   if (FKind != ForceNone) {
     Real F[3];
-    force_at<FKind>(force, n, F);
+    force_at<FKind>(p.force, n, F);
     shift_velocity(m, F);
   }
   rho[n] = m.rho; ux[n] = m.ux; uy[n] = m.uy; uz[n] = m.uz;
+}
+
+//------------------------------------------------------------------------------
+// THE TWO WALL PRE-PASSES, and why they are separate kernels.
+//
+// A corner cannot evaluate Eq. (27) -- it has no single normal -- so its rho is
+// extrapolated from two STRAIGHT-wall nodes along a wall. Those nodes' rho has
+// to exist first, which is one fence. And the finite-difference corner route
+// reads its NEIGHBOURS' populations to build a velocity gradient, which is a
+// race against the step kernel writing them -- so it has to happen while
+// nothing is writing populations at all.
+//
+// Both passes are therefore read-only on the populations and run before the
+// step. BOTH ARE SKIPPED ENTIRELY WHEN THERE ARE NO CORNERS: a channel with two
+// straight walls closes for rho inside the step kernel and pays nothing here,
+// which is the common case and the one Hartmann is.
+//
+// This is a deliberate departure from the parent, which does the FD gradient
+// inside its step kernel. That is a genuine read/write race on a neighbour's
+// populations; it survives there because corners are few and the damage is
+// small and local, but it is not something to reproduce on a device with
+// thousands of concurrent threads.
+//------------------------------------------------------------------------------
+template <int Parity>
+LBM_HD LBM_INLINE void wall_rho_node(const FluidParams& p, long N, long n) {
+  if (p.flags[n] != RegWall) return;
+  const std::uint8_t code = p.bc_nrm[n];
+  if (code == NrmNone || code == NrmCorner) return;
+
+  int x, y, z;
+  coords(n, p.nx, p.ny, x, y, z);
+  Real f[27];
+  gather<Parity>(p.f, N, x, y, z, p.nx, p.ny, p.nz, f);
+  if (p.shifted) for (int i = 0; i < 27; ++i) f[i] += D3Q27::w(i);
+
+  int nrm[3];  normal_of(code, nrm);
+  const int tg = int(p.bc_tag[n]);
+  const Real uw[3] = {p.wall_u[3 * tg], p.wall_u[3 * tg + 1], p.wall_u[3 * tg + 2]};
+  p.bc_rho[n] = reg_density(f, nrm, uw);
+}
+
+// Velocity at a node, for the corner gradient. AT A WALL NODE IT IS THE IMPOSED
+// ONE, not the population sum: a wall's streamed populations still hold their
+// unfixed unknown directions at this point in the step, so their moments are
+// not a velocity. Reading them anyway is a wrong gradient at exactly the place
+// the gradient is the whole boundary condition.
+template <int Parity>
+LBM_HD LBM_INLINE void wall_vel_at(const FluidParams& p, long N, long m, Real out[3]) {
+  if (p.flags[m] == RegWall) {
+    const int t = int(p.bc_tag[m]);
+    out[0] = p.wall_u[3 * t];  out[1] = p.wall_u[3 * t + 1];  out[2] = p.wall_u[3 * t + 2];
+    return;
+  }
+  int x, y, z;
+  coords(m, p.nx, p.ny, x, y, z);
+  Real g[27];
+  gather<Parity>(p.f, N, x, y, z, p.nx, p.ny, p.nz, g);
+  const Macro mm = macroscopic(g, p.shifted);
+  out[0] = mm.ux;  out[1] = mm.uy;  out[2] = mm.uz;
+}
+
+template <int Parity>
+LBM_HD LBM_INLINE void wall_corner_node(const FluidParams& p, long N, long n) {
+  if (p.flags[n] != RegWall || p.bc_nrm[n] != NrmCorner) return;
+
+  int x, y, z;
+  coords(n, p.nx, p.ny, x, y, z);
+  const int dirs[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+
+  // ---- rho, extrapolated along a wall ----
+  const std::uint8_t k = p.bc_ext[n];
+  if (k == NrmNone) {
+    p.bc_rho[n] = Real(1);           // no valid stencil; reported at setup
+  } else {
+    const int* e = dirs[k - 1];
+    const long n1 = node_id(wrap(x + e[0], p.nx), wrap(y + e[1], p.ny),
+                            wrap(z + e[2], p.nz), p.nx, p.ny);
+    const long n2 = node_id(wrap(x + 2 * e[0], p.nx), wrap(y + 2 * e[1], p.ny),
+                            wrap(z + 2 * e[2], p.nz), p.nx, p.ny);
+    p.bc_rho[n] = Real(2) * p.bc_rho[n1] - p.bc_rho[n2];
+  }
+
+  if (!p.fd_corners || !p.bc_pi) return;
+
+  // ---- Pi from a finite-difference velocity gradient, Eq. (21) ----
+  const int tg = int(p.bc_tag[n]);
+  const Real uw[3] = {p.wall_u[3 * tg], p.wall_u[3 * tg + 1], p.wall_u[3 * tg + 2]};
+  const int ic[3] = {x, y, z};
+  const int nn[3] = {p.nx, p.ny, p.nz};
+  Real grad[3][3] = {{Real(0),Real(0),Real(0)},
+                     {Real(0),Real(0),Real(0)},
+                     {Real(0),Real(0),Real(0)}};
+  for (int a = 0; a < 3; ++a) {
+    if (nn[a] < 3) continue;
+    // One-sided INTO the fluid at a domain face; centred otherwise.
+    int dir = 0;
+    if (ic[a] == 0)             dir =  1;
+    else if (ic[a] == nn[a] - 1) dir = -1;
+    int c1[3] = {ic[0], ic[1], ic[2]}, c2[3] = {ic[0], ic[1], ic[2]};
+    Real u1[3], u2[3];
+    if (dir != 0) {
+      c1[a] += dir;  c2[a] += 2 * dir;
+      wall_vel_at<Parity>(p, N, node_id(c1[0], c1[1], c1[2], p.nx, p.ny), u1);
+      wall_vel_at<Parity>(p, N, node_id(c2[0], c2[1], c2[2], p.nx, p.ny), u2);
+      for (int b = 0; b < 3; ++b)            // (-3 f0 + 4 f1 - f2) / 2
+        grad[a][b] = Real(dir) * (Real(-1.5) * uw[b] + Real(2) * u1[b] - Real(0.5) * u2[b]);
+    } else {
+      c1[a] = wrap(ic[a] + 1, nn[a]);
+      c2[a] = wrap(ic[a] - 1, nn[a]);
+      wall_vel_at<Parity>(p, N, node_id(c1[0], c1[1], c1[2], p.nx, p.ny), u1);
+      wall_vel_at<Parity>(p, N, node_id(c2[0], c2[1], c2[2], p.nx, p.ny), u2);
+      for (int b = 0; b < 3; ++b) grad[a][b] = Real(0.5) * (u1[b] - u2[b]);
+    }
+  }
+  reg_stress_from_gradient(p.bc_rho[n], p.bc_shear_omega, grad, &p.bc_pi[6 * n]);
 }
 
 //==============================================================================
@@ -154,24 +340,35 @@ LBM_HD LBM_INLINE void macro_node(const Real* f, const std::uint8_t* flags, long
 //==============================================================================
 #if defined(__CUDACC__)
 
-template <int Parity, int OpKind, int FKind, bool Mhd, bool HasGeometry>
+template <int Parity, int OpKind, int FKind, bool Mhd, bool HasGeometry, bool HasWalls>
 __global__ void fluid_kernel(FluidParams p, long N) {
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
-  fluid_node_update<Parity, OpKind, FKind, Mhd, HasGeometry>(p, N, n);
+  fluid_node_update<Parity, OpKind, FKind, Mhd, HasGeometry, HasWalls>(p, N, n);
+}
+
+template <int Parity>
+__global__ void wall_rho_kernel(FluidParams p, long N) {
+  const long n = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n >= N) return;
+  wall_rho_node<Parity>(p, N, n);
+}
+
+template <int Parity>
+__global__ void wall_corner_kernel(FluidParams p, long N) {
+  const long n = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n >= N) return;
+  wall_corner_node<Parity>(p, N, n);
 }
 
 template <int Parity, int FKind>
-__global__ void compute_macro(const Real* __restrict__ f,
-                              const std::uint8_t* __restrict__ flags,
-                              int nx, int ny, int nz, BodyForce force,
-                              bool shifted,
-                              Real* __restrict__ rho, Real* __restrict__ ux,
-                              Real* __restrict__ uy, Real* __restrict__ uz) {
-  const long N = long(nx) * ny * nz;
+__global__ void compute_macro(FluidParams p, Real* __restrict__ rho,
+                              Real* __restrict__ ux, Real* __restrict__ uy,
+                              Real* __restrict__ uz) {
+  const long N = long(p.nx) * p.ny * p.nz;
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
-  macro_node<Parity, FKind>(f, flags, N, n, nx, ny, nz, force, shifted, rho, ux, uy, uz);
+  macro_node<Parity, FKind>(p, N, n, rho, ux, uy, uz);
 }
 
 //------------------------------------------------------------------------------
@@ -260,6 +457,8 @@ class Solver {
   ~Solver() {
     cudaFree(f_); cudaFree(flags_);
     cudaFree(ux_); cudaFree(uy_); cudaFree(uz_);
+    cudaFree(bc_nrm_); cudaFree(bc_ext_); cudaFree(bc_tag_); cudaFree(bc_unk_);
+    cudaFree(bc_rho_); cudaFree(bc_pi_); cudaFree(wall_u_);
   }
 
   Solver(const Solver&) = delete;
@@ -281,6 +480,70 @@ class Solver {
   }
 
   void set_force(const BodyForce& b, int kind) { force_ = b; fkind_ = kind; }
+
+  //--------------------------------------------------------------------------
+  // Regularised velocity walls. `spec` is one RegWallSpec per node; a node with
+  // normal == NrmNone is left alone, any other value marks it RegWall and
+  // imposes that velocity AT the node. See regularized.cuh.
+  //
+  // CALL set_geometry FIRST if the run has any solid cells: the unknown-direction
+  // mask is built from the geometry, and a wall whose neighbours are not yet
+  // marked gets the wrong set of unknowns -- which does not fail, it just
+  // reconstructs against directions that did stream.
+  //
+  // THE CHANNEL IS H-1 WIDE, NOT H. That is the whole difference from
+  // bounce-back and the commonest way to get a Reynolds number wrong here.
+  //--------------------------------------------------------------------------
+  void set_regularized_walls(const std::vector<RegWallSpec>& spec) {
+    if (long(spec.size()) != N_) {
+      std::fprintf(stderr, "set_regularized_walls: %zu specs for %ld nodes\n",
+                   spec.size(), N_);
+      std::exit(1);
+    }
+    std::vector<std::uint8_t> geo(std::size_t(N_), std::uint8_t(Fluid));
+    if (has_geometry_)
+      LBM_CUDA_CHECK(cudaMemcpy(geo.data(), flags_, sizeof(std::uint8_t) * N_,
+                                cudaMemcpyDeviceToHost));
+
+    std::vector<std::uint8_t>  nrm, ext;
+    std::vector<std::uint16_t> tag;
+    std::vector<std::uint32_t> unk;
+    std::vector<Real> table;
+    n_walls_ = build_reg_walls(spec, geo, nx_, ny_, nz_, nrm, tag, unk, ext,
+                               table, has_corners_);
+    if (n_walls_ == 0) return;
+
+    for (long n = 0; n < N_; ++n)
+      if (nrm[std::size_t(n)] != NrmNone) geo[std::size_t(n)] = RegWall;
+    LBM_CUDA_CHECK(cudaMemcpy(flags_, geo.data(), sizeof(std::uint8_t) * N_,
+                              cudaMemcpyHostToDevice));
+    has_geometry_ = true;
+    has_walls_ = true;
+
+    LBM_CUDA_CHECK(cudaMalloc(&bc_nrm_, sizeof(std::uint8_t) * N_));
+    LBM_CUDA_CHECK(cudaMalloc(&bc_ext_, sizeof(std::uint8_t) * N_));
+    LBM_CUDA_CHECK(cudaMalloc(&bc_tag_, sizeof(std::uint16_t) * N_));
+    LBM_CUDA_CHECK(cudaMalloc(&bc_unk_, sizeof(std::uint32_t) * N_));
+    LBM_CUDA_CHECK(cudaMalloc(&bc_rho_, sizeof(Real) * N_));
+    LBM_CUDA_CHECK(cudaMalloc(&wall_u_, sizeof(Real) * table.size()));
+    LBM_CUDA_CHECK(cudaMemcpy(bc_nrm_, nrm.data(), sizeof(std::uint8_t) * N_, cudaMemcpyHostToDevice));
+    LBM_CUDA_CHECK(cudaMemcpy(bc_ext_, ext.data(), sizeof(std::uint8_t) * N_, cudaMemcpyHostToDevice));
+    LBM_CUDA_CHECK(cudaMemcpy(bc_tag_, tag.data(), sizeof(std::uint16_t) * N_, cudaMemcpyHostToDevice));
+    LBM_CUDA_CHECK(cudaMemcpy(bc_unk_, unk.data(), sizeof(std::uint32_t) * N_, cudaMemcpyHostToDevice));
+    LBM_CUDA_CHECK(cudaMemcpy(wall_u_, table.data(), sizeof(Real) * table.size(),
+                              cudaMemcpyHostToDevice));
+    // Six Reals per node, and ONLY when there are corners to need them: on a
+    // channel that is 24 bytes/node of nothing.
+    if (has_corners_ && fd_corners_)
+      LBM_CUDA_CHECK(cudaMalloc(&bc_pi_, sizeof(Real) * 6 * N_));
+  }
+
+  // Corners: how Pi^(1) is obtained there. The finite-difference route is what
+  // Latt et al. use (Sec. V) and the parent measures ~35% lower error with it on
+  // the Re = 1000 cavity; the local closure is cheaper and operator-agnostic but
+  // a corner offers few streamed directions to build a stress from.
+  void set_fd_corners(bool on) { fd_corners_ = on; }
+  long wall_count() const { return n_walls_; }
 
   // TRT's free rate, set through the magic parameter rather than directly --
   // Lambda is the quantity with a meaning (3/16 puts the bounce-back wall
@@ -405,13 +668,13 @@ class Solver {
   template <int P>
   void macro_force(int G, int B, Real* dr, Real* dx, Real* dy, Real* dz) {
     if (fkind_ == ForceUniform)
-      compute_macro<P, ForceUniform><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, shifted_, dr, dx, dy, dz);
+      compute_macro<P, ForceUniform><<<G, B>>>(params(), dr, dx, dy, dz);
     else if (fkind_ == ForceBoussinesq)
-      compute_macro<P, ForceBoussinesq><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, shifted_, dr, dx, dy, dz);
+      compute_macro<P, ForceBoussinesq><<<G, B>>>(params(), dr, dx, dy, dz);
     else if (fkind_ == ForceField)
-      compute_macro<P, ForceField><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, shifted_, dr, dx, dy, dz);
+      compute_macro<P, ForceField><<<G, B>>>(params(), dr, dx, dy, dz);
     else
-      compute_macro<P, ForceNone><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, shifted_, dr, dx, dy, dz);
+      compute_macro<P, ForceNone><<<G, B>>>(params(), dr, dx, dy, dz);
   }
 
   FluidParams params() {
@@ -424,6 +687,13 @@ class Solver {
     p.omega = omega_; p.omega_bulk = omega_bulk_;
     p.omega_minus = omega_minus_;
     p.shifted = shifted_;
+    p.bc_nrm = bc_nrm_;  p.bc_tag = bc_tag_;  p.bc_unk = bc_unk_;
+    p.bc_ext = bc_ext_;  p.wall_u = wall_u_;
+    p.bc_rho = bc_rho_;  p.bc_pi = bc_pi_;
+    // THE SHEAR RATE, not just any rate: TRT's is omega_plus. See
+    // reg_stress_from_gradient.
+    p.bc_shear_omega = omega_;
+    p.fd_corners = fd_corners_;
     return p;
   }
 
@@ -452,12 +722,19 @@ class Solver {
     }
   }
   template <int P, int O, int F, bool M> void run() {
-    if (has_geometry_) launch<P, O, F, M, true>();
-    else               launch<P, O, F, M, false>();
+    if (has_walls_)         launch<P, O, F, M, true, true>();
+    else if (has_geometry_) launch<P, O, F, M, true, false>();
+    else                    launch<P, O, F, M, false, false>();
   }
-  template <int P, int O, int F, bool M, bool G> void launch() {
-    const int B = 128;
-    fluid_kernel<P, O, F, M, G><<<int((N_ + B - 1) / B), B>>>(params(), N_);
+  template <int P, int O, int F, bool M, bool G, bool W> void launch() {
+    const int B = 128, Gr = int((N_ + B - 1) / B);
+    // The wall pre-passes exist only for corners -- a straight wall closes for
+    // rho inside the step kernel. See wall_rho_kernel.
+    if (W && has_corners_) {
+      wall_rho_kernel<P><<<Gr, B>>>(params(), N_);
+      wall_corner_kernel<P><<<Gr, B>>>(params(), N_);
+    }
+    fluid_kernel<P, O, F, M, G, W><<<Gr, B>>>(params(), N_);
     LBM_CUDA_CHECK(cudaGetLastError());
   }
 
@@ -474,6 +751,17 @@ class Solver {
   bool mhd_ = false;
   bool has_geometry_ = false;
   bool shifted_ = false;
+  std::uint8_t*  bc_nrm_ = nullptr;
+  std::uint8_t*  bc_ext_ = nullptr;
+  std::uint16_t* bc_tag_ = nullptr;
+  std::uint32_t* bc_unk_ = nullptr;
+  Real* bc_rho_ = nullptr;
+  Real* bc_pi_  = nullptr;
+  Real* wall_u_ = nullptr;
+  long n_walls_ = 0;
+  bool has_walls_ = false;
+  bool has_corners_ = false;
+  bool fd_corners_ = true;
   std::size_t t_ = 0;
 };
 

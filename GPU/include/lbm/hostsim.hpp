@@ -52,6 +52,24 @@ class Fluid {
 
   void set_geometry(const std::vector<std::uint8_t>& fl) { flags_ = fl; has_geometry_ = true; }
   void set_force(const BodyForce& b, int kind) { force_ = b; fkind_ = kind; }
+
+  // Regularised velocity walls. Same contract as the device class: call
+  // set_geometry FIRST if there are solid cells, and remember the channel is
+  // H-1 wide, not H. See regularized.cuh.
+  void set_regularized_walls(const std::vector<RegWallSpec>& spec) {
+    std::vector<std::uint8_t> geo = flags_;
+    n_walls_ = build_reg_walls(spec, geo, nx_, ny_, nz_, bc_nrm_, bc_tag_,
+                               bc_unk_, bc_ext_, wall_u_, has_corners_);
+    if (n_walls_ == 0) return;
+    for (long n = 0; n < N_; ++n)
+      if (bc_nrm_[std::size_t(n)] != NrmNone) flags_[std::size_t(n)] = RegWall;
+    has_geometry_ = true;
+    has_walls_ = true;
+    bc_rho_.assign(std::size_t(N_), Real(1));
+    if (has_corners_ && fd_corners_) bc_pi_.assign(std::size_t(6 * N_), Real(0));
+  }
+  void set_fd_corners(bool on) { fd_corners_ = on; }
+  long wall_count() const { return n_walls_; }
   void set_magic(Real lambda) { omega_minus_ = omega_minus_for(omega_, lambda); }
 
   // Store f_i - w_i instead of f_i. Call BEFORE initialise_with; see core.cuh.
@@ -103,7 +121,7 @@ class Fluid {
   }
 
   void macroscopic_to_host(std::vector<Real>& rho, std::vector<Real>& ux,
-                           std::vector<Real>& uy, std::vector<Real>& uz) const {
+                           std::vector<Real>& uy, std::vector<Real>& uz) {
     rho.resize(std::size_t(N_)); ux.resize(std::size_t(N_));
     uy.resize(std::size_t(N_));  uz.resize(std::size_t(N_));
     if (t_ % 2 == 0) macro_force<0>(rho, ux, uy, uz);
@@ -114,20 +132,17 @@ class Fluid {
   // velocity of a forced scheme carries Guo's half shift. See macro_node.
   template <int P>
   void macro_force(std::vector<Real>& rho, std::vector<Real>& ux,
-                   std::vector<Real>& uy, std::vector<Real>& uz) const {
+                   std::vector<Real>& uy, std::vector<Real>& uz) {
+    const FluidParams p = params();
     for (long n = 0; n < N_; ++n) {
       if (fkind_ == ForceUniform)
-        macro_node<P, ForceUniform>(f_.data(), flags_.data(), N_, n, nx_, ny_, nz_,
-                                    force_, shifted_, rho.data(), ux.data(), uy.data(), uz.data());
+        macro_node<P, ForceUniform>(p, N_, n, rho.data(), ux.data(), uy.data(), uz.data());
       else if (fkind_ == ForceBoussinesq)
-        macro_node<P, ForceBoussinesq>(f_.data(), flags_.data(), N_, n, nx_, ny_, nz_,
-                                       force_, shifted_, rho.data(), ux.data(), uy.data(), uz.data());
+        macro_node<P, ForceBoussinesq>(p, N_, n, rho.data(), ux.data(), uy.data(), uz.data());
       else if (fkind_ == ForceField)
-        macro_node<P, ForceField>(f_.data(), flags_.data(), N_, n, nx_, ny_, nz_,
-                                  force_, shifted_, rho.data(), ux.data(), uy.data(), uz.data());
+        macro_node<P, ForceField>(p, N_, n, rho.data(), ux.data(), uy.data(), uz.data());
       else
-        macro_node<P, ForceNone>(f_.data(), flags_.data(), N_, n, nx_, ny_, nz_,
-                                 force_, shifted_, rho.data(), ux.data(), uy.data(), uz.data());
+        macro_node<P, ForceNone>(p, N_, n, rho.data(), ux.data(), uy.data(), uz.data());
     }
   }
 
@@ -162,6 +177,14 @@ class Fluid {
     p.omega = omega_; p.omega_bulk = omega_bulk_;
     p.omega_minus = omega_minus_;
     p.shifted = shifted_;
+    if (has_walls_) {
+      p.bc_nrm = bc_nrm_.data();  p.bc_tag = bc_tag_.data();
+      p.bc_unk = bc_unk_.data();  p.bc_ext = bc_ext_.data();
+      p.wall_u = wall_u_.data();  p.bc_rho = bc_rho_.data();
+      p.bc_pi = bc_pi_.empty() ? nullptr : bc_pi_.data();
+    }
+    p.bc_shear_omega = omega_;
+    p.fd_corners = fd_corners_;
     return p;
   }
 
@@ -186,10 +209,20 @@ class Fluid {
   }
   template <int P, int O, int F, bool M> void run() {
     const FluidParams p = params();
-    if (has_geometry_)
-      for (long n = 0; n < N_; ++n) fluid_node_update<P, O, F, M, true>(p, N_, n);
+    // The wall pre-passes, in the same order the device launches them and for
+    // the same reason: a corner's rho needs its straight-wall neighbours' rho to
+    // exist first, and the FD gradient must run while nothing is writing
+    // populations. Skipped entirely without corners.
+    if (has_walls_ && has_corners_) {
+      for (long n = 0; n < N_; ++n) wall_rho_node<P>(p, N_, n);
+      for (long n = 0; n < N_; ++n) wall_corner_node<P>(p, N_, n);
+    }
+    if (has_walls_)
+      for (long n = 0; n < N_; ++n) fluid_node_update<P, O, F, M, true, true>(p, N_, n);
+    else if (has_geometry_)
+      for (long n = 0; n < N_; ++n) fluid_node_update<P, O, F, M, true, false>(p, N_, n);
     else
-      for (long n = 0; n < N_; ++n) fluid_node_update<P, O, F, M, false>(p, N_, n);
+      for (long n = 0; n < N_; ++n) fluid_node_update<P, O, F, M, false, false>(p, N_, n);
   }
 
   int nx_, ny_, nz_;
@@ -205,6 +238,14 @@ class Fluid {
   bool mhd_ = false;
   bool has_geometry_ = false;
   bool shifted_ = false;
+  std::vector<std::uint8_t>  bc_nrm_, bc_ext_;
+  std::vector<std::uint16_t> bc_tag_;
+  std::vector<std::uint32_t> bc_unk_;
+  std::vector<Real> bc_rho_, bc_pi_, wall_u_;
+  long n_walls_ = 0;
+  bool has_walls_ = false;
+  bool has_corners_ = false;
+  bool fd_corners_ = true;
   std::size_t t_ = 0;
 };
 
