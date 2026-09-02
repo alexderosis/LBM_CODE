@@ -14,6 +14,8 @@
 //
 //    1  Poiseuille flow between bounce-back walls   geometry, forcing, and where
 //                                                   the no-slip plane really sits
+//    1c shifted storage                        f_i - w_i, and the three decades
+//                                                   of FP32 amplitude it recovers
 //    2  a closed box                                that geometry writes every
 //                                                   slot exactly once
 //    3  an insulating box                           the scalar is conserved
@@ -313,6 +315,119 @@ static void wall_position() {
         std::fabs(y_lo - y_hi), 0.076);
   check(std::fabs(nu_lo - nu0) / nu0 < 1e-3 && std::fabs(nu_hi - nu0) / nu0 < 1e-3,
         "Lambda leaves the viscosity untouched", nu_hi, nu0);
+}
+
+//==============================================================================
+//  1c. SHIFTED STORAGE: the same physics, three decades more of it in FP32.
+//
+//  The arrays hold either f_i or g_i = f_i - w_i. Populations are O(w_i) ~ 1e-1
+//  while the collision works on differences O(1e-6), and the momentum sum
+//  cancels those 1e-1 terms down to the flow speed -- so in FP32 both throw away
+//  most of the mantissa. Storing g_i removes both cancellations, exactly:
+//  sum_i c_i w_i = 0, so sum_i c_i g_i IS sum_i c_i f_i while every summand is
+//  small.
+//
+//  THE CASE. A shear wave u_x = A sin(2 pi y / L) decays at nu k^2, and the
+//  decay rate is measured from the fitted amplitude. Shrinking A shrinks nothing
+//  about the physics -- the rate is amplitude-independent -- so any dependence
+//  on A is arithmetic.
+//
+//  MEASURED, nu = 0.02, L = 32, 2000 steps, as a relative error in the rate:
+//
+//      A        raw (FP32)    shifted (FP32)     both (FP64)
+//      1e-2     +4.97e-03     +5.22e-03          +5.234e-03
+//      1e-3     +4.47e-03     +5.22e-03          +5.234e-03
+//      1e-4     -3.79e-02     +5.22e-03          +5.234e-03
+//      1e-5     -9.68e-01     +5.21e-03          +5.234e-03
+//      1e-6     -1.02e+00     +5.22e-03          +5.234e-03
+//
+//  Two things to read off it.
+//
+//  FIRST, the FP64 column is one number. Raw and shifted agree to every digit
+//  there, at every amplitude -- so this is a change of REPRESENTATION and not of
+//  scheme, and +5.234e-3 is the discretisation error of the operator, which is
+//  what it should be at these parameters.
+//
+//  SECOND, the FP32 columns separate completely. Raw storage is fine to about
+//  A = 1e-3 and then collapses: at A = 1e-5 the measured decay rate is 3% of the
+//  true one, i.e. the wave barely decays at all, and at 1e-6 it is worse than
+//  useless. Shifted holds +5.22e-3 at every amplitude, within 0.4% of the FP64
+//  answer. That is three decades of amplitude recovered, and this tree is FP32
+//  by default because FP64 on a consumer NVIDIA part runs at 1/32 to 1/64 of the
+//  rate -- so it is not a refinement, it is the difference between what the
+//  device is for and what it can resolve.
+//
+//  AND NOTE HOW IT FAILS. Raw FP32 at A = 1e-5 does not produce NaN, does not
+//  blow up, and does not look wrong: it produces a shear wave that sits there.
+//  A run reporting an anomalously stable low-amplitude mode is what this looks
+//  like from outside.
+//==============================================================================
+static double shear_amplitude(const std::vector<Real>& ux, int nx, int ny, int nz) {
+  const double k = 2.0 * M_PI / ny;
+  double S = 0;
+  for (int y = 0; y < ny; ++y) {
+    double p = 0;
+    for (int z = 0; z < nz; ++z)
+      for (int x = 0; x < nx; ++x) p += double(ux[std::size_t(node_id(x, y, z, nx, ny))]);
+    S += (p / (double(nx) * nz)) * std::sin(k * y);
+  }
+  return 2.0 * S / ny;
+}
+
+static double shear_decay_error(bool shifted, double A) {
+  const int nx = 4, ny = 32, nz = 4;
+  const double nu = 0.02;
+  const std::size_t T = 2000;
+  const double k = 2.0 * M_PI / ny;
+
+  host::Fluid fl(nx, ny, nz, Op::BGK, Real(nu));
+  fl.set_shifted(shifted);
+  fl.initialise_with([&](int, int y, int) {
+    Macro m;
+    m.rho = Real(1);
+    m.ux = Real(A * std::sin(k * y));
+    return m;
+  });
+
+  std::vector<Real> rho, ux, uy, uz;
+  fl.macroscopic_to_host(rho, ux, uy, uz);
+  const double a0 = shear_amplitude(ux, nx, ny, nz);
+  for (std::size_t t = 0; t < T; ++t) fl.step();
+  fl.macroscopic_to_host(rho, ux, uy, uz);
+  const double a1 = shear_amplitude(ux, nx, ny, nz);
+
+  const double rate = -std::log(a1 / a0) / double(T);
+  const double exact = nu * k * k;
+  return (rate - exact) / exact;
+}
+
+static void shifted_storage() {
+  // A COMFORTABLE amplitude, where both work. This is the check that shifted
+  // storage changes the representation and not the scheme: if it were a
+  // different operator, it would differ HERE, where neither is short of
+  // precision.
+  const double big_raw = shear_decay_error(false, 1e-2);
+  const double big_shf = shear_decay_error(true,  1e-2);
+  check(std::fabs(big_raw - big_shf) < (fp64 ? 1e-9 : 5e-4),
+        "at A = 1e-2 the two storages agree: same scheme", big_shf, big_raw);
+
+  // A HARD one, where the cancellation bites. In FP64 nothing happens; in FP32
+  // raw loses the wave and shifted does not.
+  const double sml_raw = shear_decay_error(false, 1e-5);
+  const double sml_shf = shear_decay_error(true,  1e-5);
+  check(std::fabs(sml_shf - big_shf) < 5e-3,
+        "at A = 1e-5 shifted still gets the decay rate", sml_shf, big_shf);
+  if (fp64) {
+    check(std::fabs(sml_raw - big_raw) < 1e-9,
+          "  ... and in FP64 so does raw, which is the point", sml_raw, big_raw);
+    note("the shift is a precision device; in FP64 there is nothing for it to do");
+  } else {
+    check(std::fabs(sml_raw) > 0.5,
+          "  ... while raw FP32 has lost it entirely", sml_raw, 0.0);
+    note("raw FP32 at A=1e-5 gives a wave that barely decays -- no NaN, no blow-up");
+  }
+  std::printf("        (A=1e-2: raw %+.3e shifted %+.3e | A=1e-5: raw %+.3e shifted %+.3e)\n",
+              big_raw, big_shf, sml_raw, sml_shf);
 }
 
 //==============================================================================
@@ -988,6 +1103,7 @@ int main() {
   // absorbed by a loose bound.
   poiseuille(Op::TRT, "TRT", 1e-4, 2e-4);
   wall_position();
+  shifted_storage();
   closed_box();
 
   std::printf("\n  -- the passive scalar --\n");

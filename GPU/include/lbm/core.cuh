@@ -241,18 +241,60 @@ LBM_HD LBM_INLINE void to_populations(Real k[27], const Real ub[3], Real f[27]) 
 }
 
 //==============================================================================
+//  WHAT THE POPULATION ARRAYS HOLD, and why there is a choice.
+//
+//  raw       stores f_i
+//  shifted   stores g_i = f_i - w_i
+//
+//  WHY THE SHIFT, AND WHY IT MATTERS MORE HERE THAN IN THE PARENT. Populations
+//  are O(w_i) ~ 1e-1 but the collision operates on differences O(1e-6), so
+//  f - f^eq in FP32 throws away most of the mantissa; the momentum sum is worse
+//  still, since sum_i c_i f_i cancels ~1e-1 terms down to ~1e-2. Storing g_i
+//  removes both cancellations: sum_i c_i w_i = 0 EXACTLY, so sum_i c_i g_i is
+//  identically sum_i c_i f_i while every summand is small.
+//
+//  This tree is FP32 by default -- FP64 on a consumer NVIDIA part runs at 1/32
+//  to 1/64 of the rate -- so the precision this buys is not a refinement here.
+//
+//  ALMOST NOTHING ELSE CHANGES:
+//    * streaming is a pure copy, untouched;
+//    * halfway bounce-back is g_i <- g_opp(i), untouched, because w_i = w_opp(i);
+//    * the Guo source is already an O(F) quantity, untouched;
+//    * the Maxwell stress is already a perturbation, untouched.
+//  Only the equilibrium and the density reconstruction differ, and both are
+//  written cancellation-free below. The reference density is exactly 1.
+//
+//  IT IS A RUNTIME FLAG, NOT A TEMPLATE PARAMETER, and that is a considered
+//  difference from HasGeometry. That one is templated because it removes a
+//  memory STREAM -- measured worth 2.9% on a T4, see streaming.cuh. This removes
+//  no load at all: the same 27 values are read and written either way, and the
+//  branch is uniform over the whole grid so it predicts perfectly. There is
+//  nothing for a template to save, and templating it would double an
+//  instantiation matrix that is already 96 kernels.
+//==============================================================================
+
+//==============================================================================
 //  Macroscopic moments and equilibrium.
 //==============================================================================
-struct Macro { Real rho, ux, uy, uz; };
+// `dens` is WHAT THE ARRAY HOLDS as a zeroth moment -- rho when raw, rho - 1
+// when shifted -- and `rho` is always the density. Carrying both is what keeps
+// the shifted equilibrium free of a rho - 1 that would undo the whole point.
+struct Macro {
+  Real rho = Real(0), ux = Real(0), uy = Real(0), uz = Real(0);
+  Real dens = Real(0);
+};
 
-LBM_HD LBM_INLINE Macro macroscopic(const Real f[27]) {
-  Macro m{Real(0), Real(0), Real(0), Real(0)};
+LBM_HD LBM_INLINE Macro macroscopic(const Real f[27], bool shifted = false) {
+  Macro m;
+  Real s = Real(0);
   for (int i = 0; i < 27; ++i) {
-    m.rho += f[i];
+    s     += f[i];
     m.ux  += f[i] * Real(D3Q27::cx(i));
     m.uy  += f[i] * Real(D3Q27::cy(i));
     m.uz  += f[i] * Real(D3Q27::cz(i));
   }
+  m.dens = s;
+  m.rho  = shifted ? (Real(1) + s) : s;
   const Real inv = Real(1) / m.rho;
   m.ux *= inv; m.uy *= inv; m.uz *= inv;
   return m;
@@ -265,6 +307,31 @@ LBM_HD LBM_INLINE Real feq(int i, Real rho, Real ux, Real uy, Real uz) {
   const Real u2 = ux * ux + uy * uy + uz * uz;
   return D3Q27::w(i) * rho *
          (Real(1) + Real(3) * cu + Real(4.5) * cu * cu - Real(1.5) * u2);
+}
+
+//------------------------------------------------------------------------------
+// The same equilibrium for SHIFTED storage, written so nothing cancels.
+//
+//     g^eq = f^eq - w_i = w_i [ rho (1 + Phi) - 1 ],  Phi = 3cu + 4.5cu^2 - 1.5u^2
+//          = w_i [ (rho - 1) + rho Phi ]  =  w_i [ dens + rho Phi ].
+//
+// Written as `feq(i, rho, u) - w_i` instead, this would subtract two numbers of
+// size w_i to get one of size 1e-6 -- exactly the cancellation the shift exists
+// to remove, reintroduced in the one place it would be invisible.
+//------------------------------------------------------------------------------
+LBM_HD LBM_INLINE Real feq_shifted(int i, Real dens, Real rho,
+                                   Real ux, Real uy, Real uz) {
+  const Real cu = Real(D3Q27::cx(i)) * ux + Real(D3Q27::cy(i)) * uy
+                + Real(D3Q27::cz(i)) * uz;
+  const Real u2 = ux * ux + uy * uy + uz * uz;
+  const Real phi = Real(3) * cu + Real(4.5) * cu * cu - Real(1.5) * u2;
+  return D3Q27::w(i) * (dens + rho * phi);
+}
+
+// One name for both, so a collision does not branch in three places.
+LBM_HD LBM_INLINE Real feq_of(int i, const Macro& m, bool shifted) {
+  return shifted ? feq_shifted(i, m.dens, m.rho, m.ux, m.uy, m.uz)
+                 : feq(i, m.rho, m.ux, m.uy, m.uz);
 }
 
 //------------------------------------------------------------------------------
@@ -290,6 +357,15 @@ LBM_HD LBM_INLINE void eq_factors(const Real du[3], Real Qf[3][3]) {
 
 LBM_HD LBM_INLINE Real eq_moment(Real rho, const Real Qf[3][3], int n) {
   return rho * Qf[0][p_of(n)] * Qf[1][q_of(n)] * Qf[2][r_of(n)];
+}
+
+// The same, for either storage. See the note above collide_cm_gen: the weight
+// moments subtract because the transform is linear and g = f - w.
+LBM_HD LBM_INLINE Real cm_eq_moment(Real rho, const Real Qf[3][3],
+                                    const Real Aw[3][3], int n, bool shifted) {
+  const Real e = eq_moment(rho, Qf, n);
+  if (!shifted) return e;
+  return e - Aw[0][p_of(n)] * Aw[1][q_of(n)] * Aw[2][r_of(n)];
 }
 
 //==============================================================================
@@ -602,10 +678,13 @@ struct MaxwellMoments<false> {
 //------------------------------------------------------------------------------
 template <bool Forced, bool Mhd>
 LBM_HD LBM_INLINE void collide_bgk_gen(Real f[27], const Macro& m, Real omega,
-                                       const Coupling& cp) {
+                                       const Coupling& cp, bool shifted = false) {
   const Real w2 = Real(1) - Real(0.5) * omega;
   for (int i = 0; i < 27; ++i) {
-    Real e = feq(i, m.rho, m.ux, m.uy, m.uz);
+    Real e = feq_of(i, m, shifted);
+    // The Maxwell stress and the Guo source are PERTURBATIONS -- both sum to
+    // zero and neither carries a w_i -- so both are identical in either
+    // storage. Only the equilibrium above knows the difference.
     if (Mhd) e += maxwell(i, cp.B);
     f[i] += omega * (e - f[i]);
     if (Forced) f[i] += w2 * guo_source_raw<D3Q27>(i, cp.F, m.ux, m.uy, m.uz);
@@ -633,14 +712,31 @@ LBM_HD LBM_INLINE void collide_bgk_gen(Real f[27], const Macro& m, Real omega,
 // free. Adding them explicitly double counts -- measured in the parent, it gives
 // 1.5 cs^2 F where cs^2 F is right.
 //------------------------------------------------------------------------------
+//
+// SHIFTED STORAGE COSTS ONE EXTRA TERM AND NO EXTRA TRANSFORM. The transform is
+// linear, so the moments of g = f - w are the moments of f minus the moments of
+// the WEIGHTS, and on a product lattice those factorise into the 1D triple
+// {1, -u, u^2} -- the same Aw the multiphase operator uses. So
+//
+//     k_eq(g)(n) = rho [n == 0] - A(p,ux) A(q,uy) A(r,uz),
+//
+// which at n = 0 is rho - 1 = dens, as it must be. Nothing else changes: the
+// Maxwell moments and the order-1 force are perturbations either way.
 template <bool Forced, bool Mhd>
 LBM_HD LBM_INLINE void collide_cm_gen(Real f[27], const Macro& m, Real omega,
-                                      Real omega_bulk, const Coupling& cp) {
+                                      Real omega_bulk, const Coupling& cp,
+                                      bool shifted = false) {
   const Real ub[3] = {m.ux, m.uy, m.uz};
   const Real du[3] = {Real(0), Real(0), Real(0)};   // central: shift == velocity
 
   Real Qf[3][3];
   eq_factors(du, Qf);
+
+  // The weight moments about u, needed only when the storage is shifted.
+  Real Aw[3][3];
+  for (int a = 0; a < 3; ++a) {
+    Aw[a][0] = Real(1);  Aw[a][1] = -ub[a];  Aw[a][2] = ub[a] * ub[a];
+  }
 
   Real k[27];
   to_moments(f, ub, k);
@@ -662,7 +758,7 @@ LBM_HD LBM_INLINE void collide_cm_gen(Real f[27], const Macro& m, Real omega,
   Real tr = Real(0), tre = Real(0);
   for (int a = 0; a < 3; ++a) {
     d[a] = k[I2D[a]];
-    e[a] = eq_moment(m.rho, Qf, I2D[a]) + kM[I2D[a]];
+    e[a] = cm_eq_moment(m.rho, Qf, Aw, I2D[a], shifted) + kM[I2D[a]];
     tr += d[a]; tre += e[a];
   }
   const Real invD = Real(1) / Real(3);
@@ -672,11 +768,11 @@ LBM_HD LBM_INLINE void collide_cm_gen(Real f[27], const Macro& m, Real omega,
               + omega * (e[a] - tre * invD) + tr_post * invD;
   for (int a = 0; a < 3; ++a)
     k[I2S[a]] = (Real(1) - omega) * k[I2S[a]]
-              + omega * (eq_moment(m.rho, Qf, I2S[a]) + kM[I2S[a]]);
+              + omega * (cm_eq_moment(m.rho, Qf, Aw, I2S[a], shifted) + kM[I2S[a]]);
 
   // ---- order >= 3 ----
   for (int n = 0; n < 27; ++n)
-    if (order_of(n) >= 3) k[n] = eq_moment(m.rho, Qf, n) + kM[n];
+    if (order_of(n) >= 3) k[n] = cm_eq_moment(m.rho, Qf, Aw, n, shifted) + kM[n];
 
   to_populations(k, ub, f);
 }
@@ -720,10 +816,11 @@ LBM_HD LBM_INLINE void collide_cm_gen(Real f[27], const Macro& m, Real omega,
 //------------------------------------------------------------------------------
 template <bool Forced, bool Mhd>
 LBM_HD LBM_INLINE void collide_trt_gen(Real f[27], const Macro& m, Real omega_p,
-                                       Real omega_m, const Coupling& cp) {
+                                       Real omega_m, const Coupling& cp,
+                                       bool shifted = false) {
   Real e[27];
   for (int i = 0; i < 27; ++i) {
-    e[i] = feq(i, m.rho, m.ux, m.uy, m.uz);
+    e[i] = feq_of(i, m, shifted);
     if (Mhd) e[i] += maxwell(i, cp.B);
   }
   Real sr[27];
@@ -774,19 +871,22 @@ LBM_HD LBM_INLINE Real magic_parameter(Real omega_plus, Real omega_minus) {
 //------------------------------------------------------------------------------
 // The uncoupled forms, unchanged in meaning and in signature.
 //------------------------------------------------------------------------------
-LBM_HD LBM_INLINE void collide_bgk(Real f[27], const Macro& m, Real omega) {
+LBM_HD LBM_INLINE void collide_bgk(Real f[27], const Macro& m, Real omega,
+                                   bool shifted = false) {
   const Coupling cp{};
-  collide_bgk_gen<false, false>(f, m, omega, cp);
+  collide_bgk_gen<false, false>(f, m, omega, cp, shifted);
 }
 
-LBM_HD LBM_INLINE void collide_cm(Real f[27], const Macro& m, Real omega, Real omega_bulk) {
+LBM_HD LBM_INLINE void collide_cm(Real f[27], const Macro& m, Real omega,
+                                  Real omega_bulk, bool shifted = false) {
   const Coupling cp{};
-  collide_cm_gen<false, false>(f, m, omega, omega_bulk, cp);
+  collide_cm_gen<false, false>(f, m, omega, omega_bulk, cp, shifted);
 }
 
-LBM_HD LBM_INLINE void collide_trt(Real f[27], const Macro& m, Real omega_p, Real omega_m) {
+LBM_HD LBM_INLINE void collide_trt(Real f[27], const Macro& m, Real omega_p,
+                                   Real omega_m, bool shifted = false) {
   const Coupling cp{};
-  collide_trt_gen<false, false>(f, m, omega_p, omega_m, cp);
+  collide_trt_gen<false, false>(f, m, omega_p, omega_m, cp, shifted);
 }
 
 LBM_HD LBM_INLINE Real omega_from_viscosity(Real nu) {

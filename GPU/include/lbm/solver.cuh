@@ -51,6 +51,7 @@ struct FluidParams {
   int nx = 0, ny = 0, nz = 0;
   Real omega = Real(1), omega_bulk = Real(1);
   Real omega_minus = Real(1);               // TRT only
+  bool shifted = false;                     // storage: f_i, or f_i - w_i
 };
 
 //------------------------------------------------------------------------------
@@ -81,7 +82,7 @@ LBM_HD LBM_INLINE void fluid_node_update(const FluidParams& p, long N, long n) {
   Real f[27];
   gather<Parity>(p.f, N, x, y, z, p.nx, p.ny, p.nz, f);
 
-  Macro m = macroscopic(f);
+  Macro m = macroscopic(f, p.shifted);
 
   Coupling cp;
   force_at<FKind>(p.force, n, cp.F);
@@ -92,9 +93,9 @@ LBM_HD LBM_INLINE void fluid_node_update(const FluidParams& p, long N, long n) {
   // already been applied to, i.e. the physical one.
   if (p.ux_out) { p.ux_out[n] = m.ux; p.uy_out[n] = m.uy; p.uz_out[n] = m.uz; }
 
-  if      (OpKind == 0) collide_bgk_gen<FKind != ForceNone, Mhd>(f, m, p.omega, cp);
-  else if (OpKind == 1) collide_cm_gen <FKind != ForceNone, Mhd>(f, m, p.omega, p.omega_bulk, cp);
-  else                  collide_trt_gen<FKind != ForceNone, Mhd>(f, m, p.omega, p.omega_minus, cp);
+  if      (OpKind == 0) collide_bgk_gen<FKind != ForceNone, Mhd>(f, m, p.omega, cp, p.shifted);
+  else if (OpKind == 1) collide_cm_gen <FKind != ForceNone, Mhd>(f, m, p.omega, p.omega_bulk, cp, p.shifted);
+  else                  collide_trt_gen<FKind != ForceNone, Mhd>(f, m, p.omega, p.omega_minus, cp, p.shifted);
 
   scatter<Parity>(p.f, N, x, y, z, p.nx, p.ny, p.nz, f);
 }
@@ -129,6 +130,7 @@ LBM_HD LBM_INLINE void fluid_node_update(const FluidParams& p, long N, long n) {
 template <int Parity, int FKind>
 LBM_HD LBM_INLINE void macro_node(const Real* f, const std::uint8_t* flags, long N, long n,
                                   int nx, int ny, int nz, const BodyForce& force,
+                                  bool shifted,
                                   Real* rho, Real* ux, Real* uy, Real* uz) {
   if (flags[n] != Fluid) {
     rho[n] = Real(1); ux[n] = uy[n] = uz[n] = Real(0);
@@ -138,7 +140,7 @@ LBM_HD LBM_INLINE void macro_node(const Real* f, const std::uint8_t* flags, long
   coords(n, nx, ny, x, y, z);
   Real fl[27];
   gather<Parity>(f, N, x, y, z, nx, ny, nz, fl);
-  Macro m = macroscopic(fl);
+  Macro m = macroscopic(fl, shifted);
   if (FKind != ForceNone) {
     Real F[3];
     force_at<FKind>(force, n, F);
@@ -163,12 +165,13 @@ template <int Parity, int FKind>
 __global__ void compute_macro(const Real* __restrict__ f,
                               const std::uint8_t* __restrict__ flags,
                               int nx, int ny, int nz, BodyForce force,
+                              bool shifted,
                               Real* __restrict__ rho, Real* __restrict__ ux,
                               Real* __restrict__ uy, Real* __restrict__ uz) {
   const long N = long(nx) * ny * nz;
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
-  macro_node<Parity, FKind>(f, flags, N, n, nx, ny, nz, force, rho, ux, uy, uz);
+  macro_node<Parity, FKind>(f, flags, N, n, nx, ny, nz, force, shifted, rho, ux, uy, uz);
 }
 
 //------------------------------------------------------------------------------
@@ -187,7 +190,7 @@ __global__ void compute_macro(const Real* __restrict__ f,
 //------------------------------------------------------------------------------
 template <class Init>
 __global__ void initialise(Real* __restrict__ f, const std::uint8_t* __restrict__ flags,
-                           int nx, int ny, int nz, Init init) {
+                           int nx, int ny, int nz, bool shifted, Init init) {
   const long N = long(nx) * ny * nz;
   const long n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= N) return;
@@ -196,8 +199,13 @@ __global__ void initialise(Real* __restrict__ f, const std::uint8_t* __restrict_
 
   Macro m = (flags[n] == Fluid) ? init(x, y, z)
                                 : Macro{Real(1), Real(0), Real(0), Real(0)};
+  // A seed comes from a caller as a DENSITY, whichever storage is in use, so
+  // `dens` is derived here rather than demanded. A shifted run that was handed
+  // a raw seed would start with every population off by w_i, which is a
+  // pressure of 1 in lattice units -- not subtle, but silent.
+  m.dens = shifted ? (m.rho - Real(1)) : m.rho;
   Real fl[27];
-  for (int i = 0; i < 27; ++i) fl[i] = feq(i, m.rho, m.ux, m.uy, m.uz);
+  for (int i = 0; i < 27; ++i) fl[i] = feq_of(i, m, shifted);
   init_scatter<0>(f, N, x, y, z, nx, ny, nz, fl);   // NOT scatter -- see above
 }
 
@@ -280,6 +288,12 @@ class Solver {
   // every other operator. Defaults to 3/16, so a TRT run that says nothing
   // gets the wall-consistent value rather than BGK by accident.
   void set_magic(Real lambda) { omega_minus_ = omega_minus_for(omega_, lambda); }
+
+  // Store f_i - w_i instead of f_i. Call BEFORE initialise_with -- it changes
+  // what the arrays MEAN, so switching it on a seeded lattice reinterprets
+  // every value. See the banner in core.cuh for what it buys in FP32.
+  void set_shifted(bool on) { shifted_ = on; }
+  bool shifted() const { return shifted_; }
   Real omega_minus() const { return omega_minus_; }
   Real magic() const { return magic_parameter(omega_, omega_minus_); }
 
@@ -310,7 +324,7 @@ class Solver {
   template <class Init>
   void initialise_with(Init init) {
     const int B = 128;
-    initialise<<<int((N_ + B - 1) / B), B>>>(f_, flags_, nx_, ny_, nz_, init);
+    initialise<<<int((N_ + B - 1) / B), B>>>(f_, flags_, nx_, ny_, nz_, shifted_, init);
     LBM_CUDA_CHECK(cudaGetLastError());
     LBM_CUDA_CHECK(cudaDeviceSynchronize());
     t_ = 0;
@@ -356,6 +370,10 @@ class Solver {
   // Summed over every slot, including those owned by solid cells -- see the
   // kernel above. Costs one full pass over the lattice, so it belongs either
   // side of a timed loop, never inside one.
+  // NOTE WHAT THIS MEANS UNDER SHIFTED STORAGE: the sum is of g_i = f_i - w_i,
+  // so it is (total mass) - (number of slots), and it is near zero rather than
+  // near N. Still exactly conserved, which is what the check is for, but a
+  // caller comparing it against a node count will be confused.
   double total_mass() {
     const int B = 256, G = 1024;
     double* d = nullptr;
@@ -387,13 +405,13 @@ class Solver {
   template <int P>
   void macro_force(int G, int B, Real* dr, Real* dx, Real* dy, Real* dz) {
     if (fkind_ == ForceUniform)
-      compute_macro<P, ForceUniform><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, dr, dx, dy, dz);
+      compute_macro<P, ForceUniform><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, shifted_, dr, dx, dy, dz);
     else if (fkind_ == ForceBoussinesq)
-      compute_macro<P, ForceBoussinesq><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, dr, dx, dy, dz);
+      compute_macro<P, ForceBoussinesq><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, shifted_, dr, dx, dy, dz);
     else if (fkind_ == ForceField)
-      compute_macro<P, ForceField><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, dr, dx, dy, dz);
+      compute_macro<P, ForceField><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, shifted_, dr, dx, dy, dz);
     else
-      compute_macro<P, ForceNone><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, dr, dx, dy, dz);
+      compute_macro<P, ForceNone><<<G, B>>>(f_, flags_, nx_, ny_, nz_, force_, shifted_, dr, dx, dy, dz);
   }
 
   FluidParams params() {
@@ -405,6 +423,7 @@ class Solver {
     p.nx = nx_; p.ny = ny_; p.nz = nz_;
     p.omega = omega_; p.omega_bulk = omega_bulk_;
     p.omega_minus = omega_minus_;
+    p.shifted = shifted_;
     return p;
   }
 
@@ -454,6 +473,7 @@ class Solver {
   int fkind_ = ForceNone;
   bool mhd_ = false;
   bool has_geometry_ = false;
+  bool shifted_ = false;
   std::size_t t_ = 0;
 };
 

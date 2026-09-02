@@ -53,6 +53,10 @@ class Fluid {
   void set_geometry(const std::vector<std::uint8_t>& fl) { flags_ = fl; has_geometry_ = true; }
   void set_force(const BodyForce& b, int kind) { force_ = b; fkind_ = kind; }
   void set_magic(Real lambda) { omega_minus_ = omega_minus_for(omega_, lambda); }
+
+  // Store f_i - w_i instead of f_i. Call BEFORE initialise_with; see core.cuh.
+  void set_shifted(bool on) { shifted_ = on; }
+  bool shifted() const { return shifted_; }
   Real omega_minus() const { return omega_minus_; }
   Real magic() const { return magic_parameter(omega_, omega_minus_); }
   void couple_magnetic(const Real* bx, const Real* by, const Real* bz) {
@@ -74,11 +78,13 @@ class Fluid {
     for (long n = 0; n < N_; ++n) {
       int x, y, z;
       coords(n, nx_, ny_, x, y, z);
-      const Macro m = (flags_[std::size_t(n)] == Fluid_)
-                          ? init(x, y, z)
-                          : Macro{Real(1), Real(0), Real(0), Real(0)};
+      Macro m = (flags_[std::size_t(n)] == Fluid_)
+                    ? init(x, y, z)
+                    : Macro{Real(1), Real(0), Real(0), Real(0)};
+      // The seed is a DENSITY whichever storage is in use; `dens` follows.
+      m.dens = shifted_ ? (m.rho - Real(1)) : m.rho;
       Real fl[27];
-      for (int i = 0; i < 27; ++i) fl[i] = feq(i, m.rho, m.ux, m.uy, m.uz);
+      for (int i = 0; i < 27; ++i) fl[i] = feq_of(i, m, shifted_);
       init_scatter<0>(f_.data(), N_, x, y, z, nx_, ny_, nz_, fl);
     }
     t_ = 0;
@@ -112,16 +118,16 @@ class Fluid {
     for (long n = 0; n < N_; ++n) {
       if (fkind_ == ForceUniform)
         macro_node<P, ForceUniform>(f_.data(), flags_.data(), N_, n, nx_, ny_, nz_,
-                                    force_, rho.data(), ux.data(), uy.data(), uz.data());
+                                    force_, shifted_, rho.data(), ux.data(), uy.data(), uz.data());
       else if (fkind_ == ForceBoussinesq)
         macro_node<P, ForceBoussinesq>(f_.data(), flags_.data(), N_, n, nx_, ny_, nz_,
-                                       force_, rho.data(), ux.data(), uy.data(), uz.data());
+                                       force_, shifted_, rho.data(), ux.data(), uy.data(), uz.data());
       else if (fkind_ == ForceField)
         macro_node<P, ForceField>(f_.data(), flags_.data(), N_, n, nx_, ny_, nz_,
-                                  force_, rho.data(), ux.data(), uy.data(), uz.data());
+                                  force_, shifted_, rho.data(), ux.data(), uy.data(), uz.data());
       else
         macro_node<P, ForceNone>(f_.data(), flags_.data(), N_, n, nx_, ny_, nz_,
-                                 force_, rho.data(), ux.data(), uy.data(), uz.data());
+                                 force_, shifted_, rho.data(), ux.data(), uy.data(), uz.data());
     }
   }
 
@@ -155,6 +161,7 @@ class Fluid {
     p.nx = nx_; p.ny = ny_; p.nz = nz_;
     p.omega = omega_; p.omega_bulk = omega_bulk_;
     p.omega_minus = omega_minus_;
+    p.shifted = shifted_;
     return p;
   }
 
@@ -197,6 +204,7 @@ class Fluid {
   int fkind_ = ForceNone;
   bool mhd_ = false;
   bool has_geometry_ = false;
+  bool shifted_ = false;
   std::size_t t_ = 0;
 };
 
