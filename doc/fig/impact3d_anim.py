@@ -189,10 +189,46 @@ def sphere_mesh(cx, cy, cz, R, n=26):
 
 
 def main():
-    src = sys.argv[1] if len(sys.argv) > 1 else "/tmp/sp24"
-    out = sys.argv[2] if len(sys.argv) > 2 else "impact3d.mp4"
-    tmax = float(sys.argv[3]) if len(sys.argv) > 3 else 6.0
-    fps = int(sys.argv[4]) if len(sys.argv) > 4 else 12
+    # --key=value options after the four positionals. THE VIEW IS A PARAMETER
+    # BECAUSE THE RIGHT VIEW DEPENDS ON THE BODY, not on taste.
+    #
+    # A SPHERE MUST BE CUT TO AND VIEWED FROM LOW DOWN: once its cavity closes
+    # it is a pocket, so from any angle the far wall hides the ball, and only a
+    # section shows the cavity's profile at all.
+    #
+    # AND FOR A SHALLOW SURFACE DEFORMATION, PREFER rt2d_anim.py ENTIRELY. The
+    # stone's entry crater is 9 cells deep and about 10 across in a 256-wide
+    # block -- 4 per cent of the frame -- and it sits 1.7 diameters BEHIND the
+    # body, which has planed on past it. No 3-D view of an isosurface makes that
+    # legible; the mid-plane section does, immediately, because it plots the
+    # surface as a profile rather than as a nearly-flat plane seen obliquely.
+    # Use this renderer for where the body is and that one for what the water
+    # did.
+    #
+    # A SKIPPING DISC IS THE OPPOSITE CASE. It rides ON the surface rather than
+    # inside a cavity, so nothing occludes it -- and the thing worth seeing is
+    # the DEPRESSION it planes on, which lies in the surface plane. Cutting at
+    # the body's centre throws away half of that depression, and a 24 degree
+    # elevation puts the surface nearly edge-on so the rest of it reads as a
+    # kink in a line. Hence --cut=none and a higher --elev for a skip.
+    opts = {}
+    pos = []
+    for a in sys.argv[1:]:
+        if a.startswith("--") and "=" in a:
+            k, v = a[2:].split("=", 1)
+            opts[k] = v
+        else:
+            pos.append(a)
+    src = pos[0] if len(pos) > 0 else "/tmp/sp24"
+    out = pos[1] if len(pos) > 1 else "impact3d.mp4"
+    tmax = float(pos[2]) if len(pos) > 2 else 6.0
+    fps = int(pos[3]) if len(pos) > 3 else 12
+    elev = float(opts.get("elev", 24))
+    azim = float(opts.get("azim", -62))
+    cut_mode = opts.get("cut", "body")          # "body" or "none"
+    ylo_opt = opts.get("ylo")
+    yhi_opt = opts.get("yhi")
+    zoom = float(opts.get("zoom", 1.45))
 
     prefix = src if not os.path.isdir(src) else os.path.join(src, "f")
     paths = sorted(glob.glob(prefix + "_vol_*.bin"))
@@ -224,13 +260,23 @@ def main():
         yhi = int(min(ny0, max(cys) + 2.5 * rr))
     else:
         ylo, yhi = ny0 // 4, (3 * ny0) // 4
+    # An explicit band overrides the trajectory-sized one. For a skip the
+    # disturbance is a few cells deep while the flight spans many, so a crop
+    # sized from the trajectory is almost all undisturbed water.
+    if ylo_opt is not None:
+        ylo = int(max(0, float(ylo_opt)))
+    if yhi_opt is not None:
+        yhi = int(min(ny0, float(yhi_opt)))
 
     for k, p in enumerate(paths):
         v = load_volume(p)
         nz, ny, nx = v.shape
         pose = body.get(k)
-        zcut = int(round(pose[3])) if pose else nz // 2
-        zcut = max(2, min(nz - 1, zcut))
+        if cut_mode == "none":
+            zcut = 0                     # keep the whole span; nothing to hide
+        else:
+            zcut = int(round(pose[3])) if pose else nz // 2
+            zcut = max(2, min(nz - 1, zcut))
         # THE FAR HALF IS KEPT, NOT THE NEAR ONE, and getting this backwards
         # produces a render that looks right and shows nothing: matplotlib does
         # not depth-sort a Poly3DCollection against a plot_surface, so whichever
@@ -257,7 +303,12 @@ def main():
         # failure to the membrane. The cut plane is the first z index of the
         # kept block, so it is padded on the far side only: bottom and sides
         # closed, the face we cut left OPEN to look in through.
-        sub = np.pad(sub, ((0, 1), (1, 1), (1, 1)), mode="constant",
+        # With a cut, pad the FAR side only so the cut face stays open to look
+        # in through. With no cut there is no face to look through and the
+        # block is sealed on all six sides, which is what a solid volume of
+        # water should look like.
+        zpad = (1, 1) if cut_mode == "none" else (0, 1)
+        sub = np.pad(sub, (zpad, (1, 1), (1, 1)), mode="constant",
                      constant_values=0.0)
 
         fig = plt.figure(figsize=(5.2, 5.6), dpi=115, facecolor=GROUND)
@@ -277,6 +328,8 @@ def main():
             verts, faces, _, _ = measure.marching_cubes(sub, level=0.5)
             verts[:, 1] -= 1.0           # undo the pad on y ...
             verts[:, 2] -= 1.0           # ... and on x; axis 0 had none below
+            if cut_mode == "none":
+                verts[:, 0] -= 1.0       # sealed on z as well, so undo that pad
             verts[:, 0] += zcut          # the slice started at zcut
             # verts are (z, y, x); the plot's axes are (x, z, y).
             # TRANSLUCENT, because cutting alone cannot expose the body: once
@@ -329,19 +382,22 @@ def main():
         ax.set_zlim(0, yhi - ylo)
         # zoom, because a 3-D axes leaves a wide margin by default and the
         # subject was occupying about a third of the frame.
-        ax.set_box_aspect((1, 1, (yhi - ylo) / float(nx)), zoom=1.45)
+        ax.set_box_aspect((1, 1, (yhi - ylo) / float(nx)), zoom=zoom)
         # 24 rather than 16: at a shallower angle the free surface is nearly
         # edge-on and the cavity it makes reads as a line rather than a bowl.
-        ax.view_init(elev=24, azim=-62)
+        ax.view_init(elev=elev, azim=azim)
         ax.set_axis_off()
         fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
         fig.text(0.5, 0.985, "$t/t_0 = %.2f$" % (k * dt), ha="center",
                  va="top", fontsize=12, color=INK)
         fig.text(0.015, 0.985, r"$g \downarrow$", ha="left", va="top",
                  fontsize=10, color="#7c8896")
-        fig.text(0.5, 0.015, "a cropped block, cut at the body's centre plane; "
-                 "flat faces are the crop, not the tank", ha="center",
-                 fontsize=7, color="#6b7684")
+        fig.text(0.5, 0.015,
+                 ("a cropped block; flat faces are the crop, not the tank"
+                  if cut_mode == "none" else
+                  "a cropped block, cut at the body's centre plane; "
+                  "flat faces are the crop, not the tank"),
+                 ha="center", fontsize=7, color="#6b7684")
         fig.savefig(os.path.join(tmp, "f%04d.png" % k), dpi=115,
                     facecolor=GROUND)
         plt.close(fig)
