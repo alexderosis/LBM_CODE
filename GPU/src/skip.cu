@@ -17,14 +17,35 @@
 //  (they report ~20 degrees as optimal), the entry Froude number, and the spin,
 //  which does not lift at all but keeps the attack angle from collapsing.
 //
-//  ONE IMPACT, NOT A SEQUENCE, AND THAT IS A DOMAIN LIMIT RATHER THAN A CHOICE.
-//  The ballistic flight between two bounces is ~24000 steps and ~25 diameters
-//  of travel at these parameters, so three skips would need ~4000 cells in x --
-//  110 M cells, ~24 GB, ~10 h on a T4. The fix would be a frame translating
-//  with the stone, needing only ~10 D of x, and that is blocked for a different
-//  reason: the phase field here has no open boundary (PhaseCell is Bulk, Wall or
-//  Excluded), so the free surface cannot be advected out of the domain. So this
-//  driver does the impact and the rebound, and stops.
+//  ONE IMPACT AT THE DEFAULTS, AND A SEQUENCE IS CHEAPER THAN I FIRST THOUGHT.
+//  I sized a multi-skip run before measuring one, guessing the rebound would
+//  leave at about half the translational speed. It does not: the measured exit
+//  is vy = +0.070 U, seven times smaller, so the ballistic flight is 3370 steps
+//  and 2.5 diameters of travel rather than the ~25 D I had assumed. One whole
+//  skip cycle is about 5 D of x.
+//
+//  So three skips need nx ~ 18 D = 862 cells: 23.8 M cells, 5.1 GB in FP32, and
+//  ~14400 steps -- about 25 minutes on a T4, not the ten hours the first
+//  estimate claimed. That is well inside one device. Run it with -span 18
+//  -tmax 15 and raise the x cutoff; the default span of 8 stops at the first
+//  rebound only because the domain runs out at x/D = 6.5.
+//
+//  What DOES stay out of reach is a translating frame, which would need only
+//  ~10 D of x for any number of skips: the phase field has no open boundary
+//  (PhaseCell is Bulk, Wall or Excluded), so the free surface cannot be
+//  advected out of the domain. Periodic x is the constraint, not the cell count.
+//
+//  THE MEASURED SKIP, at the defaults (results/skip/skip_d48_attack20.dat):
+//  water contact at t/t0 = 0.45, deepest immersion 0.064 D, vy reverses at
+//  1.49 while submerged, exit at 2.9, apex at 5.4, and it is descending again
+//  by 6.0 -- set up for a second bounce the domain has no room for. It loses
+//  27 % of its horizontal speed and 25 % of its spin, against ~20 % per skip
+//  reported for real stones.
+//
+//  AND THE ATTACK ANGLE NUTATES RATHER THAN COLLAPSING: 20 deg at release, down
+//  to 11.5 at the deepest point, back up to 17.1, then oscillating about 13.
+//  That oscillation IS the gyroscopic term -- before it was added the same case
+//  lost the angle monotonically and dug in.
 //
 //  WHAT IS NOT MODELLED, in the order it bites.
 //   * THICKNESS. A real stone is about 1:10 diameter to thickness, which at
