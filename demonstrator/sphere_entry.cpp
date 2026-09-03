@@ -127,6 +127,13 @@ int main(int argc, char** argv) {
   const double U     = arg_num(argc, argv, "-u", 0.04);
   const double iw    = arg_num(argc, argv, "-iw", 4.0);
   const double tmax  = arg_num(argc, argv, "-tmax", 6.0);
+  // Release height of the centre above the undisturbed surface, in RADII.
+  // 1 is tangent, and is the default because it makes the imposed U the CONTACT
+  // speed and Fr the entry Froude number. A larger h0 adds a nearly ballistic
+  // fall through the gas (the body is ~80x its density) and the sphere arrives
+  // faster than U, so the nominal Fr then labels the release, not the impact.
+  // GPU/src/impact.cu carries the same flag with the same meaning.
+  const double h0    = arg_num(argc, argv, "-h0", 1.0);
   const int frames   = int(arg_num(argc, argv, "-frames", 48));
   const char* dump   = arg_str(argc, argv, "-dump", "");
   const bool volume  = [&] {
@@ -168,6 +175,19 @@ int main(int argc, char** argv) {
                 3.0 * nu + 0.5, 3.0 * nu,
                 1.0 / (M / (1.0 / 3.0) + 0.5),
                 2.0 - 1.0 / (M / (1.0 / 3.0) + 0.5));
+    // The CONTACT speed, not just the release speed. See the note on h0.
+    {
+      const double drop = (h0 - 1.0) * R;
+      const double vc = std::sqrt(U * U + 2.0 * g * (drop > 0.0 ? drop : 0.0));
+      std::printf("  release %.2f R above the surface", h0);
+      if (drop > 0.0)
+        std::printf("   free fall %.1f cells -> contact at %.6f = %.4f U   "
+                    "Fr_impact %.3f (nominal %.3f)   contact at t/t0 %.3f\n",
+                    drop, vc, vc / U, vc / std::sqrt(g * double(D)), Fr,
+                    ((vc - U) / g) / t_ref);
+      else
+        std::printf("   (tangent: contact speed IS U, so Fr_impact = Fr)\n");
+    }
     std::printf("  t_ref %.1f steps   %zu steps to t/t0 = %g\n\n",
                 t_ref, nsteps, tmax);
     std::fflush(stdout);
@@ -193,7 +213,7 @@ int main(int argc, char** argv) {
     PenalisedBody<FL, Sphere> body(d);
     body.shape.cx = Real(0.5 * double(nx));
     body.shape.cz = Real(0.5 * double(nz));
-    body.shape.cy = Real(ysurf + R);        // tangent to the undisturbed surface
+    body.shape.cy = Real(ysurf + h0 * R);   // h0 = 1 is tangent; see the note
     body.shape.R  = Real(R);
     body.shape.smooth = Real(1.5);
     body.vx = Real(0);  body.vz = Real(0);

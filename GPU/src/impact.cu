@@ -110,6 +110,17 @@ int main(int argc, char** argv) {
   double Fr = 2.0, Re = 256.0, We = 200.0, ratio = 100.0, chib = 2.0;
   double U = 0.04, iw = 4.0, tmax = 12.0, Pe = 128.0;
   double aspect = 2.0, span = 4.0;     // ny = aspect*D*2, nx = nz = span*D
+  // RELEASE HEIGHT of the centre above the undisturbed surface, in RADII.
+  //
+  // 1 IS THE DEFAULT BECAUSE IT MAKES Fr MEAN WHAT IT SAYS. At h0 = 1 the body
+  // is tangent to the surface, so the imposed -u IS the contact speed and
+  // Fr = U/sqrt(gD) is the entry Froude number. Any larger h0 adds a free fall
+  // through the gas -- the body is ~80x the gas density, so drag there is
+  // negligible and the fall is very nearly ballistic -- and the sphere arrives
+  // at sqrt(U^2 + 2 g (h0-1) R), FASTER than U. The nominal Fr then labels the
+  // release rather than the impact, which is why the contact speed is printed
+  // below instead of left to be worked out.
+  double h0 = 1.0;
   const char* dump = "";
   bool cm = true, driven = false, nobody = false, vol = false;
 
@@ -128,6 +139,7 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "-tmax"))   num(tmax);
     else if (!std::strcmp(argv[i], "-span"))   num(span);
     else if (!std::strcmp(argv[i], "-aspect")) num(aspect);
+    else if (!std::strcmp(argv[i], "-h0"))     num(h0);
     else if (!std::strcmp(argv[i], "-bgk"))    cm = false;
     // A BISECTION SWITCH, not a physical option. Driving the sphere at constant
     // speed removes the rigid-body solve from the loop while leaving the fluid,
@@ -185,6 +197,21 @@ int main(int argc, char** argv) {
                 Pe, Mm, om, 2.0 - om);
     if (om > 1.99) std::printf("  WARNING phase omega within 1e-2 of its "
                                "ceiling -- lower -pe or raise -d\n");
+  }
+  // THE CONTACT SPEED, not just the release speed. See the note on h0.
+  {
+    const double R_ = 0.5 * double(D);
+    const double drop = (h0 - 1.0) * R_;
+    const double vc = std::sqrt(U * U + 2.0 * g * (drop > 0.0 ? drop : 0.0));
+    std::printf("  release %.2f R above the surface", h0);
+    if (drop > 0.0) {
+      std::printf("   free fall %.1f cells -> contact at %.6f = %.4f U   "
+                  "Fr_impact %.3f (nominal %.3f)   contact at t/t0 %.3f\n",
+                  drop, vc, vc / U, vc / std::sqrt(g * double(D)), Fr,
+                  ((vc - U) / g) / t_ref);
+    } else {
+      std::printf("   (tangent: contact speed IS U, so Fr_impact = Fr)\n");
+    }
   }
   std::printf("  t_ref %.1f steps (one diameter at U)   %zu steps to t/t0 = %g%s\n",
               t_ref, nsteps, tmax, driven ? "   [DRIVEN at U]" : "   [free]");
@@ -245,7 +272,7 @@ int main(int argc, char** argv) {
   backend::Body<Sphere> body(nx, ny, nz);
   body.shape.cx = Real(0.5 * double(nx));
   body.shape.cz = Real(0.5 * double(nz));
-  body.shape.cy = Real(ysurf + R);        // tangent to the undisturbed surface
+  body.shape.cy = Real(ysurf + h0 * R);   // h0 = 1 is tangent; see the note
   body.shape.R  = Real(R);
   body.shape.smooth = Real(1.5);
   body.vx = Real(0);  body.vz = Real(0);
