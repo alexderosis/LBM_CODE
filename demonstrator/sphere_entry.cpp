@@ -35,6 +35,19 @@
 //  is what is used, so this is a sphere entering a liquid 100x its surroundings
 //  -- right for the cavity and the splash, wrong for the air.
 //
+//  HOW DEEP THE TANK ACTUALLY IS, because a run can end against the floor and
+//  look like a terminal velocity. The surface sits at 0.55*ny and ny is
+//  aspect*span*D, so the water below it is only 0.55*aspect*span diameters --
+//  4.4 D at the defaults. A sphere released tangent has 4.4 - 0.5 = 3.9 D of
+//  travel before its underside touches, and there is NO contact model, so it
+//  simply presses into the wall and the edge check (cy > 1) never fires.
+//  Measured at D = 32, chib = 2, tmax = 20: depth/R pins at 7.77 -> 7.85 from
+//  t/t0 = 9.16 onward with v/U = -0.001 and Fy balancing the FULL body weight
+//  rather than the net weight. That is a sphere on the bottom. Raise -aspect
+//  (5 gives 11 D) or shorten -tmax; do not read the plateau as a drag balance.
+//  A buoyant body (-chib < 1) is immune -- it stays within about 1 R of the
+//  surface -- which is the one case where the default domain is ample.
+//
 //  READ THE CAVITY, NOT THE MENISCUS: there is no contact-line model, so the
 //  angle at which the surface meets the sphere is not physics.
 //
