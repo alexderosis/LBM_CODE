@@ -1,0 +1,66 @@
+# Stone skipping, Kokkos twin (demonstrator/stone_skip.cpp) at 2e52b0f
+# THE CROSS-CHECK RUN. GPU/src/skip.cu measured this case at D = 48 on a T4 in
+# FP32 (results/skip/skip_d48_attack20.dat); this is D = 32 on four CPU threads
+# in FP64, so it is a DIFFERENT RESOLUTION as well as a different code and
+# precision. The comparison worth making is the attack-angle nutation, which is
+# what the gyroscopic term governs:
+#
+#   t/t0     attack D=48 CUDA   attack D=32 Kokkos
+#   1.25          11.50              12.62      <- minimum, same instant
+#   1.50          13.18              14.02
+#   1.75          15.04              15.40
+#   2.00          16.41              16.35
+#   2.25          17.07              16.73      <- recovery, same instant
+#
+# Both put the minimum at t/t0 = 1.25 and the recovery at 2.25, agreeing within
+# 1.1 deg and converging to 0.3. Rebound instant 1.49 (D=48) against 1.36
+# (D=32); peak rebound vy +0.0702 U against +0.0665 U. Before the gyroscopic
+# term was added the angle collapsed monotonically in both, so this oscillation
+# is a behaviour that did not exist in the code before 2026-09-03.
+#
+# Stone skipping   6-DOF disc, Kokkos   Threads   precision FP64
+#   256 x 128 x 96   D 32   thickness 6.4 cells (1:5)   rho_b/rho_H 2.6
+#   Fr 5   Re 500   We 1000   rho_H/rho_L 100   nu 3.200000e-03   sigma 8.000000e-03   g 3.125000e-06   U 0.0500   xi 4
+#   tau 0.509600   (stability floor 0.5; margin 9.60e-03)
+#   Pe 128   M 1.250000e-02   phase omega 1.860465   (ceiling 2; margin 1.40e-01)
+#   attack 20.0 deg   descent 15.0 deg   spin 0.640 U at the rim -> Omega 2.0000e-03 rad/step (1.22 rev over the run)
+#   rotation free   spin on
+#   t_ref 640.0 steps   3840 steps to t/t0 = 6
+#   disc volume from chi 5165.0   pi R^2 (2h) = 5147.2   (+0.35 %)
+#   body mass 1342888.5   displaced water 514718.5   net weight +2.588e+00
+#   I_body axial 1.7464e+08 (m R^2/2 = 1.7189e+08)   diametral 9.3008e+07 (m(R^2/4+h^2/3) = 9.0529e+07)
+#
+#  t/t0     x/D   clear/D      vx/U      vy/U   attack    |w|D/U           Fy           Tz    m_fluid
+  disc volume from chi 5165.0   pi R^2 (2h) = 5147.2   (+0.35 %)
+  body mass 1342888.5   displaced water 514718.5   net weight +2.588e+00
+  I_body axial 1.7464e+08 (m R^2/2 = 1.7189e+08)   diametral 9.3008e+07 (m(R^2/4+h^2/3) = 9.0529e+07)
+   0.00    1.50    +0.100  +0.9581  -0.2568    20.00  1.269e+00  +5.4806e-01   -3.3990e-02   5.4669e+03
+   0.25    1.74    +0.049  +0.9326  -0.2209    19.08  1.248e+00  +7.3523e-02   -1.2253e-02   5.6418e+03
+   0.50    1.97    +0.018  +0.9098  -0.1700    16.70  1.239e+00  +1.1647e-01   -1.4151e-02   6.2397e+03
+   0.75    2.19    +0.008  +0.8850  -0.1045    13.61  1.215e+00  +1.2409e-01   +7.4585e-04   6.9686e+03
+   1.00    2.41    +0.002  +0.8606  -0.0475    12.09  1.171e+00  +8.8325e-02   +7.3062e-03   7.5809e+03
+   1.25    2.62    -0.009  +0.8394  -0.0116    12.62  1.138e+00  +5.9687e-02   +5.9452e-03   8.0523e+03
+   1.50    2.83    -0.021  +0.8202  +0.0115    14.02  1.115e+00  +4.4813e-02   +3.4737e-03   8.4527e+03
+   1.75    3.03    -0.026  +0.8010  +0.0310    15.40  1.094e+00  +4.4082e-02   +1.8920e-03   8.7786e+03
+   2.00    3.23    -0.024  +0.7837  +0.0462    16.35  1.071e+00  +3.6040e-02   +9.4967e-04   8.9873e+03
+   2.25    3.42    -0.014  +0.7677  +0.0573    16.73  1.048e+00  +2.6223e-02   +1.7195e-04   9.1014e+03
+   2.50    3.61    +0.003  +0.7527  +0.0642    16.54  1.025e+00  +2.3102e-02   +4.3262e-04   9.0978e+03
+   2.75    3.80    +0.025  +0.7405  +0.0664    15.85  1.004e+00  +1.4350e-02   +7.7323e-04   8.9832e+03
+   3.00    3.98    +0.049  +0.7307  +0.0646    14.81  9.845e-01  +8.6145e-03   +4.1261e-04   8.8144e+03
+   3.25    4.16    +0.075  +0.7224  +0.0607    13.57  9.680e-01  +8.6406e-03   +3.7826e-04   8.6002e+03
+   3.50    4.34    +0.099  +0.7152  +0.0554    12.35  9.537e-01  +7.5212e-03   +3.6248e-04   8.3832e+03
+   3.75    4.52    +0.120  +0.7101  +0.0490    11.37  9.414e-01  +7.9978e-03   -4.3794e-05   8.1812e+03
+   4.00    4.70    +0.136  +0.7055  +0.0426    10.83  9.306e-01  +6.9216e-03   -1.3325e-04   7.9990e+03
+   4.25    4.88    +0.146  +0.7012  +0.0363    10.82  9.212e-01  +5.7995e-03   -5.9618e-04   7.8598e+03
+   4.50    5.05    +0.151  +0.6983  +0.0301    11.29  9.131e-01  +3.2671e-03   -4.3447e-04   7.7657e+03
+   4.75    5.22    +0.151  +0.6951  +0.0244    12.06  9.063e-01  +5.6729e-03   -4.0697e-04   7.7150e+03
+   5.00    5.40    +0.150  +0.6927  +0.0186    12.94  9.007e-01  +7.3917e-03   -4.4439e-04   7.7190e+03
+   5.25    5.57    +0.147  +0.6912  +0.0121    13.75  8.959e-01  +6.6317e-03   -3.0289e-04   7.7381e+03
+   5.50    5.74    +0.144  +0.6887  +0.0062    14.36  8.919e-01  +9.1888e-03   -2.5689e-04   7.7751e+03
+   5.75    5.92    +0.142  +0.6868  +0.0000    14.69  8.883e-01  +8.1520e-03   -2.1783e-04   7.8267e+03
+   6.00    6.09    +0.141  +0.6854  -0.0062    14.71  8.850e-01  +5.8954e-03   -1.8605e-04   7.8758e+03
+  lowest clearance -0.026 D   vy from -0.2577 U to +0.0665 U
+#
+# finite throughout
+# lowest clearance -0.026 D   vy from -0.2577 U to +0.0665 U
+# SKIPPED: vy changed sign at t/t0 = 1.36 while in contact
