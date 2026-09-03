@@ -228,6 +228,14 @@ def main():
     cut_mode = opts.get("cut", "body")          # "body" or "none"
     ylo_opt = opts.get("ylo")
     yhi_opt = opts.get("yhi")
+    xlo_opt = opts.get("xlo")
+    xhi_opt = opts.get("xhi")
+    # Stop after this many frames. A crop tight enough to make a small feature
+    # legible is one the BODY eventually leaves, and a crop that followed the
+    # body would make a static crater appear to drift. So the honest way to use
+    # a tight crop is to end the animation when the subject leaves it, and say
+    # in the caption that it is truncated.
+    kmax = int(opts.get("kmax", 0)) or None
     zoom = float(opts.get("zoom", 1.45))
 
     prefix = src if not os.path.isdir(src) else os.path.join(src, "f")
@@ -239,6 +247,13 @@ def main():
 
     tmp = os.path.join(os.path.dirname(os.path.abspath(out)) or ".", "_i3dframes")
     os.makedirs(tmp, exist_ok=True)
+    # CLEAR STALE FRAMES, and this is a bug fix rather than tidiness. ffmpeg's
+    # image2 demuxer reads f%04d.png contiguously from zero, so leftovers from a
+    # PREVIOUS render with more frames get appended to this one: a 48-frame
+    # stone skip inherited 13 frames of a tumbling cube from a 61-frame run, and
+    # nothing in the output said so. Silent, and wrong in the worst way.
+    for stale in glob.glob(os.path.join(tmp, "f*.png")):
+        os.remove(stale)
 
     # ONE CROP FOR EVERY FRAME, sized from the body's whole trajectory rather
     # than as a fixed fraction of the domain. A quarter-to-three-quarters band
@@ -267,7 +282,11 @@ def main():
         ylo = int(max(0, float(ylo_opt)))
     if yhi_opt is not None:
         yhi = int(min(ny0, float(yhi_opt)))
+    xlo = int(max(0, float(xlo_opt))) if xlo_opt is not None else 0
+    xhi = int(min(nx0, float(xhi_opt))) if xhi_opt is not None else nx0
 
+    if kmax:
+        paths = paths[:kmax]
     for k, p in enumerate(paths):
         v = load_volume(p)
         nz, ny, nx = v.shape
@@ -283,7 +302,7 @@ def main():
         # half of the water is between the camera and the body draws OVER it and
         # the sphere disappears behind its own cavity. At azim = -62 the near
         # half is z < cz, so that is the half to remove.
-        sub = np.ascontiguousarray(v[zcut:, ylo:yhi, :])
+        sub = np.ascontiguousarray(v[zcut:, ylo:yhi, xlo:xhi])
         # SEAL THE BLOCK, or the water is a membrane. Marching cubes on the
         # cropped array finds only the phi = 1/2 level set, which inside the
         # crop is the free surface and the cavity and nothing else -- no bottom,
@@ -328,6 +347,7 @@ def main():
             verts, faces, _, _ = measure.marching_cubes(sub, level=0.5)
             verts[:, 1] -= 1.0           # undo the pad on y ...
             verts[:, 2] -= 1.0           # ... and on x; axis 0 had none below
+            verts[:, 2] += xlo           # x is plotted in ABSOLUTE cells
             if cut_mode == "none":
                 verts[:, 0] -= 1.0       # sealed on z as well, so undo that pad
             verts[:, 0] += zcut          # the slice started at zcut
@@ -377,12 +397,21 @@ def main():
             body_mesh.set_linewidth(0.5)
             ax.add_collection3d(body_mesh)
 
-        ax.set_xlim(0, nx)
+        ax.set_xlim(xlo, xhi)
         ax.set_ylim(0, nz)
         ax.set_zlim(0, yhi - ylo)
         # zoom, because a 3-D axes leaves a wide margin by default and the
         # subject was occupying about a third of the frame.
-        ax.set_box_aspect((1, 1, (yhi - ylo) / float(nx)), zoom=zoom)
+        #
+        # THE BOX ASPECT FOLLOWS THE DATA EXTENTS, and the hardcoded (1, 1, h)
+        # it replaces was only right when nx == nz. That held for every case
+        # this renderer had seen -- a sphere and a cube in square tanks -- and
+        # broke silently on the skip, whose tank is 256 x 96: z was drawn 2.7
+        # times too long, so a channel three diameters wide read as a square
+        # slab. Normalising by the x extent reproduces the old value exactly
+        # when nx == nz and the crop is full, so no earlier render changes.
+        ex = float(xhi - xlo)
+        ax.set_box_aspect((1.0, nz / ex, (yhi - ylo) / ex), zoom=zoom)
         # 24 rather than 16: at a shallower angle the free surface is nearly
         # edge-on and the cavity it makes reads as a line rather than a bowl.
         ax.view_init(elev=elev, azim=azim)
