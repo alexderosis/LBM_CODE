@@ -87,6 +87,8 @@ def load_body(prefix):
         f = line.split()
         if len(f) == 5:
             out[int(f[0])] = ("sphere",) + tuple(float(v) for v in f[1:])
+        elif len(f) == 10:
+            out[int(f[0])] = ("disc",) + tuple(float(v) for v in f[1:])
         elif len(f) == 11:
             out[int(f[0])] = ("box",) + tuple(float(v) for v in f[1:])
     return out
@@ -108,6 +110,40 @@ _CUBE_V = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1)
 _CUBE_F = [(0, 1, 3, 2), (4, 6, 7, 5),      # -x, +x
            (0, 4, 5, 1), (2, 3, 7, 6),      # -y, +y
            (0, 2, 6, 4), (1, 5, 7, 3)]      # -z, +z
+
+
+def disc_faces(cx, cy, cz, R, hy, Rm, n=28):
+    """A flat cylinder as quads and two caps, in PLOT order (x, z, y).
+
+    The symmetry axis is BODY y, matching Disc in both codebases, so the disc is
+    built as (R cos t, +/-hy, R sin t) and then rotated. Two caps plus a rim
+    band -- the rim is what makes an attack angle legible, because a disc drawn
+    as two flat circles has no thickness to read the tilt from.
+    """
+    t = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    ring = np.stack([R * np.cos(t), np.zeros_like(t), R * np.sin(t)], axis=1)
+    lo = ring + np.array([0.0, -hy, 0.0])
+    hi = ring + np.array([0.0, +hy, 0.0])
+    c = np.array([cx, cy, cz])
+    lo = lo @ Rm.T + c
+    hi = hi @ Rm.T + c
+
+    light = np.array([0.4, 0.75, 0.53])
+    light /= np.linalg.norm(light)
+    quads, shades = [], []
+
+    def push(poly):
+        nrm = np.cross(poly[1] - poly[0], poly[2] - poly[0])
+        m = np.linalg.norm(nrm)
+        shades.append(0.55 + 0.45 * abs(float(nrm @ light) / m) if m > 0 else 1.0)
+        quads.append(poly[:, [0, 2, 1]])        # (x, y, z) -> (x, z, y)
+
+    for i in range(n):
+        j = (i + 1) % n
+        push(np.array([lo[i], lo[j], hi[j], hi[i]]))
+    push(hi)                                    # the two caps, as n-gons
+    push(lo[::-1])
+    return quads, shades
 
 
 def box_faces(cx, cy, cz, hx, hy, hz, R):
@@ -181,7 +217,7 @@ def main():
         # The body's own scale: a sphere's radius, or a box's largest half
         # extent times sqrt(3) -- the distance to its CORNER, which is what a
         # tumbling cube can reach and a half extent is not.
-        rr = max(p_[4] if p_[0] == "sphere"
+        rr = max(p_[4] if p_[0] in ("sphere", "disc")
                  else 1.7320508 * max(p_[4], p_[5], p_[6])
                  for p_ in body.values())
         ylo = int(max(0, min(cys) - 4.0 * rr))
@@ -260,6 +296,17 @@ def main():
             xs, zs, ys = sphere_mesh(cx, cy - ylo, cz, R)
             ax.plot_surface(xs, zs, ys, color=BODY, shade=True,
                             linewidth=0, antialiased=False, zorder=2)
+        elif pose and pose[0] == "disc":
+            _, cx, cy, cz, R_, hy_, qw, qx, qy, qz = pose
+            quads, shades = disc_faces(cx, cy - ylo, cz, R_, hy_,
+                                       quat_matrix(qw, qx, qy, qz))
+            base = np.array(matplotlib.colors.to_rgb(BODY))
+            body_mesh = Poly3DCollection(quads, alpha=1.0, zorder=2)
+            body_mesh.set_facecolor([tuple(np.clip(base * sh, 0, 1))
+                                     for sh in shades])
+            body_mesh.set_edgecolor("#6f6552")
+            body_mesh.set_linewidth(0.4)
+            ax.add_collection3d(body_mesh)
         elif pose and pose[0] == "box":
             _, cx, cy, cz, hx_, hy_, hz_, qw, qx, qy, qz = pose
             quads, shades = box_faces(cx, cy - ylo, cz, hx_, hy_, hz_,
