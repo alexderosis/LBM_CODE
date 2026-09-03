@@ -317,6 +317,126 @@ int main() {
                 100.0 * worst / U, 100.0 * far / U);
   }
 
+  //===========================================================================
+  std::printf("\n5. THE 6x6, AGAINST THE VALIDATED 3x3\n\n");
+  //===========================================================================
+  //
+  // THIS IS THE ONLY CHECK THIS PORT HAS THAT IS NOT INTERNAL CONSISTENCY.
+  // The 3-DOF solve above is validated -- ../validation/floating_body in the
+  // parent reproduces Archimedes' draft to 0.14 % and gets the sign of the
+  // metacentric height right for a raft and a pillar. So body6_solve is not
+  // asked to be plausible; it is asked to REPRODUCE that 3x3 on a planar
+  // problem. If it does, the generalisation inherits the older code's evidence.
+  // If it does not, one of them is wrong and the 3x3 is the one with a paper
+  // behind it.
+  //
+  // The parent runs the identical comparison in ../tests/test_rigid3d.cpp
+  // block 3 and gets 1.7e-18. Both codes should land in the same place, and
+  // that is what makes this a cross-check between the two trees rather than a
+  // second opinion from the same arithmetic.
+  {
+    // A planar problem: everything in the x-y plane, rotation about z alone.
+    BodySums q3;
+    q3.m = 1234.5;  q3.Sx = -87.25;  q3.Sy = 143.75;  q3.Iz = 98765.0;
+    q3.Px = 3.125;  q3.Py = -7.5;    q3.Lz = 512.0;
+    q3.Sz = 0.0;    q3.Pz = 0.0;
+
+    BodyProperties p3;
+    p3.mass = 5000.0;  p3.inertia = 250000.0;
+    p3.bx = 0.0;  p3.by = -1.25e-5;  p3.bz = 0.0;
+
+    double dux = 0, duy = 0, dw = 0, duz = 0;
+    body_solve(p3, q3, dux, duy, dw, duz);
+
+    // The same problem as a 6-DOF one. J must be consistent with Iz: the 3-DOF
+    // scalar is Jxx + Jyy, so any split that sums to it is the same problem --
+    // and the z limb has to be filled too, because I_f = tr(J) I3 - J needs
+    // Jzz for the OTHER two rotations even when they are inert.
+    BodySums6 q6;
+    q6.m = q3.m;
+    q6.Sx = q3.Sx;  q6.Sy = q3.Sy;  q6.Sz = 0.0;
+    q6.Jxx = 0.4 * q3.Iz;  q6.Jyy = 0.6 * q3.Iz;  q6.Jzz = 0.0;
+    q6.Jxy = 0.0;  q6.Jxz = 0.0;  q6.Jyz = 0.0;
+    q6.Px = q3.Px;  q6.Py = q3.Py;  q6.Pz = 0.0;
+    q6.Lx = 0.0;  q6.Ly = 0.0;  q6.Lz = q3.Lz;
+
+    Body6Properties p6;
+    p6.mass = p3.mass;
+    // A planar body's tensor about z must be the 3-DOF scalar; the other two
+    // diagonal entries are whatever a prism of that section has and do not
+    // enter, because the x and y rotations have no torque driving them.
+    p6.inertia_world(0, 0) = 0.4 * p3.inertia;
+    p6.inertia_world(1, 1) = 0.6 * p3.inertia;
+    p6.inertia_world(2, 2) = p3.inertia;
+    p6.bx = p3.bx;  p6.by = p3.by;  p6.bz = p3.bz;
+
+    double dU[3], dW[3];
+    body6_solve(p6, q6, dU, dW);
+
+    check(std::fabs(dU[0] - dux) <= 1e-14 * std::fabs(dux) + 1e-18,
+          "6x6 reproduces the 3x3 dux", dU[0], dux);
+    check(std::fabs(dU[1] - duy) <= 1e-14 * std::fabs(duy) + 1e-18,
+          "6x6 reproduces the 3x3 duy", dU[1], duy);
+    check(std::fabs(dW[2] - dw) <= 1e-14 * std::fabs(dw) + 1e-18,
+          "6x6 reproduces the 3x3 domega_z", dW[2], dw);
+    // And the three the 2-D model does not have must be EXACTLY zero -- not
+    // small. A planar problem has no out-of-plane force or torque at all, so a
+    // nonzero here is a coupling that should not exist.
+    check(dU[2] == 0.0, "no out-of-plane translation at all", dU[2], 0.0);
+    check(dW[0] == 0.0, "no roll at all", dW[0], 0.0);
+    check(dW[1] == 0.0, "no pitch at all", dW[1], 0.0);
+  }
+
+  //===========================================================================
+  std::printf("\n6. THE DISC, AGAINST THE CLOSED-FORM CYLINDER\n\n");
+  //===========================================================================
+  //
+  // A uniform cylinder of radius R and half thickness h has, per unit mass,
+  // R^2/2 about its symmetry axis and R^2/4 + h^2/3 about any diameter. The
+  // penalised disc is slightly larger than the nominal one, and by a COMPUTED
+  // amount rather than an unknown one: quadrature of chi at R = 24, h = 4.8,
+  // smooth = 1 gives +0.14 % in volume, +0.71 % in the axial inertia and
+  // +1.22 % in the diametral one. The parent measures +0.136 / +0.712 / +1.218,
+  // so this port has a target to hit, not just a formula to be near.
+  {
+    const int n = 64;
+    host::Body<Disc> b(n, n, n);
+    b.shape.cx = 32;  b.shape.cy = 32;  b.shape.cz = 32;
+    b.shape.R = 24;   b.shape.hy = Real(4.8);
+    b.shape.smooth = Real(1);
+    b.shape.set_orientation(Quat{});
+    b.set_uniform_density6(Real(1));
+
+    const double R = double(b.shape.R), h = double(b.shape.hy);
+    const double vol = M_PI * R * R * 2.0 * h;
+    const double v = b.penalised_volume();
+    check(std::fabs(v / vol - 1.0) < 0.01, "volume / pi R^2 (2h)", v / vol, 1.0);
+
+    const double m = double(b.props.mass);
+    const double Iax = double(b.inertia_body(1, 1)) / (m * R * R / 2.0);
+    const double Idi = double(b.inertia_body(0, 0)) / (m * (R * R / 4.0 + h * h / 3.0));
+    check(std::fabs(Iax - 1.0) < 0.03, "I(symmetry axis) / (m R^2/2)", Iax, 1.0);
+    check(std::fabs(Idi - 1.0) < 0.03, "I(diameter) / m (R^2/4 + h^2/3)", Idi, 1.0);
+    const double iso = double(b.inertia_body(0, 0)) / double(b.inertia_body(2, 2));
+    check(std::fabs(iso - 1.0) < 2e-3, "I_xx = I_zz, transversely isotropic",
+          iso, 1.0);
+    std::printf("        (volume %+.3f %%, I_axial %+.3f %%, I_diam %+.3f %% "
+                "over sharp; parent: +0.136 / +0.712 / +1.218)\n",
+                100.0 * (v / vol - 1.0), 100.0 * (Iax - 1.0), 100.0 * (Idi - 1.0));
+
+    // The symmetry axis, and its SIGN -- which decides whether a driver raises
+    // the leading edge or buries it.
+    b.shape.set_orientation(Quat::from_axis_angle(Real(0), Real(0), Real(1),
+                                                  Real(20.0 * M_PI / 180.0)));
+    Real ax, ay, az;
+    b.shape.axis(ax, ay, az);
+    check(std::fabs(double(ay) - std::cos(20.0 * M_PI / 180.0)) < 1e-6,
+          "axis . yhat = cos 20 deg", double(ay), std::cos(20.0 * M_PI / 180.0));
+    check(std::fabs(double(ax) + std::sin(20.0 * M_PI / 180.0)) < 1e-6,
+          "axis . xhat = -sin 20 deg (leading edge at +x RAISED)",
+          double(ax), -std::sin(20.0 * M_PI / 180.0));
+  }
+
   std::printf("\n[body] %d failure(s)\n", failures);
   return failures == 0 ? 0 : 1;
 }

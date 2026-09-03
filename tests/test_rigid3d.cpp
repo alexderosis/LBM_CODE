@@ -300,6 +300,190 @@ int main(int argc, char** argv) {
       check::ok(Kokkos::fabs(Iw(1, 2)) > Real(0.05) * I0(0, 0),
                    "the tilted world-frame tensor has a real off-diagonal");
     }
+
+    //-------------------------------------------------------------------------
+    std::printf("\n8. THE DISC, AGAINST THE CLOSED-FORM CYLINDER\n\n");
+    // A uniform cylinder of radius R and half thickness h has, per unit mass,
+    //     I about the symmetry axis      = R^2 / 2
+    //     I about any diameter           = R^2 / 4 + h^2 / 3
+    // so the Disc's whole measurement path has an exact target, and unlike a
+    // cube it is genuinely ANISOTROPIC -- transversely isotropic, I_yy against
+    // I_xx = I_zz -- which is what makes the pose-independence check below
+    // meaningful rather than vacuous.
+    //
+    // THE TOLERANCE IS THE SMOOTHING, AND IT IS COMPUTED, NOT FITTED. Numerical
+    // integration of chi = 1/4 (1+tanh((R-r)/s))(1+tanh((h-|Y|)/s)) at R = 24,
+    // h = 4.8, s = 1 gives the penalised disc +0.14 % in volume, +0.71 % in
+    // I_yy and +1.22 % in I_xx over the sharp values. 3 % therefore leaves room
+    // for the lattice on top of a known continuum excess, rather than being a
+    // number chosen until the test passed.
+    {
+      Domain d(64, 64, 64, true, true, true);
+      PenalisedBody<D3Q27, Disc> b(d);
+      b.shape.cx = 32;  b.shape.cy = 32;  b.shape.cz = 32;
+      b.shape.R = 24;   b.shape.hy = Real(4.8);
+      b.shape.smooth = Real(1);
+      b.shape.set_orientation(Quat{});
+      b.set_uniform_density6(Real(1));
+
+      const Real R = b.shape.R, h = b.shape.hy;
+      const Real vol = Real(3.14159265358979323846) * R * R * Real(2) * h;
+      check::near(b.penalised_volume() / vol, Real(1), Real(0.01),
+                  "measured volume / pi R^2 (2h)");
+
+      const Mat3 I0 = b.inertia_body;
+      const Real m = b.mass;
+      check::near(I0(1, 1) / (m * R * R / Real(2)), Real(1), Real(0.03),
+                  "I about the symmetry axis / (m R^2 / 2)");
+      const Real Id = m * (R * R / Real(4) + h * h / Real(3));
+      check::near(I0(0, 0) / Id, Real(1), Real(0.03),
+                  "I about a diameter / m (R^2/4 + h^2/3)");
+      check::near(I0(0, 0) / I0(2, 2), Real(1), Real(2e-3),
+                  "I_xx = I_zz -- the disc is transversely isotropic");
+      // And the two are FAR apart, so a wrong rotation cannot hide.
+      check::ok(I0(1, 1) > Real(1.7) * I0(0, 0),
+                "I_yy is nearly twice I_xx, so the tensor is not isotropic");
+      check::near(I0(0, 1) / I0(0, 0), Real(0), Real(2e-3),
+                  "flat disc has no product of inertia");
+
+      // The same pose-independence check block 7 makes for a slab, now on the
+      // shape the skipping driver actually uses, and tilted by the attack angle
+      // that driver defaults to.
+      b.shape.set_orientation(Quat::from_axis_angle(
+          Real(0), Real(0), Real(1), Real(0.3490658503988659)));   // 20 deg
+      b.set_uniform_density6(Real(1));
+      const Mat3 I1 = b.inertia_body;
+      Real worst = 0;
+      for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+          worst = Kokkos::fmax(worst, Kokkos::fabs(I1(i, j) - I0(i, j)) / I0(1, 1));
+      std::printf("   I_body at 0 deg vs 20 deg: worst entry differs by %.3f %%\n",
+                  Real(100) * worst);
+      check::ok(worst < Real(0.03),
+                "body-frame inertia is pose independent for a Disc too");
+
+      // The symmetry axis, which the driver reads to report an attack angle.
+      // At 20 deg about z it must have tipped from +y toward -x by exactly that
+      // much -- and the SIGN is the part worth pinning, because it decides
+      // whether the driver raises the leading edge or buries it.
+      Real ax, ay, az;
+      b.shape.axis(ax, ay, az);
+      check::near(ay, Real(0.9396926207859084), Real(1e-6),
+                  "axis . yhat = cos 20 deg");
+      check::near(ax, Real(-0.3420201433256687), Real(1e-6),
+                  "axis . xhat = -sin 20 deg (leading edge at +x is RAISED)");
+      check::near(az, Real(0), Real(1e-6), "axis stays out of z");
+    }
+
+    //-------------------------------------------------------------------------
+    std::printf("\n9. THE GYROSCOPIC TERM: A TORQUE-FREE SYMMETRIC TOP\n\n");
+    // The check that the omega x (I omega) term exists and has the right sign.
+    //
+    // A rigid body with NO torque on it conserves angular momentum exactly, and
+    // a symmetric top spun about an axis TILTED off its symmetry axis therefore
+    // precesses: the axis sweeps a cone about the fixed L, while |L| and the
+    // component of omega along the symmetry axis both stay put. Those are the
+    // two textbook invariants, and they are what this integrates for.
+    //
+    // WITHOUT the gyroscopic term the solve is I domega = T, so T = 0 gives
+    // domega = 0 -- omega frozen in the WORLD frame while the body turns under
+    // it. Then I = R I_b R^T changes and |I omega| drifts immediately. So this
+    // test fails loudly on the old code and is not merely a tighter version of
+    // an existing one.
+    {
+      Domain d(8, 8, 8, true, true, true);        // no fluid is touched
+      PenalisedBody<D3Q27, Disc> b(d);
+      // A disc's tensor by hand rather than measured, so the invariants have
+      // exact targets: axial A about body y, diametral B about x and z.
+      const Real A = Real(2), B = Real(1.25);
+      b.mass = Real(1);
+      b.inertia_body = Mat3{};
+      b.inertia_body(0, 0) = B;  b.inertia_body(1, 1) = A;  b.inertia_body(2, 2) = B;
+      b.shape.R = 1;  b.shape.hy = Real(0.1);
+      b.shape.set_orientation(Quat{});
+      b.free_translation = false;
+      b.free_rotation = true;
+      b.bx = b.by = b.bz = 0;                     // no gravity, no torque
+
+      // TWO RATES, because the residual has to be IDENTIFIED and not merely
+      // tolerated. With the gyroscopic term exactly right, |L| still drifts,
+      // because the pose is integrated by explicit Euler -- and the RATE of
+      // that drift is what says which it is. Euler is first order GLOBALLY, so
+      // halving omega dt at fixed total rotation should halve the drift.
+      //
+      // Measured: 4.90e-3 at omega dt = 1e-2 and 2.38e-3 at 5e-3, a ratio of
+      // 2.06. That is first order, and it identifies the drift as the
+      // integrator. (I first wrote this expecting ~4, reasoning from the per
+      // step error rather than the accumulated one; the ratio of 2 is the
+      // correct signature and the prediction was the thing that was wrong.)
+      // A missing term would not halve with the step at all.
+      double drift[2] = {0, 0};
+      double cone[2] = {0, 0};
+      double axial[2] = {0, 0};
+      for (int trial = 0; trial < 2; ++trial) {
+        const Real W = (trial == 0) ? Real(0.01) : Real(0.005);
+        const Real tilt = Real(0.4363323129985824);            // 25 degrees
+        b.shape.set_orientation(Quat{});
+        b.wx = W * Kokkos::sin(tilt);  b.wy = W * Kokkos::cos(tilt);  b.wz = 0;
+
+        auto Lmag = [&]() {
+          const Mat3 Iw = rotate_tensor(b.shape.Rm, b.inertia_body);
+          const Real lx = Iw(0,0)*b.wx + Iw(0,1)*b.wy + Iw(0,2)*b.wz;
+          const Real ly = Iw(1,0)*b.wx + Iw(1,1)*b.wy + Iw(1,2)*b.wz;
+          const Real lz = Iw(2,0)*b.wx + Iw(2,1)*b.wy + Iw(2,2)*b.wz;
+          return Kokkos::sqrt(lx*lx + ly*ly + lz*lz);
+        };
+        auto spin_axial = [&]() {
+          Real ax, ay, az;  b.shape.axis(ax, ay, az);
+          return b.wx*ax + b.wy*ay + b.wz*az;
+        };
+
+        const Real L0 = Lmag(), s0 = spin_axial();
+        // A zero fluid: an empty BodySums6 is a body in vacuum, so the entire
+        // right-hand side is the gyroscopic term and nothing else.
+        const BodySums6 vac;
+        Body6Properties p;
+        Real cmax = 0;
+        // The same TOTAL rotation in both trials -- twice the steps at half the
+        // rate -- so the comparison is of integration error at fixed physics.
+        const int nstep = (trial == 0) ? 4000 : 8000;
+        for (int k = 0; k < nstep; ++k) {
+          p.mass = b.mass;
+          p.inertia_world = rotate_tensor(b.shape.Rm, b.inertia_body);
+          p.wx = b.wx;  p.wy = b.wy;  p.wz = b.wz;
+          p.bx = 0;  p.by = 0;  p.bz = 0;
+          p.free_translation = false;  p.free_rotation = true;
+          Real dU[3], dW[3];
+          body6_solve(p, vac, dU, dW);
+          b.wx += dW[0];  b.wy += dW[1];  b.wz += dW[2];
+          b.advance6();
+          Real ax, ay, az;  b.shape.axis(ax, ay, az);
+          cmax = Kokkos::fmax(cmax, Kokkos::fabs(ay - Real(1)));
+        }
+        drift[trial] = Kokkos::fabs(double(Lmag() / L0) - 1.0);
+        axial[trial] = Kokkos::fabs(double(spin_axial() / s0) - 1.0);
+        cone[trial] = Kokkos::acos(1.0 - double(cmax)) * 57.29577951308232;
+      }
+      std::printf("   omega dt = 1.0e-2: |L| drift %.3e, cone %.2f deg\n",
+                  drift[0], cone[0]);
+      std::printf("   omega dt = 5.0e-3: |L| drift %.3e, cone %.2f deg\n",
+                  drift[1], cone[1]);
+      std::printf("   drift ratio %.2f (first-order Euler predicts 2)\n",
+                  drift[1] > 0 ? drift[0] / drift[1] : 0.0);
+      // THE AXIAL SPIN IS EXACT, not merely small: omega . axis is a strict
+      // invariant of a symmetric top and nothing in the integration threatens
+      // it, so this one is held to round-off rather than to a tolerance.
+      check::near(axial[0], 0.0, 1e-12, "axial spin exactly conserved (omega dt 1e-2)");
+      check::near(axial[1], 0.0, 1e-12, "axial spin exactly conserved (omega dt 5e-3)");
+      check::near(drift[0] / drift[1], 2.0, 0.4,
+                  "|L| residual halves with omega dt -- first-order Euler, "
+                  "not a missing term");
+      check::ok(drift[1] < 5e-3, "and it is small in absolute terms");
+      // And the axis DID move -- otherwise the invariants are conserved
+      // trivially and the whole block proves nothing.
+      check::ok(cone[0] > 5.0,
+                "the symmetry axis actually precessed through a real cone");
+    }
   }
   const int rc = check::report("rigid3d");
   Kokkos::finalize();

@@ -465,6 +465,73 @@ struct Box {
 };
 
 //------------------------------------------------------------------------------
+// A DISC -- a flat circular cylinder, for a skipping stone.
+//
+// THE SYMMETRY AXIS IS BODY y, NOT BODY z, and that is a deliberate choice of
+// reference rather than a convention inherited from anywhere. Gravity here is
+// -y, so at the identity orientation this disc lies FLAT with its axis
+// vertical: the pose a stone is in just before it is thrown. Every angle a
+// caller then sets is a departure from that, which is what makes an attack
+// angle readable in the driver instead of being a quaternion nobody can check
+// by eye. With the axis on body z the identity pose would be a disc standing on
+// its edge, and every case would open by rotating 90 degrees for no reason.
+//
+// chi is a PRODUCT of a radial and an axial profile, so the rim and the two
+// faces are each smoothed over `smooth` cells and the edge where they meet is
+// rounded. That is the same construction as Box's three tanhs and has the same
+// consequence: the penalised disc is slightly larger than the nominal one, so
+// the volume and the inertia are MEASURED (set_uniform_density6) rather than
+// taken from pi R^2 (2 hy).
+//
+// WHAT IT IS NOT. A real skipping stone is lenticular -- thicker at the centre,
+// tapering to a sharp rim -- and this is a flat cylinder with a rounded edge.
+// The lift in a skip comes from the pressure on the WETTED AREA at an angle of
+// attack, which a flat underside reproduces; the rim profile matters for how
+// the flow leaves, and there is no contact-line model here anyway, so the
+// tapered rim would be modelling something the scheme cannot carry.
+//------------------------------------------------------------------------------
+struct Disc {
+  Real cx = 0, cy = 0, cz = 0;      // centre
+  Real R = 0;                       // radius, in the plane perpendicular to y
+  Real hy = 0;                      // HALF thickness along the symmetry axis
+  Real smooth = Real(1);
+  Quat q;                           // orientation, the state
+  Mat3 Rm;                          // its matrix, cached
+
+  static constexpr bool three_d = true;
+  static constexpr bool six_dof = true;
+
+  void set_orientation(const Quat& qq) { q = qq;  q.normalise();  Rm = q.matrix(); }
+  // Present so a Disc satisfies the same interface as the prisms; a 3-D pose is
+  // the quaternion, and theta is deliberately not tracked.
+  Real theta = 0;
+  KOKKOS_INLINE_FUNCTION void set_angle(Real) {}
+
+  // The symmetry axis in the WORLD frame: the body y column of R. This is what
+  // a driver needs to report an attack angle and to spin the body about its own
+  // axis, and it is one matrix-vector product rather than a re-derivation.
+  void axis(Real& ax, Real& ay, Real& az) const {
+    ax = Rm(0, 1);  ay = Rm(1, 1);  az = Rm(2, 1);
+  }
+
+  KOKKOS_INLINE_FUNCTION Real reach() const {
+    return Kokkos::sqrt(R * R + hy * hy) + Real(4) * smooth;
+  }
+  KOKKOS_INLINE_FUNCTION bool outside(Real rx, Real ry, Real rz, Real reach2) const {
+    return rx * rx + ry * ry + rz * rz > reach2;
+  }
+  KOKKOS_INLINE_FUNCTION Real chi(Real x, Real y, Real z) const {
+    Real X, Y, Z;
+    Rm.tmul(x - cx, y - cy, z - cz, X, Y, Z);       // world -> body is R^T
+    const Real rp = Kokkos::sqrt(X * X + Z * Z);    // radius about the y axis
+    const Real ar = (R - rp) / smooth;
+    const Real ay = (hy - Kokkos::fabs(Y)) / smooth;
+    return Real(0.25) * (Real(1) + Kokkos::tanh(ar))
+                      * (Real(1) + Kokkos::tanh(ay));
+  }
+};
+
+//------------------------------------------------------------------------------
 // The NINE integrals of one sweep over the penalised region. Everything the
 // rigid-body solve needs, and nothing else.
 //
@@ -773,6 +840,9 @@ class PenalisedBody {
     // is the line that makes it a 3-D body rather than three translations: a
     // tumbling body's resistance to a torque depends on which way it is facing.
     p.inertia_world = rotate_tensor(shape.Rm, inertia_body);
+    // The current angular velocity, for the gyroscopic term: without it a
+    // spinning body's axis tips under torque instead of precessing.
+    p.wx = wx;  p.wy = wy;  p.wz = wz;
     p.bx = bx;  p.by = by;  p.bz = bz;
     p.free_translation = free_translation;
     p.free_rotation = free_rotation;

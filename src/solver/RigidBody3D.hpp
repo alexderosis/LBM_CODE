@@ -265,6 +265,9 @@ inline bool solve6(const Real A6[6][6], const Real r6[6], Real out[6]) {
 struct Body6Properties {
   Real mass = 0;
   Mat3 inertia_world;          // I_b, world frame; caller does R I_body R^T
+  // THE CURRENT ANGULAR VELOCITY. Not bookkeeping -- it is what makes this
+  // Euler's equation rather than a linear one. See the gyroscopic term below.
+  Real wx = 0, wy = 0, wz = 0;
   Real bx = 0, by = 0, bz = 0; // body force per unit mass, the SAME vector the
                                // collision operator is given
   bool free_translation = true;
@@ -288,9 +291,39 @@ inline void body6_solve(const Body6Properties& p, const BodySums6& q,
   const Real SxG[3] = {S[1] * g[2] - S[2] * g[1],
                        S[2] * g[0] - S[0] * g[2],
                        S[0] * g[1] - S[1] * g[0]};
-  const Real T[3] = {Real(2) * q.Lx - SxG[0],
-                     Real(2) * q.Ly - SxG[1],
-                     Real(2) * q.Lz - SxG[2]};
+  // THE GYROSCOPIC TERM, -omega x (I_b omega), and leaving it out is not a
+  // small error for a spinning body -- it is the whole of why a spinning body
+  // behaves differently from a still one.
+  //
+  // What has to be integrated is d(I omega)/dt = T with I changing as the body
+  // turns, and expanding that gives I domega/dt = T - omega x (I omega). Drop
+  // the second piece and the solve is I domega = T: a body whose angular
+  // momentum may change direction for free, so a torque TIPS the axis instead
+  // of precessing it, and a top falls over.
+  //
+  // WHY THIS SURVIVED THE CUBE. For an ISOTROPIC inertia, I = lambda I3, the
+  // term is omega x (lambda omega) = 0 identically -- so demonstrator/cube_entry
+  // and tests/test_rigid3d block 7 are bit-for-bit unaffected by adding it, and
+  // neither could ever have found it missing. It took a DISC, whose axial and
+  // diametral moments differ by a factor of two, to expose it: released
+  // spinning at a 20 degree attack angle the disc lost 4 degrees in a quarter
+  // of a diameter, which is a stone that digs in rather than skips.
+  //
+  // I_b ALONE, not B = I_b + I_f. The fluid's contribution to the system matrix
+  // is a penalisation artefact standing in for added mass; it is not a rigid
+  // body with angular momentum of its own, so it has no gyroscopic term.
+  const Real w[3] = {p.wx, p.wy, p.wz};
+  Real Iw[3];
+  for (int i = 0; i < 3; ++i)
+    Iw[i] = p.inertia_world(i, 0) * w[0] + p.inertia_world(i, 1) * w[1]
+          + p.inertia_world(i, 2) * w[2];
+  const Real gyro[3] = {w[1] * Iw[2] - w[2] * Iw[1],
+                        w[2] * Iw[0] - w[0] * Iw[2],
+                        w[0] * Iw[1] - w[1] * Iw[0]};
+
+  const Real T[3] = {Real(2) * q.Lx - SxG[0] - gyro[0],
+                     Real(2) * q.Ly - SxG[1] - gyro[1],
+                     Real(2) * q.Lz - SxG[2] - gyro[2]};
 
   Real A6[6][6] = {};
   Real r6[6];

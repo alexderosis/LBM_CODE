@@ -88,7 +88,7 @@ if(LBM_PTXAS_VERBOSE)
     $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-v>)
 endif()
 
-set(LBM_APPS tgv3d tgv3d_bench bench box channel rayleigh_benard alfven orszag_tang droplet bubble newpaths hartmann rti3d impact)
+set(LBM_APPS tgv3d tgv3d_bench bench box channel rayleigh_benard alfven orszag_tang droplet bubble newpaths hartmann rti3d impact skip)
 if(NOT LBM_HOST_ONLY)
   foreach(app ${LBM_APPS})
     add_executable(${app} src/${app}.cu)

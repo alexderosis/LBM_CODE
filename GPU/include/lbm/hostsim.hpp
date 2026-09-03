@@ -881,6 +881,133 @@ class Body {
     shape.set_angle(shape.theta + omega);
   }
 
+  //--------------------------------------------------------------------------
+  //  THE SIX-DOF PATH, serial. The device version's difficulty is the sixteen
+  //  accumulators; here it is a running total. Which is the point of having
+  //  this: the 6x6 can be checked against the parent's validated 3x3 on a
+  //  planar problem with no device in the loop at all.
+  //--------------------------------------------------------------------------
+  struct Reaction6 {
+    Real fx = 0, fy = 0, fz = 0;
+    Real tx = 0, ty = 0, tz = 0;
+    double fluid_mass = 0;
+    Real rx = 0, ry = 0, rz = 0;
+  };
+
+  Real wx = 0, wy = 0, wz = 0;     // angular velocity, world frame
+  Mat3 inertia_body;               // I_b in the body frame
+
+  BodySums6 moments6() const {
+    BodySums6 q;
+    for (long n = 0; n < N_; ++n) {
+      int x, y, z;
+      coords(n, nx_, ny_, x, y, z);
+      const double c = double(shape.chi(Real(x), Real(y), Real(z)));
+      if (c < 1e-6) continue;
+      const double rx = double(x) - double(shape.cx);
+      const double ry = double(y) - double(shape.cy);
+      const double rz = double(z) - double(shape_cz(shape, 0));
+      q.m += c;
+      q.Jxx += c * rx * rx;  q.Jyy += c * ry * ry;  q.Jzz += c * rz * rz;
+      q.Jxy += c * rx * ry;  q.Jxz += c * rx * rz;  q.Jyz += c * ry * rz;
+    }
+    return q;
+  }
+
+  double penalised_volume() const { return moments6().m; }
+
+  // I_body = R^T I_world R. See body.cuh's copy for why that inverse is the
+  // one that matters and why a cube cannot catch it being wrong.
+  void set_uniform_density6(Real rho_b) {
+    BodySums6 q = moments6();
+    const double r = double(rho_b);
+    q.m *= r;
+    q.Jxx *= r; q.Jyy *= r; q.Jzz *= r;
+    q.Jxy *= r; q.Jxz *= r; q.Jyz *= r;
+    props.mass = Real(q.m);
+    inertia_body = rotate_tensor(shape.Rm.transposed(), q.fluid_inertia());
+  }
+
+  template <class DensityOf>
+  Reaction6 refresh6(DensityOf dens) { return refresh6(dens, dens); }
+
+  template <class LiquidOf, class LbmOf>
+  Reaction6 refresh6(LiquidOf dens, LbmOf ldens) {
+    const BodySums6 q = probe6(dens, ldens);
+    Body6Properties p;
+    p.mass = props.mass;
+    p.inertia_world = rotate_tensor(shape.Rm, inertia_body);
+    // The current angular velocity, for the gyroscopic term.
+    p.wx = wx;  p.wy = wy;  p.wz = wz;
+    p.bx = props.bx;  p.by = props.by;  p.bz = props.bz;
+    p.free_translation = props.free_translation;
+    p.free_rotation = props.free_rotation;
+    double dU[3], dW[3];
+    body6_solve(p, q, dU, dW);
+    if (props.free_translation) {
+      vx += Real(dU[0]);  vy += Real(dU[1]);  vz += Real(dU[2]);
+    }
+    if (props.free_rotation) {
+      wx += Real(dW[0]);  wy += Real(dW[1]);  wz += Real(dW[2]);
+    }
+    apply6(dens, ldens);
+
+    const double S[3] = {q.Sx, q.Sy, q.Sz};
+    const double WxS[3] = {dW[1] * S[2] - dW[2] * S[1],
+                           dW[2] * S[0] - dW[0] * S[2],
+                           dW[0] * S[1] - dW[1] * S[0]};
+    const double SxU[3] = {S[1] * dU[2] - S[2] * dU[1],
+                           S[2] * dU[0] - S[0] * dU[2],
+                           S[0] * dU[1] - S[1] * dU[0]};
+    const Mat3 If = q.fluid_inertia();
+    double IfW[3];
+    for (int i = 0; i < 3; ++i)
+      IfW[i] = double(If(i, 0)) * dW[0] + double(If(i, 1)) * dW[1]
+             + double(If(i, 2)) * dW[2];
+    const double g[3] = {double(props.bx), double(props.by), double(props.bz)};
+    Reaction6 out;
+    out.fx = Real(2.0 * q.Px - 2.0 * (q.m * dU[0] + WxS[0]));
+    out.fy = Real(2.0 * q.Py - 2.0 * (q.m * dU[1] + WxS[1]));
+    out.fz = Real(2.0 * q.Pz - 2.0 * (q.m * dU[2] + WxS[2]));
+    out.tx = Real(2.0 * q.Lx - 2.0 * (IfW[0] + SxU[0]));
+    out.ty = Real(2.0 * q.Ly - 2.0 * (IfW[1] + SxU[1]));
+    out.tz = Real(2.0 * q.Lz - 2.0 * (IfW[2] + SxU[2]));
+    out.fluid_mass = q.m;
+    out.rx = Real(-(S[1] * g[2] - S[2] * g[1]));
+    out.ry = Real(-(S[2] * g[0] - S[0] * g[2]));
+    out.rz = Real(-(S[0] * g[1] - S[1] * g[0]));
+    return out;
+  }
+
+  void advance6() {
+    shape.cx += vx;
+    shape.cy += vy;
+    shape.cz += vz;
+    Quat q = shape.q;
+    q.integrate(wx, wy, wz, Real(1));
+    shape.set_orientation(q);
+  }
+
+  template <class LiquidOf, class LbmOf>
+  BodySums6 probe6(LiquidOf dens, LbmOf ldens) const {
+    const Real r2 = shape.reach() * shape.reach();
+    const BodyState6 st = state6();
+    BodySums6 q;
+    for (long n = 0; n < N_; ++n)
+      body_probe6_node(shape, st, ux_, uy_, uz_, fx_.data(), fy_.data(),
+                       fz_.data(), dens, ldens, n, r2, q);
+    return q;
+  }
+
+  template <class LiquidOf, class LbmOf>
+  void apply6(LiquidOf dens, LbmOf ldens) {
+    const Real r2 = shape.reach() * shape.reach();
+    const BodyState6 st = state6();
+    for (long n = 0; n < N_; ++n)
+      body_apply6_node(shape, st, ux_, uy_, uz_, fx_.data(), fy_.data(),
+                       fz_.data(), dens, ldens, n, r2);
+  }
+
   template <class LiquidOf, class LbmOf>
   BodySums probe(LiquidOf dens, LbmOf ldens) const {
     const Real r2 = shape.reach() * shape.reach();
@@ -906,6 +1033,15 @@ class Body {
   template <class S> static Real shape_cz(const S&, long) { return Real(0); }
   template <class S> static auto bump_z(S& sh, Real dz, int) -> decltype(sh.cz, void()) { sh.cz += dz; }
   template <class S> static void bump_z(S&, Real, long) {}
+
+  BodyState6 state6() const {
+    BodyState6 st;
+    st.cx = shape.cx;  st.cy = shape.cy;  st.cz = shape_cz(shape, 0);
+    st.vx = vx;  st.vy = vy;  st.vz = vz;
+    st.wx = wx;  st.wy = wy;  st.wz = wz;
+    st.nx = nx_; st.ny = ny_;
+    return st;
+  }
 
   BodyState state() const {
     BodyState st;

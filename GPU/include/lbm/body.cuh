@@ -114,6 +114,7 @@
 //     is what lets the body's own weight drop out of the roll equation. Ballast
 //     low in a hull is exactly what this cannot express.
 //==============================================================================
+#include "rigid3d.cuh"
 #include "streaming.cuh"
 
 namespace lbm {
@@ -304,6 +305,71 @@ struct Sphere {
 };
 
 //------------------------------------------------------------------------------
+// A DISC -- a flat circular cylinder, for a skipping stone. six_dof.
+//
+// A port of ../src/solver/PenalisedBody.hpp's Disc, including the choice that
+// matters: THE SYMMETRY AXIS IS BODY y, NOT BODY z. Gravity is -y, so at the
+// identity orientation this disc lies FLAT with its axis vertical -- the pose a
+// stone is in before it is thrown. Every angle a driver then sets is a
+// departure from that, which is what makes an attack angle readable instead of
+// being a quaternion nobody can check by eye. On body z the identity pose would
+// be a disc standing on its edge and every case would open by rotating 90
+// degrees for nothing.
+//
+// chi is a PRODUCT of a radial and an axial tanh, so the rim and the two faces
+// are each smoothed and the edge between them is rounded. Same construction as
+// Rect's two tanhs and the same consequence: the penalised disc is slightly
+// larger than the nominal one, so volume and inertia are MEASURED rather than
+// taken from pi R^2 (2 hy). The parent measures the excess against an
+// independent quadrature -- +0.14 % in volume, +0.71 % in the axial inertia and
+// +1.22 % in the diametral one at R = 24, hy = 4.8, smooth = 1.
+//
+// Rm is cached beside q for the reason Rect caches ct and st: chi runs at every
+// node of the domain every step, and a quaternion-to-matrix there would be the
+// single most expensive thing in the sweep.
+//------------------------------------------------------------------------------
+struct Disc {
+  Real cx = 0, cy = 0, cz = 0;      // centre
+  Real R = 0;                       // radius, perpendicular to the axis
+  Real hy = 0;                      // HALF thickness along the symmetry axis
+  Real smooth = Real(1);
+  Quat q;                           // orientation, the state
+  Mat3 Rm;                          // its matrix, cached
+
+  static constexpr bool three_d = true;
+  static constexpr bool six_dof = true;
+
+  void set_orientation(const Quat& qq) { q = qq;  q.normalise();  Rm = q.matrix(); }
+  // Present so a Disc satisfies the same interface as the prisms; a 3-D pose is
+  // the quaternion, and theta is deliberately not tracked.
+  Real theta = 0;
+  LBM_HD LBM_INLINE void set_angle(Real) {}
+
+  // The symmetry axis in the WORLD frame: the body y column of R. This is what
+  // a driver reads to report an attack angle and to spin the body about its own
+  // axis, and it is one column rather than a re-derivation.
+  void axis(Real& ax, Real& ay, Real& az) const {
+    ax = Rm(0, 1);  ay = Rm(1, 1);  az = Rm(2, 1);
+  }
+
+  LBM_HD LBM_INLINE Real reach() const {
+    return body_sqrt(R * R + hy * hy) + Real(4) * smooth;
+  }
+  LBM_HD LBM_INLINE bool outside(Real rx, Real ry, Real rz, Real reach2) const {
+    return rx * rx + ry * ry + rz * rz > reach2;
+  }
+  LBM_HD LBM_INLINE Real chi(Real x, Real y, Real z) const {
+    Real X, Y, Z;
+    Rm.tmul(x - cx, y - cy, z - cz, X, Y, Z);       // world -> body is R^T
+    const Real rp = body_sqrt(X * X + Z * Z);       // radius about the y axis
+    const Real ar = (R - rp) / smooth;
+    const Real ay = (hy - (Y < Real(0) ? -Y : Y)) / smooth;
+    return Real(0.25) * (Real(1) + body_tanh(ar))
+                      * (Real(1) + body_tanh(ay));
+  }
+};
+
+//------------------------------------------------------------------------------
 // The seven integrals of one sweep. Everything the rigid-body solve needs, and
 // nothing else.
 //------------------------------------------------------------------------------
@@ -436,6 +502,103 @@ LBM_HD LBM_INLINE void body_apply_node(const Shape& b, const BodyState& st,
   fx[n] = c * Real(2) * r * ((st.vx - st.omega * ry) - usx);
   fy[n] = c * Real(2) * r * ((st.vy + st.omega * rx) - usy);
   fz[n] = three ? (c * Real(2) * r * (st.vz - usz)) : Real(0);
+}
+
+//------------------------------------------------------------------------------
+// The 6-DOF state a kernel needs, and the two per-node operations that use it.
+//
+// The angular velocity is a VECTOR here and a scalar in BodyState, which is the
+// whole difference between the two paths: the rigid field is U + omega x r with
+// three components of omega instead of one, so a point on the body can be
+// moving in a direction no planar rotation could produce.
+//
+// LBM_HD, like their 3-DOF counterparts, so the host reference runs the same
+// arithmetic the device does -- which is what makes test/host_body.cpp's
+// comparison against the parent's 3x3 worth anything.
+//------------------------------------------------------------------------------
+struct BodyState6 {
+  Real cx = 0, cy = 0, cz = 0;      // shape origin, for r = x - x_c
+  Real vx = 0, vy = 0, vz = 0;      // centre-of-mass velocity
+  Real wx = 0, wy = 0, wz = 0;      // angular velocity, WORLD frame
+  int nx = 0, ny = 0;
+};
+
+template <class Shape, class LiquidOf, class LbmOf>
+LBM_HD LBM_INLINE bool body_probe6_node(const Shape& b, const BodyState6& st,
+                                        const Real* ux, const Real* uy,
+                                        const Real* uz,
+                                        const Real* fx, const Real* fy,
+                                        const Real* fz,
+                                        LiquidOf dens, LbmOf ldens,
+                                        long n, Real reach2, BodySums6& out) {
+  int x, y, z;
+  coords(n, st.nx, st.ny, x, y, z);
+  const Real rx = Real(x) - st.cx, ry = Real(y) - st.cy, rz = Real(z) - st.cz;
+  if (b.outside(rx, ry, rz, reach2)) return false;
+  const Real c = b.chi(Real(x), Real(y), Real(z));
+  if (c < Real(1e-6)) return false;
+
+  const Real r  = dens(n);             // liquid: the force and Newton
+  const Real rl = ldens(n);            // LBM: what the fluid divides the force by
+  const Real cr = c * r;
+  const Real inv = (rl > Real(1e-12)) ? Real(0.5) / rl : Real(0);
+  const Real usx = ux[n] - fx[n] * inv;
+  const Real usy = uy[n] - fy[n] * inv;
+  const Real usz = uz[n] - fz[n] * inv;
+  // The rigid field, with omega a vector.
+  const Real vrx = st.vx + (st.wy * rz - st.wz * ry);
+  const Real vry = st.vy + (st.wz * rx - st.wx * rz);
+  const Real vrz = st.vz + (st.wx * ry - st.wy * rx);
+  const Real dx = usx - vrx, dy = usy - vry, dz = usz - vrz;
+
+  out.m   += double(cr);
+  out.Sx  += double(cr) * double(rx);
+  out.Sy  += double(cr) * double(ry);
+  out.Sz  += double(cr) * double(rz);
+  out.Jxx += double(cr) * double(rx) * double(rx);
+  out.Jyy += double(cr) * double(ry) * double(ry);
+  out.Jzz += double(cr) * double(rz) * double(rz);
+  out.Jxy += double(cr) * double(rx) * double(ry);
+  out.Jxz += double(cr) * double(rx) * double(rz);
+  out.Jyz += double(cr) * double(ry) * double(rz);
+  out.Px  += double(cr) * double(dx);
+  out.Py  += double(cr) * double(dy);
+  out.Pz  += double(cr) * double(dz);
+  out.Lx  += double(cr) * (double(ry) * dz - double(rz) * dy);
+  out.Ly  += double(cr) * (double(rz) * dx - double(rx) * dz);
+  out.Lz  += double(cr) * (double(rx) * dy - double(ry) * dx);
+  return true;
+}
+
+template <class Shape, class LiquidOf, class LbmOf>
+LBM_HD LBM_INLINE void body_apply6_node(const Shape& b, const BodyState6& st,
+                                        const Real* ux, const Real* uy,
+                                        const Real* uz,
+                                        Real* fx, Real* fy, Real* fz,
+                                        LiquidOf dens, LbmOf ldens,
+                                        long n, Real reach2) {
+  int x, y, z;
+  coords(n, st.nx, st.ny, x, y, z);
+  const Real rx = Real(x) - st.cx, ry = Real(y) - st.cy, rz = Real(z) - st.cz;
+  if (b.outside(rx, ry, rz, reach2)) {
+    fx[n] = Real(0); fy[n] = Real(0); fz[n] = Real(0); return;
+  }
+  const Real c = b.chi(Real(x), Real(y), Real(z));
+  if (c < Real(1e-6)) {
+    fx[n] = Real(0); fy[n] = Real(0); fz[n] = Real(0); return;
+  }
+  const Real r  = dens(n);
+  const Real rl = ldens(n);
+  const Real inv = (rl > Real(1e-12)) ? Real(0.5) / rl : Real(0);
+  const Real usx = ux[n] - fx[n] * inv;
+  const Real usy = uy[n] - fy[n] * inv;
+  const Real usz = uz[n] - fz[n] * inv;
+  const Real vrx = st.vx + (st.wy * rz - st.wz * ry);
+  const Real vry = st.vy + (st.wz * rx - st.wx * rz);
+  const Real vrz = st.vz + (st.wx * ry - st.wy * rx);
+  fx[n] = c * Real(2) * r * (vrx - usx);
+  fy[n] = c * Real(2) * r * (vry - usy);
+  fz[n] = c * Real(2) * r * (vrz - usz);
 }
 
 //------------------------------------------------------------------------------
@@ -614,6 +777,115 @@ __global__ void body_moments_kernel(Shape b, int nx, int ny, long N,
   }
 }
 
+//------------------------------------------------------------------------------
+// The 6-DOF sweep. SIXTEEN per-block partial sums instead of nine; the host
+// adds them. BODY6_SUMS names the count in all four places it appears -- shared
+// memory, the launch, the partial buffer and the unpack -- because a mismatch
+// between any two of them is a silent wrong answer rather than a crash.
+//------------------------------------------------------------------------------
+template <class Shape, class LiquidOf, class LbmOf>
+__global__ void body_probe6_kernel(Shape b, BodyState6 st,
+                                   const Real* __restrict__ ux,
+                                   const Real* __restrict__ uy,
+                                   const Real* __restrict__ uz,
+                                   const Real* __restrict__ fx,
+                                   const Real* __restrict__ fy,
+                                   const Real* __restrict__ fz,
+                                   LiquidOf dens, LbmOf ldens,
+                                   long N, Real reach2,
+                                   double* __restrict__ partial) {
+  extern __shared__ double sm6[];            // BODY6_SUMS * blockDim.x
+  const unsigned T = blockDim.x;
+  BodySums6 acc;
+  const long stride = long(T) * gridDim.x;
+  for (long n = long(blockIdx.x) * T + threadIdx.x; n < N; n += stride)
+    body_probe6_node(b, st, ux, uy, uz, fx, fy, fz, dens, ldens, n, reach2, acc);
+
+  // Written out rather than reinterpreted as sixteen contiguous doubles: that
+  // works and is one line, but it is an aliasing assumption about a struct
+  // layout and the compiler is entitled to disagree.
+  sm6[ 0 * T + threadIdx.x] = acc.m;
+  sm6[ 1 * T + threadIdx.x] = acc.Sx;
+  sm6[ 2 * T + threadIdx.x] = acc.Sy;
+  sm6[ 3 * T + threadIdx.x] = acc.Sz;
+  sm6[ 4 * T + threadIdx.x] = acc.Jxx;
+  sm6[ 5 * T + threadIdx.x] = acc.Jyy;
+  sm6[ 6 * T + threadIdx.x] = acc.Jzz;
+  sm6[ 7 * T + threadIdx.x] = acc.Jxy;
+  sm6[ 8 * T + threadIdx.x] = acc.Jxz;
+  sm6[ 9 * T + threadIdx.x] = acc.Jyz;
+  sm6[10 * T + threadIdx.x] = acc.Px;
+  sm6[11 * T + threadIdx.x] = acc.Py;
+  sm6[12 * T + threadIdx.x] = acc.Pz;
+  sm6[13 * T + threadIdx.x] = acc.Lx;
+  sm6[14 * T + threadIdx.x] = acc.Ly;
+  sm6[15 * T + threadIdx.x] = acc.Lz;
+  __syncthreads();
+  for (unsigned s = T / 2; s > 0; s >>= 1) {
+    if (threadIdx.x < s)
+      for (int k = 0; k < BODY6_SUMS; ++k)
+        sm6[k * T + threadIdx.x] += sm6[k * T + threadIdx.x + s];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0)
+    for (int k = 0; k < BODY6_SUMS; ++k)
+      partial[k * gridDim.x + blockIdx.x] = sm6[k * T];
+}
+
+template <class Shape, class LiquidOf, class LbmOf>
+__global__ void body_apply6_kernel(Shape b, BodyState6 st,
+                                   const Real* __restrict__ ux,
+                                   const Real* __restrict__ uy,
+                                   const Real* __restrict__ uz,
+                                   Real* __restrict__ fx, Real* __restrict__ fy,
+                                   Real* __restrict__ fz,
+                                   LiquidOf dens, LbmOf ldens, long N,
+                                   Real reach2) {
+  const long n = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n >= N) return;
+  body_apply6_node(b, st, ux, uy, uz, fx, fy, fz, dens, ldens, n, reach2);
+}
+
+// Volume and the six products integral chi ri rj at the CURRENT pose, in the
+// world frame, with rho = 1. Seven sums, reduced the same way. Unlike
+// body_moments_kernel this is NOT pose invariant -- the products are world
+// frame -- which is exactly why set_uniform_density6 rotates the result back
+// into the body frame before storing it.
+template <class Shape>
+__global__ void body_moments6_kernel(Shape b, int nx, int ny, long N,
+                                     double* __restrict__ partial) {
+  extern __shared__ double sm7[];            // 7 * blockDim.x
+  const unsigned T = blockDim.x;
+  double a[7] = {0, 0, 0, 0, 0, 0, 0};
+  const long stride = long(T) * gridDim.x;
+  for (long n = long(blockIdx.x) * T + threadIdx.x; n < N; n += stride) {
+    int x, y, z;
+    coords(n, nx, ny, x, y, z);
+    const Real rx = Real(x) - b.cx, ry = Real(y) - b.cy, rz = Real(z) - b.cz;
+    const Real c = b.chi(Real(x), Real(y), Real(z));
+    if (c < Real(1e-6)) continue;
+    const double d = double(c);
+    a[0] += d;
+    a[1] += d * double(rx) * double(rx);
+    a[2] += d * double(ry) * double(ry);
+    a[3] += d * double(rz) * double(rz);
+    a[4] += d * double(rx) * double(ry);
+    a[5] += d * double(rx) * double(rz);
+    a[6] += d * double(ry) * double(rz);
+  }
+  for (int k = 0; k < 7; ++k) sm7[k * T + threadIdx.x] = a[k];
+  __syncthreads();
+  for (unsigned s = T / 2; s > 0; s >>= 1) {
+    if (threadIdx.x < s)
+      for (int k = 0; k < 7; ++k)
+        sm7[k * T + threadIdx.x] += sm7[k * T + threadIdx.x + s];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0)
+    for (int k = 0; k < 7; ++k)
+      partial[k * gridDim.x + blockIdx.x] = sm7[k * T];
+}
+
 //==============================================================================
 //  Host-side driver.
 //==============================================================================
@@ -628,7 +900,9 @@ class PenalisedBody {
     LBM_CUDA_CHECK(cudaMemset(fx_, 0, sizeof(Real) * N_));
     LBM_CUDA_CHECK(cudaMemset(fy_, 0, sizeof(Real) * N_));
     LBM_CUDA_CHECK(cudaMemset(fz_, 0, sizeof(Real) * N_));
-    LBM_CUDA_CHECK(cudaMalloc(&partial_, sizeof(double) * 9 * GRID));
+    // BODY6_SUMS, not 9: the 6-DOF probe reduces sixteen sums through the same
+    // buffer, and 16 covers the 3-DOF path's nine and moments6's seven too.
+    LBM_CUDA_CHECK(cudaMalloc(&partial_, sizeof(double) * BODY6_SUMS * GRID));
   }
   ~PenalisedBody() {
     cudaFree(fx_); cudaFree(fy_); cudaFree(fz_); cudaFree(partial_);
@@ -640,7 +914,13 @@ class PenalisedBody {
   Shape shape;
   BodyProperties props;
   Real vx = 0, vy = 0, vz = 0;     // centre-of-mass velocity
-  Real omega = 0;                  // angular velocity about z
+  Real omega = 0;                  // angular velocity about z -- 3-DOF path
+  // THE SIX-DOF STATE, used only by a shape whose six_dof is true. The angular
+  // velocity is a VECTOR and the inertia is a tensor held in the BODY frame --
+  // the world-frame tensor changes as the body turns, so storing that would
+  // mean recomputing it from something, and the body frame is the something.
+  Real wx = 0, wy = 0, wz = 0;     // angular velocity, world frame
+  Mat3 inertia_body;               // I_b in the body frame; rotated per step
 
   // Device pointers owned by the fluid solver. The two-argument form leaves the
   // z limb switched OFF -- uz_ stays null, and every prism case is the
@@ -708,6 +988,166 @@ class PenalisedBody {
     shape.set_angle(shape.theta + omega);
   }
 
+  //--------------------------------------------------------------------------
+  //  THE SIX-DOF PATH. Only instantiated for a shape with six_dof, because
+  //  members of a class template are instantiated on use -- so these may refer
+  //  to Disc's q and Rm freely without a Rect user paying for it or failing to
+  //  compile.
+  //--------------------------------------------------------------------------
+
+  // The 2-DOF Reaction with the force and the moment completed to vectors.
+  // Same closed forms, generalised: dw * (zhat x S) becomes dW x S and Iz * dw
+  // becomes I_f dW.
+  struct Reaction6 {
+    Real fx = 0, fy = 0, fz = 0;      // force the fluid exerts on the body
+    Real tx = 0, ty = 0, tz = 0;      // and its moment about the shape origin
+    double fluid_mass = 0;            // fluid standing in the penalised region
+    Real rx = 0, ry = 0, rz = 0;      // the hydrostatic couple -(S x g)
+  };
+
+  BodySums6 moments6() {
+    double* d = nullptr;
+    LBM_CUDA_CHECK(cudaMalloc(&d, sizeof(double) * 7 * GRID));
+    body_moments6_kernel<<<GRID, BLOCK, sizeof(double) * 7 * BLOCK>>>(
+        shape, nx_, ny_, N_, d);
+    LBM_CUDA_CHECK(cudaGetLastError());
+    std::vector<double> h(std::size_t(7 * GRID));
+    LBM_CUDA_CHECK(cudaMemcpy(h.data(), d, sizeof(double) * 7 * GRID,
+                              cudaMemcpyDeviceToHost));
+    cudaFree(d);
+    double t[7] = {0, 0, 0, 0, 0, 0, 0};
+    for (int k = 0; k < 7; ++k)
+      for (int i = 0; i < GRID; ++i) t[k] += h[std::size_t(k * GRID + i)];
+    BodySums6 q;
+    q.m = t[0];
+    q.Jxx = t[1]; q.Jyy = t[2]; q.Jzz = t[3];
+    q.Jxy = t[4]; q.Jxz = t[5]; q.Jyz = t[6];
+    return q;
+  }
+
+  double penalised_volume() { return moments6().m; }
+
+  // Mass and the BODY-frame inertia tensor of a body of uniform density.
+  // Measured from chi rather than from the nominal shape, for the reason
+  // set_uniform_density gives: the smoothing makes the penalised body slightly
+  // larger and nominal values would bias both.
+  //
+  // The measurement is in the WORLD frame at the current pose, so it is rotated
+  // BACK: I_body = R^T I_world R. Getting that inverse the wrong way round
+  // leaves an inertia that is right only at the release orientation, is still
+  // symmetric and positive definite, and produces a plausible tumble rather
+  // than a failure. ../tests/test_rigid3d.cpp block 7 pins the direction on an
+  // anisotropic slab, because a CUBE cannot catch it -- a uniform cube's
+  // inertia is isotropic and both directions agree.
+  void set_uniform_density6(Real rho_b) {
+    BodySums6 q = moments6();
+    const double r = double(rho_b);
+    q.m *= r;
+    q.Jxx *= r; q.Jyy *= r; q.Jzz *= r;
+    q.Jxy *= r; q.Jxz *= r; q.Jyz *= r;
+    props.mass = Real(q.m);
+    inertia_body = rotate_tensor(shape.Rm.transposed(), q.fluid_inertia());
+  }
+
+  template <class DensityOf>
+  Reaction6 refresh6(DensityOf dens) { return refresh6(dens, dens); }
+
+  template <class LiquidOf, class LbmOf>
+  Reaction6 refresh6(LiquidOf dens, LbmOf ldens) {
+    const BodySums6 q = probe6(dens, ldens);
+    Body6Properties p;
+    p.mass = props.mass;
+    // The body's tensor rotated into the world frame at the CURRENT pose. This
+    // is the line that makes it a 3-D body rather than three translations: a
+    // tumbling body's resistance to a torque depends on which way it faces.
+    p.inertia_world = rotate_tensor(shape.Rm, inertia_body);
+    // The current angular velocity, for the gyroscopic term.
+    p.wx = wx;  p.wy = wy;  p.wz = wz;
+    p.bx = props.bx;  p.by = props.by;  p.bz = props.bz;
+    p.free_translation = props.free_translation;
+    p.free_rotation = props.free_rotation;
+    double dU[3], dW[3];
+    body6_solve(p, q, dU, dW);
+    if (props.free_translation) {
+      vx += Real(dU[0]);  vy += Real(dU[1]);  vz += Real(dU[2]);
+    }
+    if (props.free_rotation) {
+      wx += Real(dW[0]);  wy += Real(dW[1]);  wz += Real(dW[2]);
+    }
+    apply6(dens, ldens);
+
+    // F = 2 dP - 2 (m_f dU + dW x S),  T = 2 dL - 2 (I_f dW + S x dU).
+    const double S[3] = {q.Sx, q.Sy, q.Sz};
+    const double WxS[3] = {dW[1] * S[2] - dW[2] * S[1],
+                           dW[2] * S[0] - dW[0] * S[2],
+                           dW[0] * S[1] - dW[1] * S[0]};
+    const double SxU[3] = {S[1] * dU[2] - S[2] * dU[1],
+                           S[2] * dU[0] - S[0] * dU[2],
+                           S[0] * dU[1] - S[1] * dU[0]};
+    const Mat3 If = q.fluid_inertia();
+    double IfW[3];
+    for (int i = 0; i < 3; ++i)
+      IfW[i] = double(If(i, 0)) * dW[0] + double(If(i, 1)) * dW[1]
+             + double(If(i, 2)) * dW[2];
+    const double g[3] = {double(props.bx), double(props.by), double(props.bz)};
+    Reaction6 out;
+    out.fx = Real(2.0 * q.Px - 2.0 * (q.m * dU[0] + WxS[0]));
+    out.fy = Real(2.0 * q.Py - 2.0 * (q.m * dU[1] + WxS[1]));
+    out.fz = Real(2.0 * q.Pz - 2.0 * (q.m * dU[2] + WxS[2]));
+    out.tx = Real(2.0 * q.Lx - 2.0 * (IfW[0] + SxU[0]));
+    out.ty = Real(2.0 * q.Ly - 2.0 * (IfW[1] + SxU[1]));
+    out.tz = Real(2.0 * q.Lz - 2.0 * (IfW[2] + SxU[2]));
+    out.fluid_mass = q.m;
+    out.rx = Real(-(S[1] * g[2] - S[2] * g[1]));
+    out.ry = Real(-(S[2] * g[0] - S[0] * g[2]));
+    out.rz = Real(-(S[0] * g[1] - S[1] * g[0]));
+    return out;
+  }
+
+  // Advance the pose: the centre by Euler, the orientation by one quaternion
+  // step. dt = 1, because the fluid step is the timescale.
+  void advance6() {
+    shape.cx += vx;
+    shape.cy += vy;
+    shape.cz += vz;
+    Quat q = shape.q;
+    q.integrate(wx, wy, wz, Real(1));
+    shape.set_orientation(q);
+  }
+
+  template <class LiquidOf, class LbmOf>
+  BodySums6 probe6(LiquidOf dens, LbmOf ldens) {
+    const Real r2 = shape.reach() * shape.reach();
+    body_probe6_kernel<<<GRID, BLOCK, sizeof(double) * BODY6_SUMS * BLOCK>>>(
+        shape, state6(), ux_, uy_, uz_, fx_, fy_, fz_, dens, ldens, N_, r2,
+        partial_);
+    LBM_CUDA_CHECK(cudaGetLastError());
+    std::vector<double> h(std::size_t(BODY6_SUMS * GRID));
+    LBM_CUDA_CHECK(cudaMemcpy(h.data(), partial_,
+                              sizeof(double) * BODY6_SUMS * GRID,
+                              cudaMemcpyDeviceToHost));
+    double t[BODY6_SUMS] = {};
+    for (int k = 0; k < BODY6_SUMS; ++k)
+      for (int i = 0; i < GRID; ++i) t[k] += h[std::size_t(k * GRID + i)];
+    BodySums6 q;
+    q.m = t[0];
+    q.Sx = t[1];  q.Sy = t[2];  q.Sz = t[3];
+    q.Jxx = t[4]; q.Jyy = t[5]; q.Jzz = t[6];
+    q.Jxy = t[7]; q.Jxz = t[8]; q.Jyz = t[9];
+    q.Px = t[10]; q.Py = t[11]; q.Pz = t[12];
+    q.Lx = t[13]; q.Ly = t[14]; q.Lz = t[15];
+    return q;
+  }
+
+  template <class LiquidOf, class LbmOf>
+  void apply6(LiquidOf dens, LbmOf ldens) {
+    const Real r2 = shape.reach() * shape.reach();
+    const int B = 128;
+    body_apply6_kernel<<<int((N_ + B - 1) / B), B>>>(
+        shape, state6(), ux_, uy_, uz_, fx_, fy_, fz_, dens, ldens, N_, r2);
+    LBM_CUDA_CHECK(cudaGetLastError());
+  }
+
   template <class LiquidOf, class LbmOf>
   BodySums probe(LiquidOf dens, LbmOf ldens) {
     const Real r2 = shape.reach() * shape.reach();
@@ -748,6 +1188,15 @@ class PenalisedBody {
   template <class S> static auto bump_z(S& sh, Real dz, int) -> decltype(sh.cz, void()) { sh.cz += dz; }
   template <class S> static void bump_z(S&, Real, long) {}
   template <class S> void advance_z(S& sh) { bump_z(sh, vz, 0); }
+
+  BodyState6 state6() const {
+    BodyState6 st;
+    st.cx = shape.cx;  st.cy = shape.cy;  st.cz = shape_cz(shape, 0);
+    st.vx = vx;  st.vy = vy;  st.vz = vz;
+    st.wx = wx;  st.wy = wy;  st.wz = wz;
+    st.nx = nx_; st.ny = ny_;
+    return st;
+  }
 
   BodyState state() const {
     BodyState st;
