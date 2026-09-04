@@ -148,7 +148,7 @@
 //
 //    usage: rb_high_ra [-h H] [-aspect A] [-ra RA] [-pr PR] [-u U_REF]
 //                      [-amp A] [-tf N] [-out N] [-op bgk|cm] [-sop reg|bgk]
-//                      [-nz NZ] [-vtk] [-dump PREFIX]
+//                      [-nz NZ] [-vtk] [-dump PREFIX] [-ic cond|cold]
 //==============================================================================
 #include "lbm/backend.cuh"
 
@@ -185,9 +185,41 @@ struct RbInit {
 
 // The whole layer starts cold. The hot plate is a wall value, not an initial
 // condition, so the entire dT is dropped across the bottom half cell at t = 0.
+//------------------------------------------------------------------------------
+// THE INITIAL CONDITION IS A FLAG, and the default changed.
+//
+// `cold` is the reference's: the whole layer at T_cold, so the ENTIRE dT is
+// dropped across the bottom half cell at t = 0. `cond` is the conductive
+// profile -- the same end states with no discontinuity anywhere.
+//
+// It matters, and the Kokkos twin measured how much. A controlled 2x2 (IC x Ra,
+// nothing else varied) gave T_min against a physical floor of T_cold:
+//
+//                       cold start     conductive
+//     Ra = 1e14           -0.8133       -0.4983  (in bounds)
+//     Ra = 1e10           -0.5520       -0.4958  (in bounds)
+//
+// The conductive profile stays inside its bounds at BOTH Rayleigh numbers; the
+// cold start violates them at both. A D3Q7 scalar near omega = 2 has no
+// diffusivity with which to smooth a step, and it does not. So `cond` is the
+// default here even though `cold` is what the reference does -- reproducing the
+// reference's seed is not worth starting outside the maximum principle. `-ic
+// cold` restores it.
+//------------------------------------------------------------------------------
 struct ColdInit {
   Real Tc;
   LBM_HD Real operator()(int, int, int) const { return Tc; }
+};
+
+struct CondInit {
+  int H;
+  Real Th, Tc;
+  LBM_HD Real operator()(int, int y, int) const {
+    // The hot plane is at y = 0.5, so the profile is linear in (y - 0.5)/H and
+    // lands on the plate values at both half-cell planes.
+    const double f = (double(y) - 0.5) / double(H);
+    return Real(double(Th) - f * (double(Th) - double(Tc)));
+  }
 };
 
 //------------------------------------------------------------------------------
@@ -260,7 +292,7 @@ int main(int argc, char** argv) {
   double Ra = 1e14, Pr = 0.71, U = 0.01, amp = 0.01;
   double tf = 10000.0, out_every = 1.0;
   std::string op = "cm", sop = "reg";
-  std::string dump;
+  std::string dump, ic = "cond";
   bool vtk = false;
 
   for (int i = 1; i < argc; ++i) {
@@ -278,6 +310,7 @@ int main(int argc, char** argv) {
     if (a == "-sop"    && i + 1 < argc) sop       = argv[++i];
     if (a == "-vtk")                    vtk       = true;
     if (a == "-dump"   && i + 1 < argc) dump      = argv[++i];
+    if (a == "-ic"     && i + 1 < argc) ic        = argv[++i];
   }
 
   // The plates and the gauge. T_ref = T0 is the shifted-storage reference: the
@@ -362,17 +395,20 @@ int main(int argc, char** argv) {
   fl.set_force(b, ForceBoussinesq);
 
   fl.initialise_with(RbInit{nx, ny / 2, Real(amp)});
-  sc.initialise_with(ColdInit{Real(T_cold)});
+  if (ic == "cold") sc.initialise_with(ColdInit{Real(T_cold)});
+  else              sc.initialise_with(CondInit{H, Real(T_hot), Real(T_cold)});
 
   if (vtk) { if (std::system("mkdir -p vtk_fluid")) {} }
   std::FILE* series = std::fopen("rb_high_ra.dat", "wt");
-  std::fprintf(series, "# t/t_ff  Nu_vol  Nu_bot  Nu_top  Nu_ref  max|u|  Ma  residual\n");
+  std::fprintf(series, "# t/t_ff  Nu_vol  Nu_bot  Nu_top  Nu_ref  max|u|  Ma  residual"
+                       "  T_min  T_max\n");
 
   std::vector<Real> rho, ux, uy, Tf, uz, Tprev;
   int frame = 0;
 
-  std::printf("  %10s %11s %11s %11s %11s %11s %11s\n",
-              "t/t_ff", "Nu_vol", "Nu_bot", "Nu_top", "Nu_ref", "max|u|", "residual");
+  std::printf("  %10s %11s %9s %9s %9s %10s %8s %8s %9s\n",
+              "t/t_ff", "Nu_vol", "Nu_floor", "Nu_bot", "Nu_top", "max|u|",
+              "T_min", "T_max", "residual");
 
   const auto wall0 = std::chrono::steady_clock::now();
   bool diverged = false;
@@ -390,13 +426,23 @@ int main(int argc, char** argv) {
       // <vT> = sum / (nx H nz), and Nu = 1 + H <vT> / (alpha dT), so the
       // divisor collapses to nx nz alpha dT.
       double flux = 0.0, peak = 0.0, bot = 0.0, top = 0.0, all = 0.0;
-      double num = 0.0, den = 0.0, mv = 0.0, mt = 0.0;
+      double num = 0.0, den = 0.0, mv = 0.0, mt = 0.0, qv = 0.0, qt = 0.0;
+      double tmin = 1e300, tmax = -1e300;
+      long nbad = 0;
       for (int z = 0; z < nz; ++z)
         for (int y = 1; y <= H; ++y)
           for (int x = 0; x < nx; ++x) {
             const std::size_t n = std::size_t(node_id(x, y, z, nx, ny));
             flux += double(uy[n]) * double(Tf[n]);
             mv += double(uy[n]);  mt += double(Tf[n]);
+            qv += double(uy[n]) * double(uy[n]);
+            qt += double(Tf[n]) * double(Tf[n]);
+            // A nan compares false BOTH ways, so guarding this is what stops a
+            // nan field reporting +/-1e300 as its temperature range -- a number
+            // that looks like data.
+            if (!std::isfinite(double(Tf[n]))) ++nbad;
+            else { if (double(Tf[n]) < tmin) tmin = double(Tf[n]);
+                   if (double(Tf[n]) > tmax) tmax = double(Tf[n]); }
             const double s = std::sqrt(double(ux[n]) * double(ux[n]) +
                                        double(uy[n]) * double(uy[n]) +
                                        double(uz[n]) * double(uz[n]));
@@ -435,12 +481,34 @@ int main(int argc, char** argv) {
       }
       Tprev = Tf;
 
-      std::printf("  %10.2f %11.4f %11.4f %11.4f %11.4f %11.3e %11.3e\n",
-                  double(t) / t_ff, Nu_vol, Nu_bot, Nu_top, Nu_ref, peak, resid);
+      // Nu_vol's NOISE FLOOR, from the uncorrelated limit
+      // H u'_rms T'_rms / (a dT sqrt(N)). Nu_vol carries a factor H/a -- 5.3e6
+      // here at Ra = 1e11 -- so an accidental velocity-temperature correlation
+      // is amplified enormously. Read this only as a HARD LOWER BOUND, never as
+      // a threshold for belief: measured on the Kokkos twin in a provably
+      // non-convecting state, Nu_vol sat 28x to 320x ABOVE this floor and was
+      // still unambiguously noise. The two signals that work are Nu_vol
+      // alternating sign (a convective flux is positive in the mean, so a
+      // sign-flipping one is noise by construction) and Nu_bot agreeing with
+      // Nu_top while both disagree with Nu_vol.
+      const double vrms = std::sqrt(std::max(qv / ncell - mv * mv, 0.0));
+      const double trms = std::sqrt(std::max(qt / ncell - mt * mt, 0.0));
+      const double Nu_floor =
+          double(H) * vrms * trms / (alpha * dT * std::sqrt(ncell));
+
+      if (nbad)
+        std::printf("  %10.2f %11s %9s %9s %9s %10s %8s %8s %9s"
+                    "   (%ld of %.0f cells non-finite)\n",
+                    double(t) / t_ff, "nan", "-", "-", "-", "-", "nan", "nan",
+                    "-", nbad, ncell);
+      else
+        std::printf("  %10.2f %11.4f %9.4f %9.4f %9.4f %10.3e %8.4f %8.4f %9.2e\n",
+                    double(t) / t_ff, Nu_vol, Nu_floor, Nu_bot, Nu_top, peak,
+                    tmin, tmax, resid);
       std::fflush(stdout);
-      std::fprintf(series, "%.6f %.8f %.8f %.8f %.8f %.6e %.6e %.6e\n",
+      std::fprintf(series, "%.6f %.8f %.8f %.8f %.8f %.6e %.6e %.6e %.6e %.6e\n",
                    double(t) / t_ff, Nu_vol, Nu_bot, Nu_top, Nu_ref,
-                   peak, peak * std::sqrt(3.0), resid);
+                   peak, peak * std::sqrt(3.0), resid, tmin, tmax);
       std::fflush(series);
 
       if (vtk) write_vtk(int(t), nx, ny, nz, Tf, ux, uy, uz);
@@ -461,8 +529,24 @@ int main(int argc, char** argv) {
         ++frame;
       }
 
-      if (!std::isfinite(Nu_vol) || peak > 1.0) {
-        std::printf("  DIVERGED at t = %zu  (max|u| = %.3e)\n", t, peak);
+      // ================= THE MAXIMUM PRINCIPLE IS THE STOP RULE =============
+      // Advection-diffusion with Dirichlet data in [T_cold, T_hot] obeys a
+      // maximum principle, so T outside those bounds is the scheme failing and
+      // nothing else. On the CUDA twin at Ra = 1e14 that caught the failure a
+      // long way before the Nusselt numbers looked wrong: T reached [-2.22,
+      // 1.54] at the same instant Nu_vol jumped to 56, while Nu_top sat at
+      // exactly 0 -- no heat had reached the top plate at all, so the
+      // "convection" was an overshoot rather than a plume. Bounds at twice the
+      // physical range, so a small overshoot is reported and a real failure
+      // stops the run.
+      const double slack = 0.5 * dT;
+      if (nbad || !std::isfinite(Nu_vol) || peak > 1.0
+          || tmin < T_cold - slack || tmax > T_hot + slack) {
+        std::printf("  STOPPED at t = %zu: %s\n", t,
+                    nbad ? "T not finite"
+                    : !std::isfinite(Nu_vol) ? "Nu not finite"
+                    : peak > 1.0 ? "max|u| > 1"
+                    : "T outside twice its physical range");
         diverged = true;
         steps_run = t;
         break;
