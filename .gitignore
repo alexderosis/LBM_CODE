@@ -46,3 +46,4 @@ results/J_zhou_thermal/*_uy.dat
 # is the tracked binary here because it is the deliverable; a video of a
 # demonstrator is not.
 doc/video/
+GPU/build*/

@@ -297,6 +297,16 @@ Do not spend time on these without saying so first; several are deliberate.
   What it still lacks: an open boundary for the FLUID (the parent's `NrmOutXp` /
   `NrmOutFree`), D3Q19, raw MRT, and a moving obstacle in the free surface — the
   last deliberately, see that module's banner and the entry above.
+  As of 2026-09-04 the D3Q7 scalar also has a **regularised collision**
+  (`collide_scalar_regularised`, `ScalarOp::Regularised`) beside BGK: it relaxes
+  the flux moments at ω and annihilates the three ghost moments rather than
+  relaxing them. Identical to BGK at ω = 1, and it matters only near ω = 2 —
+  where BGK becomes a reflection, so the ghosts invert every step and never
+  damp. At Ra = 1e14 (ω_T = 1.99999905) BGK's near-wall temperature *rings*:
+  Nu_bot swung 34.9 ↔ 93.6 over sixty free-fall times against an analytic ~100,
+  bounded rather than diverging, so it averages into a plausible number.
+  `rb_high_ra` defaults to the regularised operator and keeps `-sop bgk` to
+  reproduce the ringing on demand.
   One property to know rather than a gap: **regularised walls are not mass
   conserving**, since BC3 overwrites populations. A closed box holds its mass
   exactly; a driven cavity leaks linearly and does not saturate (−1.7e-2 over

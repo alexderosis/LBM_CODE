@@ -255,8 +255,9 @@ class Fluid {
 //==============================================================================
 class Scalar {
  public:
-  Scalar(int nx, int ny, int nz, Real diffusivity, Real T_ref = Real(0))
-      : nx_(nx), ny_(ny), nz_(nz), T_ref_(T_ref) {
+  Scalar(int nx, int ny, int nz, Real diffusivity, Real T_ref = Real(0),
+         ScalarOp op = ScalarOp::BGK)
+      : nx_(nx), ny_(ny), nz_(nz), T_ref_(T_ref), op_(op) {
     omega_ = omega_from_diffusivity<ScalarLattice>(diffusivity);
     N_ = long(nx) * ny * nz;
     h_.assign(std::size_t(ScalarLattice::Q * N_), Real(0));
@@ -354,12 +355,14 @@ class Scalar {
     p.donor = donor_.empty() ? nullptr : donor_.data();
     p.nx = nx_; p.ny = ny_; p.nz = nz_;
     p.omega = omega_; p.T_ref = T_ref_;
+    p.regularised = (op_ == ScalarOp::Regularised);
     return p;
   }
 
   int nx_, ny_, nz_;
   long N_;
   Real T_ref_, omega_;
+  ScalarOp op_ = ScalarOp::BGK;
   std::vector<Real> h_, wall_, T_;
   std::vector<std::uint8_t> flags_;
   std::vector<long> donor_;

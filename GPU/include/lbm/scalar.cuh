@@ -48,6 +48,11 @@ struct ScalarParams {
   const long* donor = nullptr;
   int nx = 0, ny = 0, nz = 0;
   Real omega = Real(1), T_ref = Real(0);
+  // Runtime rather than a template parameter, unlike HasGeometry/HasOutflow.
+  // Those gate a memory STREAM, which is what a bandwidth-bound kernel pays
+  // for; this gates a branch that every thread in the grid takes the same way,
+  // which costs nothing. Another template axis would double eight kernels.
+  bool regularised = false;
 };
 
 //------------------------------------------------------------------------------
@@ -91,7 +96,10 @@ LBM_HD LBM_INLINE void scalar_node_update(const ScalarParams& p, long N, long n)
   const Real dT = scalar_deviation<ScalarLattice>(h);
   Real vx = Real(0), vy = Real(0), vz = Real(0);
   if (Advected) { vx = p.ux[n]; vy = p.uy[n]; vz = p.uz[n]; }
-  collide_scalar<ScalarLattice>(h, dT, p.T_ref, vx, vy, vz, p.omega);
+  if (p.regularised)
+    collide_scalar_regularised(h, dT, p.T_ref, vx, vy, vz, p.omega);
+  else
+    collide_scalar<ScalarLattice>(h, dT, p.T_ref, vx, vy, vz, p.omega);
   scatter<Parity, ScalarLattice>(p.h, N, x, y, z, p.nx, p.ny, p.nz, h);
 
   // ONE EXTRA STORE, AND ONLY WHERE IT IS NEEDED. The second pass reads the
@@ -283,8 +291,9 @@ __global__ void scalar_initialise(Real* __restrict__ h,
 //==============================================================================
 class ScalarSolver {
  public:
-  ScalarSolver(int nx, int ny, int nz, Real diffusivity, Real T_ref = Real(0))
-      : nx_(nx), ny_(ny), nz_(nz), T_ref_(T_ref) {
+  ScalarSolver(int nx, int ny, int nz, Real diffusivity, Real T_ref = Real(0),
+               ScalarOp op = ScalarOp::BGK)
+      : nx_(nx), ny_(ny), nz_(nz), T_ref_(T_ref), op_(op) {
     omega_ = omega_from_diffusivity<ScalarLattice>(diffusivity);
     N_ = long(nx) * ny * nz;
     LBM_CUDA_CHECK(cudaMalloc(&h_, sizeof(Real) * ScalarLattice::Q * N_));
@@ -410,12 +419,14 @@ class ScalarSolver {
     p.donor = donor_;
     p.nx = nx_; p.ny = ny_; p.nz = nz_;
     p.omega = omega_; p.T_ref = T_ref_;
+    p.regularised = (op_ == ScalarOp::Regularised);
     return p;
   }
 
   int nx_, ny_, nz_;
   long N_;
   Real T_ref_, omega_;
+  ScalarOp op_ = ScalarOp::BGK;
   Real* h_ = nullptr;
   std::uint8_t* flags_ = nullptr;
   Real* wall_ = nullptr;

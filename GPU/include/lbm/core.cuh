@@ -430,6 +430,62 @@ LBM_HD LBM_INLINE void collide_scalar(Real h[L::Q], Real dT, Real T_ref,
     h[i] += omega * (scalar_eq<L>(i, dT, T_ref, ux, uy, uz) - h[i]);
 }
 
+//==============================================================================
+//  Regularised scalar collision -- the ghost moments annihilated, not relaxed.
+//
+//  D3Q7 carries exactly seven moments, and they split cleanly:
+//
+//      dT = sum h_i                       conserved
+//      j_a = sum c_a h_i                  hydrodynamic, relaxed at omega
+//      m_aa = sum c_a^2 h_i               GHOST -- carries no physics at all
+//
+//  (there are no off-diagonal second moments: every non-rest velocity of this
+//  lattice has a single nonzero component, so c_a c_b vanishes for a != b.)
+//  BGK relaxes all three groups at the same omega. This operator relaxes j_a at
+//  omega and sets m_aa to its equilibrium value cs2 dT outright, which is
+//  relaxing the ghost at omega = 1. The two therefore COINCIDE at omega = 1 --
+//  host_check.cpp pins that -- and diverge as omega leaves it.
+//
+//  ================== WHY THIS EXISTS, WITH THE MEASUREMENT ==================
+//  It matters only near the stability limit, and there it matters completely.
+//  As omega -> 2 the BGK collision approaches h -> 2 h_eq - h, a REFLECTION:
+//  the ghost is inverted every step and never damped. Rayleigh-Benard at
+//  Ra = 1e14 puts omega at 1.99999905, and the near-wall temperature then rings
+//  instead of relaxing -- Nu_bot ran 100 -> 39.4 -> 78.7 over ten free-fall
+//  times on the host, an undamped oscillation and not a diverging one, so it
+//  would be easy to average over and quote. Annihilating the ghost removes it.
+//
+//  This is the D3Q7 form of what a central-moment thermal operator does on a
+//  larger lattice -- relax the first-order moments, everything above them to
+//  equilibrium. It is written out rather than transformed because on seven
+//  velocities the inverse is closed:
+//
+//      h_1,2 = (m_xx +/- j_x)/2,  h_3,4 = (m_yy +/- j_y)/2,
+//      h_5,6 = (m_zz +/- j_z)/2,  h_0 = dT - m_xx - m_yy - m_zz.
+//
+//  NOT TEMPLATED ON THE LATTICE, deliberately: the moment split above is a
+//  property of D3Q7's velocity set, not a general one, and a version that
+//  silently accepted D3Q19 would be wrong rather than slow.
+//  ===========================================================================
+LBM_HD LBM_INLINE void collide_scalar_regularised(Real h[7], Real dT, Real T_ref,
+                                                  Real ux, Real uy, Real uz,
+                                                  Real omega) {
+  const Real T = T_ref + dT;
+  const Real jx = h[1] - h[2], jy = h[3] - h[4], jz = h[5] - h[6];
+  const Real px = jx + omega * (T * ux - jx);
+  const Real py = jy + omega * (T * uy - jy);
+  const Real pz = jz + omega * (T * uz - jz);
+  const Real d  = D3Q7::cs2() * dT;          // every diagonal moment, at equilibrium
+  h[1] = Real(0.5) * (d + px);  h[2] = Real(0.5) * (d - px);
+  h[3] = Real(0.5) * (d + py);  h[4] = Real(0.5) * (d - py);
+  h[5] = Real(0.5) * (d + pz);  h[6] = Real(0.5) * (d - pz);
+  h[0] = dT - Real(3) * d;
+}
+
+// Which of the two the scalar runs. BGK is the default so that every existing
+// driver keeps the operator it was validated with.
+enum class ScalarOp { BGK, Regularised };
+
 template <class L>
 LBM_HD LBM_INLINE Real omega_from_diffusivity(Real d) {
   return Real(1) / (d * L::inv_cs2() + Real(0.5));

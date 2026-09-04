@@ -7363,7 +7363,13 @@ same principle: written and verified on a machine with no GPU, then built with
 \begin{itemize}[leftmargin=1.4em,itemsep=3pt]
 \item \textbf{Scalar transport} on D3Q7 ($\cs^2=1/4$), first-order equilibrium,
   with adiabatic and Dirichlet walls, and Guo forcing in a uniform and a
-  Boussinesq form.
+  Boussinesq form. Two collision operators: BGK, and a \emph{regularised} one
+  that relaxes the three flux moments at $\omega$ and sets the three ghost
+  moments $m_{aa}$ to equilibrium outright. On seven velocities the inverse is
+  closed, so no transform is needed. The two coincide at $\omega=1$ and differ
+  only near the stability limit --- where BGK tends to $h\to 2h^{eq}-h$, a
+  reflection that inverts the ghosts every step without damping them. Section
+  \ref{sec:known} records what that costs.
 \item \textbf{Magnetohydrodynamics} by Dellar's vector-valued induction
   distribution, again on D3Q7, with the Maxwell stress entering the
   \emph{fluid} equilibrium's second moment rather than as a body force. Both the
@@ -7891,6 +7897,7 @@ they take minutes and are excluded from \code{ctest}.
 
 %==============================================================================
 \section{Known limitations}
+\label{sec:known}
 
 Stated plainly, because each has been measured.
 
@@ -8216,6 +8223,28 @@ the fitted rate is blamed on the scheme.
   is not free of bias either: at a width of $1.5$ cells the indicator's second
   moment exceeds the sharp rectangle's by $2.55\%$, which is why mass and inertia
   are taken from $\chi$ rather than from the nominal dimensions.
+
+\item \textbf{Neither scalar operator diffuses at $\tau\to1/2$, and the
+  regularised one only removes the ringing.} Rayleigh--B\'enard at
+  $\mathrm{Ra}=10^{14}$ on $H=50$ puts $\alpha=5.93\e{-8}$, so the conductive
+  layer needs $8.4\e{6}$ steps to reach a single cell: the diffusion length is
+  sub-lattice and no operator can represent it. What the operator choice does
+  change is the character of the error. Under BGK ($\omega_T=1.99999905$,
+  i.e.\ $h\to2h^{eq}-h$) the near-wall temperature oscillates without damping,
+  $\mathrm{Nu}_{\rm bot}$ swinging between $34.9$ and $93.6$ over sixty
+  free-fall times against an analytic $\simeq100$, and $\mathrm{Nu}_{\rm vol}$
+  between $0.36$ and $1.40$ where conduction alone requires exactly $1$.
+  Annihilating the ghosts removes that entirely --- $\mathrm{Nu}_{\rm vol}$ then
+  reads $1.0000$ and $\mathrm{Nu}_{\rm top}$ exactly $0$ --- but leaves
+  $\mathrm{Nu}_{\rm bot}$ at $66$ against the same $100$, because the sub-lattice
+  transport is ballistic rather than diffusive at this $\omega$. Both operators
+  are exact where the layer is resolved: steady conduction below
+  $\mathrm{Ra}_c$ gives $\mathrm{Nu}=1.0000$ on all three estimators with
+  $|u|\to3\e{-16}$, and the transient matches $\mathrm{erfc}$ to $0.045\%$
+  falling to $0.004\%$. The consequence for \code{rb\_high\_ra} is that a
+  Nusselt number from an unresolved run is a property of the discretisation, and
+  the driver prints the volume and both plate estimators so the disagreement
+  between them is visible rather than inferred.
 \end{enumerate}
 
 %==============================================================================

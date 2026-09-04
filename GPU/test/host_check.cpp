@@ -766,6 +766,66 @@ int main() {
     }
   }
 
+  // ---- 22. the regularised scalar collision --------------------------------
+  //
+  // Three properties, and the first two are what make it safe to substitute for
+  // BGK. It conserves the scalar; it is IDENTICAL to BGK at omega = 1, because
+  // both then put the ghost moments at equilibrium; and away from omega = 1 it
+  // differs only in those ghosts -- the scalar and the flux come out the same.
+  // The last is the whole claim: the hydrodynamic moments are untouched and
+  // only the non-physical ones are treated differently.
+  {
+    auto moments = [](const Real h[7], double m[4]) {
+      m[0] = m[1] = m[2] = m[3] = 0.0;
+      for (int i = 0; i < 7; ++i) {
+        m[0] += double(h[i]);
+        m[1] += double(h[i]) * D3Q7::cx(i);
+        m[2] += double(h[i]) * D3Q7::cy(i);
+        m[3] += double(h[i]) * D3Q7::cz(i);
+      }
+    };
+    const Real T_ref = Real(0.5), ux = Real(0.02), uy = Real(-0.01), uz = Real(0.015);
+    Real base[7];
+    for (int i = 0; i < 7; ++i)
+      base[i] = scalar_eq<D3Q7>(i, Real(0.3), T_ref, ux, uy, uz) *
+                Real(1.0 + 0.05 * ((i % 5) - 2));      // off equilibrium, ghosts loaded
+
+    {
+      Real h[7];
+      for (int i = 0; i < 7; ++i) h[i] = base[i];
+      const Real dT0 = scalar_deviation<D3Q7>(h);
+      collide_scalar_regularised(h, dT0, T_ref, ux, uy, uz, Real(1.4));
+      const double e = double(scalar_deviation<D3Q7>(h)) - double(dT0);
+      check(std::fabs(e) < eps * 10, "regularised scalar conserves the scalar", e);
+    }
+    {
+      Real a1[7], b1[7];
+      for (int i = 0; i < 7; ++i) a1[i] = b1[i] = base[i];
+      const Real dT0 = scalar_deviation<D3Q7>(a1);
+      collide_scalar<D3Q7>(a1, dT0, T_ref, ux, uy, uz, Real(1));
+      collide_scalar_regularised(b1, dT0, T_ref, ux, uy, uz, Real(1));
+      double e = 0;
+      for (int i = 0; i < 7; ++i) e = worst(e, double(a1[i]) - double(b1[i]));
+      check(std::fabs(e) < eps * 10, "regularised == BGK at omega = 1", e);
+    }
+    {
+      Real a1[7], b1[7];
+      for (int i = 0; i < 7; ++i) a1[i] = b1[i] = base[i];
+      const Real dT0 = scalar_deviation<D3Q7>(a1);
+      collide_scalar<D3Q7>(a1, dT0, T_ref, ux, uy, uz, Real(1.9));
+      collide_scalar_regularised(b1, dT0, T_ref, ux, uy, uz, Real(1.9));
+      double ma[4], mb[4], e = 0, ghost = 0;
+      moments(a1, ma); moments(b1, mb);
+      for (int k = 0; k < 4; ++k) e = worst(e, ma[k] - mb[k]);
+      check(std::fabs(e) < eps * 10,
+            "regularised leaves scalar and flux equal to BGK's", e);
+      for (int i = 0; i < 7; ++i)
+        ghost = worst(ghost, double(a1[i]) - double(b1[i]));
+      check(std::fabs(ghost) > 1e-4,
+            "...and differs only in the ghosts, which it does not relax", ghost);
+    }
+  }
+
   std::printf("\n%s  (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED",
               failures, failures == 1 ? "" : "s");
   return failures ? 1 : 0;
