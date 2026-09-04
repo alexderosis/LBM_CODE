@@ -52,6 +52,8 @@
 #include "lattice/Lattices.hpp"
 #include "memory/Storage.hpp"
 
+#include <utility>   // integer_sequence -- the moment loop is unrolled, see eq_moment
+
 namespace lbm {
 
 //------------------------------------------------------------------------------
@@ -77,6 +79,15 @@ struct MomentCollision {
                 "moment collision as a Navier-Stokes operator needs a lattice "
                 "with isotropic 4th-order moments.");
   static_assert(Basis::enabled, "no moment basis is available for this lattice.");
+
+  // The basis's exponent accessors MUST be usable in a constant expression.
+  // This is not a style preference: `eq_moment<N>` reads them at compile time
+  // precisely so the moment arrays stay out of memory, and dropping `constexpr`
+  // from one of them would not fail to compile -- it would silently move the
+  // whole operator back onto a runtime-indexed 432-byte table. See eq_moment.
+  static_assert(Basis::p_of(NM - 1) >= 0 && Basis::q_of(NM - 1) >= 0 &&
+                Basis::r_of(NM - 1) >= 0 && Basis::order(0) == 0,
+                "the moment basis's p_of/q_of/r_of/order must be constexpr.");
 
   Real omega      = Real(1);   // shear: sets the viscosity
   Real omega_bulk = Real(-1);  // trace; < 0 means "follow omega"
@@ -123,15 +134,103 @@ struct MomentCollision {
     for (int a = 0; a < 3; ++a) Basis::eq_1d(du[a], ub[a], Qf[a], Aw[a]);
   }
 
-  // Equilibrium of moment slot n, expressed in the STORED variable.
+  //----------------------------------------------------------------------------
+  //  EQUILIBRIUM OF MOMENT SLOT N -- AND WHY N IS A TEMPLATE PARAMETER.
+  //
+  //  This was `eq_moment(..., int n)`, called from a runtime loop
+  //  `for (n = 0; n < NM; ++n) if (order(n) >= 3) k[n] = eq_moment(..., n)`.
+  //  That single loop was the one construct in `collide` that did not unroll,
+  //  and it cost the whole operator its registers. The chain, read off arm64
+  //  assembly (`tests/frame_check.sh` re-measures it, at both precisions):
+  //
+  //    n stays a runtime value
+  //      -> p_of(n) cannot fold, so the basis's 432-byte Ord table is
+  //         materialised in memory and indexed at runtime
+  //      -> the p it returns indexes Qf/Aw, so THOSE go to memory too
+  //      -> k[n] is a runtime subscript, so the 27-moment array joins them.
+  //
+  //  Measured, D3Q27 FP64, clang -O3 on arm64:
+  //
+  //      BGK::collide               inlined, 107 straight-line instrs, NO frame
+  //      MomentCollision, before    not inlined, 155 instrs, 1 live loop,
+  //                                 464-byte frame, 4 register-indexed accesses
+  //      MomentCollision, after     142 instrs, NO loop, NO register-indexed
+  //                                 access, 368-byte frame
+  //
+  //  The frame does not reach zero and is not meant to. What is left is plain
+  //  register pressure -- 72 doubles do not fit arm64's 32 FP registers, so the
+  //  compiler spills some at CONSTANT offsets. That is a different problem with
+  //  a different consequence: a spill at a constant offset can be eliminated by
+  //  a larger register budget, and a GPU thread has up to 255 registers where
+  //  arm64 has 32. A runtime-INDEXED array cannot be eliminated by any budget.
+  //  Removing the second kind is the whole change; the first kind is left to
+  //  the target's register file.
+  //
+  //  WHY THE HOST BARELY NOTICED, which is why this survived so long. A
+  //  464-byte frame is L1-resident on a CPU: `validation/cmbench` measures the
+  //  operator at 2.18x BGK, an unremarkable price for a 27-moment transform,
+  //  and nothing looks wrong. In DEVICE code that same frame is per-thread
+  //  LOCAL memory -- off-chip DRAM -- and every one of those table-driven
+  //  subscripts is an uncoalesced global transaction. This tree has already
+  //  measured that exact mechanism at 47x in GPU/'s colour gradient, with a
+  //  frame less than half this size (216 bytes).
+  //
+  //  SO THIS IS THE LEADING CANDIDATE FOR THE GPU CENTRAL-MOMENT COLLAPSE, and
+  //  it is a candidate rather than a conclusion. The collapse itself is still
+  //  only bounded by "did not finish 50 steps at 64^3 in seventeen minutes",
+  //  which is a timeout and not a measurement; and clang is not nvcc, so a
+  //  464-byte host frame is evidence about the SOURCE, not about ptxas. What
+  //  this change does is remove the mechanism at zero host cost, so the device
+  //  question becomes one confirmation run rather than a diagnosis.
+  //
+  //  It also explains the one hard number that seemed to acquit the operator:
+  //  `-Xptxas -v` reported "largest stack frame 96 bytes, zero spilling". A
+  //  464-byte host frame does not compile down to 96, so that figure was a
+  //  build-wide maximum over other kernels and never described this one.
+  //
+  //  The runtime form is deliberately NOT kept here. Nothing outside this file
+  //  called it, and leaving it would let a future edit reintroduce the loop
+  //  without noticing.
+  //----------------------------------------------------------------------------
+  template <int N>
   KOKKOS_INLINE_FUNCTION
-  static Real eq_moment(Real rho, const Real Qf[3][3], const Real Aw[3][3], int n) {
-    const int p = Basis::p_of(n), q = Basis::q_of(n), r = Basis::r_of(n);
+  static Real eq_moment(Real rho, const Real Qf[3][3], const Real Aw[3][3]) {
+    constexpr int p = Basis::p_of(N), q = Basis::q_of(N), r = Basis::r_of(N);
     Real e = rho * Qf[0][p] * Qf[1][q];
     Real w = Aw[0][p] * Aw[1][q];
     if constexpr (D == 3) { e *= Qf[2][r]; w *= Aw[2][r]; }
     if constexpr (Store::shifted) return e - w;
     else                          return e;
+  }
+
+  // The moment slots as a compile-time list. A fold over this is a plain
+  // unrolled sequence -- no lambda, which matters because nvcc rejects an
+  // extended lambda inside a generic one (see CLAUDE.md), and no template
+  // recursion, so there is no inlining depth for a compiler to give up on.
+  using Moments = std::make_integer_sequence<int, NM>;
+
+  // One slot of the order >= 3 relaxation. Split out so the `if constexpr` has
+  // a statement context and the fold below stays an expression.
+  template <int N>
+  KOKKOS_INLINE_FUNCTION
+  static void relax_high_one(Real rho, const Real Qf[3][3], const Real Aw[3][3],
+                             Real k[NM]) {
+    if constexpr (Basis::order(N) >= 3) k[N] = eq_moment<N>(rho, Qf, Aw);
+  }
+  template <int... N>
+  KOKKOS_INLINE_FUNCTION
+  static void relax_high(Real rho, const Real Qf[3][3], const Real Aw[3][3],
+                         Real k[NM], std::integer_sequence<int, N...>) {
+    (relax_high_one<N>(rho, Qf, Aw, k), ...);
+  }
+
+  // Every moment to equilibrium -- initialisation only, but unrolled for the
+  // same reason: a runtime loop here drags the Ord table into seed_value too.
+  template <int... N>
+  KOKKOS_INLINE_FUNCTION
+  static void all_eq(Real rho, const Real Qf[3][3], const Real Aw[3][3],
+                     Real k[NM], std::integer_sequence<int, N...>) {
+    ((k[N] = eq_moment<N>(rho, Qf, Aw)), ...);
   }
 
   //----------------------------------------------------------------------------
@@ -162,9 +261,13 @@ struct MomentCollision {
     {
       Real d[3], e[3], g[3];
       Real tr = Real(0), tre = Real(0), trg = Real(0);
+      // This loop and the two below DO unroll (D is 2 or 3), which is why they
+      // are left as loops -- verified in the assembly, one live loop before this
+      // change and none after. `i2d(a)` is constexpr, so once `a` is folded the
+      // subscript is a constant.
       for (int a = 0; a < D; ++a) {
         d[a] = k[i2d(a)];
-        e[a] = eq_moment(rho, Qf, Aw, i2d(a));
+        e[a] = eq_diag(rho, Qf, Aw, a);
         g[a] = Forcing::active ? Real(2) * F[a] * du[a] : Real(0);
         tr += d[a]; tre += e[a]; trg += g[a];
       }
@@ -179,13 +282,13 @@ struct MomentCollision {
         for (int b = a + 1; b < D; ++b) {
           const int id = i2s(a, b);
           const Real ge = Forcing::active ? (F[b] * du[a] + F[a] * du[b]) : Real(0);
-          k[id] = (Real(1) - omega) * k[id] + omega * eq_moment(rho, Qf, Aw, id) + w2 * ge;
+          k[id] = (Real(1) - omega) * k[id] + omega * eq_shear(rho, Qf, Aw, a, b)
+                + w2 * ge;
         }
     }
 
-    // ---- order >= 3: straight to equilibrium ----
-    for (int n = 0; n < NM; ++n)
-      if (Basis::order(n) >= 3) k[n] = eq_moment(rho, Qf, Aw, n);
+    // ---- order >= 3: straight to equilibrium, unrolled (see eq_moment) ----
+    relax_high(rho, Qf, Aw, k, Moments{});
 
     // ---- order 3: NO extra force term is needed, and adding one is wrong ----
     //
@@ -224,7 +327,7 @@ struct MomentCollision {
     Real Qf[3][3], Aw[3][3];
     eq_factors(du, ub, Qf, Aw);
     Real k[NM], f[L::Q];
-    for (int n = 0; n < NM; ++n) k[n] = eq_moment(rho, Qf, Aw, n);
+    all_eq(rho, Qf, Aw, k, Moments{});
     Basis::template to_populations<false>(k, ub, f);
     return f[i];
   }
@@ -242,6 +345,29 @@ struct MomentCollision {
     return Basis::index_of((a == 0 || b == 0), (a == 1 || b == 1),
                            (D == 3) && (a == 2 || b == 2));
   }
+  // The second-order equilibria, dispatched on the axis at COMPILE TIME so that
+  // eq_moment's slot index stays a template parameter. An `if` chain rather
+  // than an array of slots, because an array would be the memory-resident thing
+  // this whole change exists to remove; with `a` folded by the caller's
+  // unrolled loop the chain folds away to a single call.
+  KOKKOS_INLINE_FUNCTION
+  static Real eq_diag(Real rho, const Real Qf[3][3], const Real Aw[3][3], int a) {
+    if (a == 0) return eq_moment<i2d(0)>(rho, Qf, Aw);
+    if (a == 1) return eq_moment<i2d(1)>(rho, Qf, Aw);
+    if constexpr (D == 3) return eq_moment<i2d(2)>(rho, Qf, Aw);
+    return Real(0);
+  }
+  KOKKOS_INLINE_FUNCTION
+  static Real eq_shear(Real rho, const Real Qf[3][3], const Real Aw[3][3],
+                       int a, int b) {
+    if constexpr (D == 3) {
+      if (a == 0 && b == 2) return eq_moment<i2s(0, 2)>(rho, Qf, Aw);
+      if (a == 1 && b == 2) return eq_moment<i2s(1, 2)>(rho, Qf, Aw);
+    }
+    (void)b;
+    return eq_moment<i2s(0, 1)>(rho, Qf, Aw);
+  }
+
   // Third-order slot carrying exponent 2 on axis a and 1 on axis b (a != b),
   // i.e. k_{aab}. On D2Q9 these are the only third-order moments the force
   // reaches.

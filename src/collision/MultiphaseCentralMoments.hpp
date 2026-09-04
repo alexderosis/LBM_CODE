@@ -128,6 +128,8 @@
 #include "lattice/Lattices.hpp"
 #include "memory/Storage.hpp"
 
+#include <utility>   // integer_sequence -- the moment loop is unrolled
+
 namespace lbm {
 
 template <class L>
@@ -269,12 +271,81 @@ struct MultiphaseCentralMoments {
   }
 
   // k_eq(n) = [n == 0] + (p~ - 1) * prod_a A(order_a, u_a)
+  //
+  // KEPT IN ITS RUNTIME FORM ONLY FOR tests/test_multiphase.cpp, which walks
+  // every slot in a runtime loop and compares against a direct sum. The
+  // collision uses the compile-time overload below and must keep doing so --
+  // see MomentCollision.hpp's eq_moment banner for what a runtime moment index
+  // costs. Briefly: p_of(n) cannot fold, so the basis's 432-byte Ord table is
+  // materialised in memory, and the p it returns then indexes Aw, so the moment
+  // arrays follow it out of the register file. On a CPU that frame is L1
+  // resident and nearly free; in device code it is per-thread LOCAL memory,
+  // i.e. off-chip DRAM, with every subscript uncoalesced.
   KOKKOS_INLINE_FUNCTION
   static Real eq_moment(int n, Real p_tilde, const Real Aw[3][3]) {
     const int p = Basis::p_of(n), q = Basis::q_of(n), r = Basis::r_of(n);
     Real w = Aw[0][p] * Aw[1][q];
     if constexpr (D == 3) w *= Aw[2][r];
     return ((n == 0) ? Real(1) : Real(0)) + (p_tilde - Real(1)) * w;
+  }
+
+  // The same thing with the slot as a template parameter. Distinguished by
+  // arity, so `eq_moment(n, ...)` and `eq_moment<N>(...)` cannot be confused.
+  template <int N>
+  KOKKOS_INLINE_FUNCTION
+  static Real eq_moment(Real p_tilde, const Real Aw[3][3]) {
+    constexpr int p = Basis::p_of(N), q = Basis::q_of(N), r = Basis::r_of(N);
+    Real w = Aw[0][p] * Aw[1][q];
+    if constexpr (D == 3) w *= Aw[2][r];
+    return ((N == 0) ? Real(1) : Real(0)) + (p_tilde - Real(1)) * w;
+  }
+
+  using Moments = std::make_integer_sequence<int, NM>;
+
+  template <int N>
+  KOKKOS_INLINE_FUNCTION
+  static void relax_high_one(Real pt, const Real Aw[3][3], Real k[NM]) {
+    if constexpr (Basis::order(N) >= 3) k[N] = eq_moment<N>(pt, Aw);
+  }
+  template <int... N>
+  KOKKOS_INLINE_FUNCTION
+  static void relax_high(Real pt, const Real Aw[3][3], Real k[NM],
+                         std::integer_sequence<int, N...>) {
+    (relax_high_one<N>(pt, Aw, k), ...);
+  }
+  template <int... N>
+  KOKKOS_INLINE_FUNCTION
+  static void all_eq(Real pt, const Real Aw[3][3], Real k[NM],
+                     std::integer_sequence<int, N...>) {
+    ((k[N] = eq_moment<N>(pt, Aw)), ...);
+  }
+
+  // Second- and first-order equilibria dispatched on the axis at compile time,
+  // so the slot index stays a template parameter. An `if` chain rather than a
+  // table of slots, because a table is the memory-resident thing this exists to
+  // avoid; the caller's loop folds `a`, and the chain folds with it.
+  KOKKOS_INLINE_FUNCTION
+  static Real eq_first(Real pt, const Real Aw[3][3], int a) {
+    if (a == 0) return eq_moment<i1(0)>(pt, Aw);
+    if (a == 1) return eq_moment<i1(1)>(pt, Aw);
+    if constexpr (D == 3) return eq_moment<i1(2)>(pt, Aw);
+    return Real(0);
+  }
+  KOKKOS_INLINE_FUNCTION
+  static Real eq_diag(Real pt, const Real Aw[3][3], int a) {
+    if (a == 0) return eq_moment<i2d(0)>(pt, Aw);
+    if (a == 1) return eq_moment<i2d(1)>(pt, Aw);
+    if constexpr (D == 3) return eq_moment<i2d(2)>(pt, Aw);
+    return Real(0);
+  }
+  KOKKOS_INLINE_FUNCTION
+  static Real eq_shear(Real pt, const Real Aw[3][3], int a, int b) {
+    if constexpr (D == 3) {
+      if (a == 0 && b == 2) return eq_moment<i2s(0, 2)>(pt, Aw);
+      if (a == 1 && b == 2) return eq_moment<i2s(1, 2)>(pt, Aw);
+    }
+    (void)b;
+    return eq_moment<i2s(0, 1)>(pt, Aw);
   }
 
   //----------------------------------------------------------------------------
@@ -297,8 +368,11 @@ struct MultiphaseCentralMoments {
     const Real hr = Real(0.5) / l.rho;
 
     // ---- order 1: exact assignment, the force included ----
+    // These axis loops DO unroll (D is 2 or 3), so `i1(a)` folds to a constant
+    // subscript; only the NM loop below ever failed to, and that is the one
+    // that cost the operator its registers.
     for (int a = 0; a < D; ++a)
-      k[i1(a)] = eq_moment(i1(a), pt, Aw) + hr * F[a];
+      k[i1(a)] = eq_first(pt, Aw, a) + hr * F[a];
 
     // ---- order 2: trace at omega_bulk, deviatoric and shear at omega ----
     {
@@ -306,7 +380,7 @@ struct MultiphaseCentralMoments {
       Real tr = Real(0), tre = Real(0);
       for (int a = 0; a < D; ++a) {
         d[a] = k[i2d(a)];
-        e[a] = eq_moment(i2d(a), pt, Aw);
+        e[a] = eq_diag(pt, Aw, a);
         tr += d[a];  tre += e[a];
       }
       const Real invD = Real(1) / Real(D);
@@ -317,13 +391,12 @@ struct MultiphaseCentralMoments {
       for (int a = 0; a < D; ++a)
         for (int b = a + 1; b < D; ++b) {
           const int id = i2s(a, b);
-          k[id] = (Real(1) - w) * k[id] + w * eq_moment(id, pt, Aw);
+          k[id] = (Real(1) - w) * k[id] + w * eq_shear(pt, Aw, a, b);
         }
     }
 
     // ---- order >= 3: straight to equilibrium, which is the whole point ----
-    for (int j = 0; j < NM; ++j)
-      if (Basis::order(j) >= 3) k[j] = eq_moment(j, pt, Aw);
+    relax_high(pt, Aw, k, Moments{});
 
     Basis::template to_populations<true>(k, u, f);
   }
@@ -338,7 +411,7 @@ struct MultiphaseCentralMoments {
     Real Aw[3][3];
     weight_factors(u, Aw);
     Real k[NM], f[L::Q];
-    for (int j = 0; j < NM; ++j) k[j] = eq_moment(j, p_tilde, Aw);
+    all_eq(p_tilde, Aw, k, Moments{});
     Basis::template to_populations<true>(k, u, f);
     return f[i];
   }

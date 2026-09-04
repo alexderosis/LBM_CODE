@@ -226,6 +226,26 @@ These produce plausible, converged, wrong answers rather than crashes.
   zero so that `field = 0` means *neutrally buoyant*, and use `ScalarOutflow` —
   which is on-node, zero-gradient, and reports the real temperature — where an
   on-node adiabatic wall is what you actually need.
+- **A MOMENT INDEX MUST BE A COMPILE-TIME CONSTANT.** The moment operators reach
+  their exponents through `Basis::p_of(n)`, which is a lookup in a 432-byte
+  table. Called with a compile-time `n` it folds and the moment arrays live in
+  registers; called from a *runtime loop* it cannot fold, so the table is
+  materialised in memory, the `p` it returns then indexes `Qf`/`Aw`, and the
+  27-moment array follows them out of the register file. Nothing fails: the
+  answer is bit-identical and every test passes. On a CPU it costs almost
+  nothing (a 464-byte frame is L1-resident; `cmbench` reads 2.18× BGK either
+  way), which is why it survived from the first commit of `MomentCollision.hpp`.
+  In DEVICE code that frame is per-thread *local* memory — off-chip DRAM, every
+  subscript uncoalesced — and this tree has measured that mechanism at **47×**
+  in `GPU/`'s colour gradient. So it is the leading candidate for the Kokkos
+  central-moment collapse, and it is invisible to every instrument in the tree
+  except the compiler's own output. `tests/frame_check.sh` is that instrument:
+  run it after touching a moment operator and look at the `loops` and `regidx`
+  columns, not the wall clock. Fixed in `MomentCollision` and
+  `MultiphaseCentralMoments` (2026-09-04); still present in `ColourGradient`,
+  which has the largest frame in the tree and needs the closed-form derivation
+  rather than loop unrolling. Note that `static_assert` guards the `constexpr`
+  half of this but cannot guard the loop half — only the script can.
 
 ---
 

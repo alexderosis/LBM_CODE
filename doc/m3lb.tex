@@ -7292,6 +7292,97 @@ node --- or of \emph{this code's route to the device}? Nothing in the Kokkos
 implementation can answer that, because every hypothesis is tested against the
 same code. The only decisive experiment is a second implementation.
 
+\paragraph{First, is the arithmetic simply expensive?}
+\label{sec:cmbench}
+There was no throughput bench for \code{src/} at all, so this question had never
+been asked of the host. \code{validation/cmbench} asks it: $48^3$, FP64, four
+threads, and the \emph{mean of five runs} because the spread is $3.4$--$5.5\%$
+and one wall-clock sample on a laptop is not a measurement.
+
+\begin{center}\small
+\begin{tabular}{lrr}
+\toprule
+operator & MLUPS & vs.\ BGK \\
+\midrule
+\code{BGK}                     & $43.5$ & --- \\
+\code{TRT}                     & $37.4$ & $1.16\times$ \\
+\code{MomentCollision} central & $20.0$ & $2.18\times$ \\
+\code{MomentCollision} raw MRT & $20.3$ & $2.14\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent So the arithmetic is fine: $2.18\times$ is an unremarkable price for a
+27-moment transform, and it is four orders of magnitude from the device figure.
+Central moments and raw MRT costing the \emph{same} is the expected answer --- they
+share the transform and differ only in the relaxation schedule --- and serves as a
+sanity check on the bench. The first version of these numbers was a single run
+each and reported $2.69\times$ and $4.30\times$; the MRT figure was wrong by a
+factor of two, in the direction that would have made raw MRT look like a second
+problem needing its own explanation.
+
+\code{cmbench} is meant to be built for CUDA as well, and that is the point of
+it now: it \emph{bounds} the experiment. $48^3 \times 60$ steps is
+$6.6\e{6}$ cell updates, about $1.3$\,ms at an H200's BGK rate, so even a
+four-orders-slower operator finishes inside a minute. A timeout cannot happen,
+which is exactly what the original seventeen-minute observation could not
+promise.
+
+\paragraph{A mechanism, found in the compiler's output rather than on a
+stopwatch (2026-09-04).} With the arithmetic acquitted twice over --- $99.6\%$
+of BGK in the independent CUDA implementation, and only $2.18\times$ BGK on four
+host threads --- what remained was the \emph{source}, and
+that can be read without a device. Compiling
+\code{MomentCollision<D3Q27>::collide} to arm64 assembly beside
+\code{BGK<D3Q27>::collide}:
+
+\begin{center}\small
+\begin{tabular}{lrrrr}
+\toprule
+ & frame (B) & instrs & live loops & register-indexed \\
+\midrule
+\code{BGK} & $0$ & 107 & 0 & 0 \\
+\code{MomentCollision}, before & $464$ & 155 & 1 & 4 \\
+\code{MomentCollision}, after  & $368$ & 142 & 0 & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent One loop survived in \code{collide}, and it was
+\code{for (n = 0; n < NM; ++n) if (order(n) >= 3) k[n] = eq\_moment(...,n)}.
+Because \code{n} stayed a runtime value, \code{Basis::p\_of(n)} could not fold,
+so the basis's 432-byte exponent table was materialised in memory and indexed at
+runtime; the \code{p} it returned then indexed \code{Qf}/\code{Aw}, so those
+went to memory too, and the 27-moment array followed. The fix is to make the
+moment index a \emph{template} parameter and unroll the loop with a fold
+expression, which removes the table from that path entirely.
+
+\textbf{Why no instrument in this tree could see it.} A 464-byte frame is
+L1-resident on a CPU, so the host bench reads $2.18\times$ BGK before the change
+and $2.06\times$ after --- indistinguishable, and the operator's absolute
+throughput moves from $20.0$ to $20.2$ MLUPS, inside the bench's own $3.4$--$5.5\%$
+spread. In \emph{device} code the same frame is per-thread local memory, which
+is off-chip DRAM with every subscript uncoalesced, and this code base has
+already measured that exact mechanism at $\mathbf{47\times}$ in \code{GPU/}'s
+colour gradient with a frame less than half the size
+(\S\ref{sec:cudamp}). Note also what this does to the one hard number that
+appeared to acquit the operator: a 464-byte host frame cannot compile down to
+the 96 bytes \code{-Xptxas -v} reported, so that figure was a build-wide maximum
+over other kernels and never described this one.
+
+\textbf{This is a candidate, not a conclusion,} and the distinction is the whole
+point of \S\ref{sec:known}. The collapse itself is still bounded only by ``did
+not finish in seventeen minutes'', which is a timeout and not a measurement;
+clang is not \code{nvcc}, so a host frame is evidence about the source rather
+than about \code{ptxas}; and what the change removes is the kind of memory
+residency that \emph{no} register budget can fix, leaving behind the kind that a
+larger one can --- a GPU thread has up to 255 registers where arm64 has 32. What
+it buys is that the device question is now one bounded confirmation run
+(\S\ref{sec:cmbench}) rather than a diagnosis. \code{tests/frame\_check.sh}
+re-measures the table above at both precisions; the same construct was found and
+fixed in \code{MultiphaseCentralMoments} and remains in \code{ColourGradient},
+which carries the largest frame in the tree.
+
 \subsection{The answer}
 
 \code{GPU/} is that experiment: a lattice Boltzmann solver written directly in
@@ -7956,13 +8047,18 @@ Stated plainly, because each has been measured.
 \item \textbf{The central-moment operators are unusable on a GPU in this code.}
   Two \code{MomentCollision} configurations did not finish in seventeen minutes at
   $64^3$ over 50 steps, where BGK took $\sim0.03$\,s --- roughly four orders of
-  magnitude, with register spilling ruled out by \code{-Xptxas -v}
-  (\S\ref{sec:cmcollapse}). Since the campaign of \S\ref{sec:campaign} and the
-  aorta both run central moments, the $447$ MLUPS BGK figure is \emph{not} this
-  code's GPU throughput and must not be quoted as such. The cause is not the
-  algorithm: the same scheme runs at $99.6\%$ of BGK in the independent CUDA
-  implementation. It is therefore something in this code's route to the device,
-  and it is open.
+  magnitude (\S\ref{sec:cmcollapse}). Since the campaign of \S\ref{sec:campaign}
+  and the aorta both run central moments, the $447$ MLUPS BGK figure is
+  \emph{not} this code's GPU throughput and must not be quoted as such. The
+  cause is not the algorithm: the same scheme runs at $99.6\%$ of BGK in the
+  independent CUDA implementation, and at only $2.18\times$ BGK on four host
+  threads. A \emph{mechanism} was identified on 2026-09-04 and removed --- a
+  moment loop that did not unroll, which forced the basis's exponent table and
+  all three moment arrays into memory --- but the collapse is not thereby
+  closed. The original figure is a \emph{timeout}, not a measurement; the
+  diagnosis was made with clang rather than \code{nvcc}; and no device has been
+  available to confirm either. Treat this as narrowed, not solved, until
+  \code{cmbench} has printed a number on a GPU.
 
 \item \textbf{The CUDA implementation of \S\ref{sec:cuda} covers a fraction of
   this one.} D3Q27 only; no shifted storage; no open boundary for the scalar; no

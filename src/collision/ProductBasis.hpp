@@ -67,6 +67,16 @@ struct ProductBasis {
   // Table lookups, not arithmetic: these are called with a runtime moment index
   // inside the collision, and the obvious `n / 9`, `(n / 3) % 3` form costs three
   // integer divisions per moment. That measured as a 15% regression on D3Q27.
+  //
+  // THEY ARE ALSO `constexpr`, WHICH IS NOT DECORATION. MomentCollision calls
+  // them with a COMPILE-TIME moment index (see its `eq_moment<N>`), and that is
+  // the whole reason the moment array can live in registers: a table lookup on a
+  // runtime index forces the 432-byte table into memory, and the value it
+  // returns then indexes Qf/Aw, so those go to memory too. On a CPU that is a
+  // 464-byte stack frame in L1 and costs 2.18x; in device code the same frame is
+  // per-thread LOCAL memory, i.e. off-chip DRAM, with every index uncoalesced.
+  // Marking these constexpr costs nothing and keeps the runtime form available
+  // for any caller that genuinely has a runtime index.
   struct Ord { int p[27], q[27], r[27], o[27]; };
   static constexpr Ord make_ord() {
     Ord t{};
@@ -78,10 +88,10 @@ struct ProductBasis {
     }
     return t;
   }
-  KOKKOS_INLINE_FUNCTION static int p_of(int n)  { constexpr Ord t = make_ord(); return t.p[n]; }
-  KOKKOS_INLINE_FUNCTION static int q_of(int n)  { constexpr Ord t = make_ord(); return t.q[n]; }
-  KOKKOS_INLINE_FUNCTION static int r_of(int n)  { constexpr Ord t = make_ord(); return t.r[n]; }
-  KOKKOS_INLINE_FUNCTION static int order(int n) { constexpr Ord t = make_ord(); return t.o[n]; }
+  KOKKOS_INLINE_FUNCTION static constexpr int p_of(int n)  { constexpr Ord t = make_ord(); return t.p[n]; }
+  KOKKOS_INLINE_FUNCTION static constexpr int q_of(int n)  { constexpr Ord t = make_ord(); return t.q[n]; }
+  KOKKOS_INLINE_FUNCTION static constexpr int r_of(int n)  { constexpr Ord t = make_ord(); return t.r[n]; }
+  KOKKOS_INLINE_FUNCTION static constexpr int order(int n) { constexpr Ord t = make_ord(); return t.o[n]; }
   static constexpr int index_of(int p, int q, int r) { return mi(p, q, r); }
 
   // 1D equilibrium factors in this basis. phi_2 = C^2 - cs2 already has the cs2
