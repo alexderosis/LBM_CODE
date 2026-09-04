@@ -148,7 +148,7 @@
 //
 //    usage: rb_high_ra [-h H] [-aspect A] [-ra RA] [-pr PR] [-u U_REF]
 //                      [-amp A] [-tf N] [-out N] [-op bgk|cm] [-sop reg|bgk]
-//                      [-nz NZ] [-vtk]
+//                      [-nz NZ] [-vtk] [-dump PREFIX]
 //==============================================================================
 #include "lbm/backend.cuh"
 
@@ -224,11 +224,43 @@ static void write_vtk(int step, int nx, int ny, int nz,
       }
 }
 
+//------------------------------------------------------------------------------
+// A RAW PLANE, which is what actually gets looked at.
+//
+// Two int32 (nx, ny) then nx*ny float32, x fastest -- the layout impact.cu and
+// rti3d.cu already write and doc/fig/mkpng.py already reads, so
+//
+//     python3 doc/fig/mkpng.py seq rb_T_0007.bin rb_T_0007.png
+//
+// renders one with no dependencies at all: mkpng.py is struct and zlib, no
+// numpy, which matters because the SYSTEM python here has none.
+//
+// WHY NOT JUST -vtk. The VTK writer above is ASCII and carries the velocity
+// vector as well, so at 2000 x 1002 it is ~40 MB per frame against 8 MB here,
+// and parsing 2 M ASCII floats back for a plot costs more than the step that
+// produced them. VTK is for opening in ParaView; this is for a picture.
+//------------------------------------------------------------------------------
+static void write_plane(const std::string& path, int nx, int ny, int nz,
+                        const std::vector<Real>& src) {
+  if (std::FILE* f = std::fopen(path.c_str(), "wb")) {
+    const int hdr[2] = {nx, ny};
+    std::fwrite(hdr, sizeof(int), 2, f);
+    std::vector<float> pl(std::size_t(nx) * ny);
+    for (int y = 0; y < ny; ++y)
+      for (int x = 0; x < nx; ++x)
+        pl[std::size_t(y) * nx + x] =
+            float(src[std::size_t(node_id(x, y, nz / 2, nx, ny))]);
+    std::fwrite(pl.data(), sizeof(float), pl.size(), f);
+    std::fclose(f);
+  }
+}
+
 int main(int argc, char** argv) {
   int H = 50, aspect = 2, nz = 1;
   double Ra = 1e14, Pr = 0.71, U = 0.01, amp = 0.01;
   double tf = 10000.0, out_every = 1.0;
   std::string op = "cm", sop = "reg";
+  std::string dump;
   bool vtk = false;
 
   for (int i = 1; i < argc; ++i) {
@@ -245,6 +277,7 @@ int main(int argc, char** argv) {
     if (a == "-op"     && i + 1 < argc) op        = argv[++i];
     if (a == "-sop"    && i + 1 < argc) sop       = argv[++i];
     if (a == "-vtk")                    vtk       = true;
+    if (a == "-dump"   && i + 1 < argc) dump      = argv[++i];
   }
 
   // The plates and the gauge. T_ref = T0 is the shifted-storage reference: the
@@ -336,6 +369,7 @@ int main(int argc, char** argv) {
   std::fprintf(series, "# t/t_ff  Nu_vol  Nu_bot  Nu_top  Nu_ref  max|u|  Ma  residual\n");
 
   std::vector<Real> rho, ux, uy, Tf, uz, Tprev;
+  int frame = 0;
 
   std::printf("  %10s %11s %11s %11s %11s %11s %11s\n",
               "t/t_ff", "Nu_vol", "Nu_bot", "Nu_top", "Nu_ref", "max|u|", "residual");
@@ -399,6 +433,22 @@ int main(int argc, char** argv) {
       std::fflush(series);
 
       if (vtk) write_vtk(int(t), nx, ny, nz, Tf, ux, uy, uz);
+      if (!dump.empty()) {
+        char tag[32];
+        std::snprintf(tag, sizeof tag, "_%04d.bin", frame);
+        write_plane(dump + "_T" + tag, nx, ny, nz, Tf);
+        // Speed as a second plane, the pair validation/rayleigh_benard.cpp
+        // already writes: the temperature shows the plumes, the speed shows
+        // whether anything is actually moving, and at these tau they are not
+        // the same question.
+        std::vector<Real> spd(Tf.size());
+        for (std::size_t n = 0; n < Tf.size(); ++n)
+          spd[n] = Real(std::sqrt(double(ux[n]) * double(ux[n]) +
+                                  double(uy[n]) * double(uy[n]) +
+                                  double(uz[n]) * double(uz[n])));
+        write_plane(dump + "_u" + tag, nx, ny, nz, spd);
+        ++frame;
+      }
 
       if (!std::isfinite(Nu_vol) || peak > 1.0) {
         std::printf("  DIVERGED at t = %zu  (max|u| = %.3e)\n", t, peak);
@@ -423,5 +473,8 @@ int main(int argc, char** argv) {
   std::printf("\n  %zu steps in %.2f s  ->  %.1f MLUPS\n",
               steps_run, sec, double(fl.nodes()) * double(steps_run) / sec / 1e6);
   std::printf("  series in rb_high_ra.dat%s\n", vtk ? ", fields in vtk_fluid/" : "");
+  if (!dump.empty())
+    std::printf("  %d frame(s) as %s_T_*.bin and %s_u_*.bin  (%d x %d float32,"
+                " two int32 of header)\n", frame, dump.c_str(), dump.c_str(), nx, ny);
   return diverged ? 1 : 0;
 }
