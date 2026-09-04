@@ -250,12 +250,25 @@ if __name__ == "__main__":
                 m, pk = render(f"ot_{q}_{tag}.bin", f"ot_{q}_{tag}.png")
                 print(f"  ot_{q}_{tag}.png   saturates at {m:8.3f}   peak {pk:8.3f}")
     else:
-        # usage: mkpng.py div|seq  src.bin  dst.png  [pct]
+        # usage: mkpng.py div  src.bin dst.png [pct]
+        #        mkpng.py seq  src.bin dst.png [lo hi]
+        #
+        # lo/hi PIN the sequential colour scale. Without them the range is the
+        # frame's own min/max, which is right for a single figure and wrong for
+        # a sequence: every frame then gets its own scale and the colours move
+        # when the field does not. Pin it for an animation, and pin it to the
+        # PHYSICAL range when there is one -- a field that leaves the pinned
+        # range then saturates visibly instead of quietly rescaling the picture.
         mode, src, dst = args[0], args[1], args[2]
         if mode == "div":
             pct = float(args[3]) if len(args) > 3 else 0.99
             m, pk = render(src, dst, pct)
             print(f"  {dst}  diverging, saturates at {m:.5g}, peak {pk:.5g}")
         else:
-            a, b = render_seq(src, dst)
-            print(f"  {dst}  sequential, range [{a:.5g}, {b:.5g}]")
+            lo = float(args[3]) if len(args) > 4 else None
+            hi = float(args[4]) if len(args) > 4 else None
+            nxr, nyr, vr = read_field(src)
+            a, b = render_seq(src, dst, lo, hi)
+            print(f"  {dst}  sequential, scale [{a:.5g}, {b:.5g}]"
+                  f"  data [{min(vr):.5g}, {max(vr):.5g}]"
+                  + ("  CLIPPED" if (min(vr) < a - 1e-12 or max(vr) > b + 1e-12) else ""))
