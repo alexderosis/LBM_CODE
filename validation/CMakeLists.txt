@@ -8,7 +8,7 @@ endforeach()
 
 # Analysis tool, not a regression test: a full grid-convergence sweep over every
 # lattice x operator combination, emitting CSV.
-foreach(a enan_rt_cg phase_flat enan_wedge enan_rt enan_interface hartmann3d zhou_thermal channel3d static_droplet tgv3d_bench grid_convergence natural_convection orszag_tang cavity rayleigh_benard shear_layer tgv2d tgv3d dipole cavity_cm poiseuille_inlet hartmann_inlet orszag_tang_3d cmcheck forcing_cm forcing_transverse forcing_3d)
+foreach(a enan_rt_cg phase_flat enan_wedge enan_rt enan_interface hartmann3d zhou_thermal channel3d static_droplet tgv3d_bench grid_convergence natural_convection orszag_tang cavity rayleigh_benard shear_layer tgv2d tgv3d dipole cavity_cm poiseuille_inlet hartmann_inlet orszag_tang_3d cmcheck forcing_cm forcing_transverse forcing_3d cmbench)
   add_executable(${a} ${a}.cpp)
   target_link_libraries(${a} PRIVATE lbm)
 endforeach()
