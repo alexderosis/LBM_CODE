@@ -327,6 +327,26 @@ Do not spend time on these without saying so first; several are deliberate.
   bounded rather than diverging, so it averages into a plausible number.
   `rb_high_ra` defaults to the regularised operator and keeps `-sop bgk` to
   reproduce the ringing on demand.
+  **The cold-start undershoot belongs to the SCALAR OPERATOR, not to the initial
+  condition** (measured 2026-09-04, and it corrected the opposite assumption).
+  A cold start puts the whole ΔT across one half cell and a D3Q7 scalar near
+  ω = 2 undershoots rather than smoothing it, but by how much depends on which
+  operator: worst `T_min` against a halt threshold of −0.5 is **−0.813**
+  (`ScalarBGK`, Kokkos twin, Ra = 1e14, 100 t_ff) but only **−0.112** with the
+  regularised operator at the same point, and **−0.160 recovering to
+  [0.005, 0.919]** at ω_g = 1.997 while convecting. So `-ic cold` runs on
+  `GPU/rb_high_ra` as it stands; it is the Kokkos twin's `ScalarBGK` that cannot
+  take a step IC. `-grace G` suppresses the maximum-principle *halt* (never the
+  report) for G free-fall times, defaulting to 4× the diffusive smoothing time
+  `16/(α t_ff)` for `cold` and 0 for `cond`, and **refusing** — grace 0, with the
+  arithmetic printed — where that would exceed a quarter of the run, which is
+  exactly the case where the undershoot is permanent rather than transient
+  (H = 50, Ra = 1e14: the step needs 5.4e4 t_ff to smooth over four cells
+  against a 1e4 t_ff run). Every run now ends with the worst excursion, when it
+  happened, and whether it recovered. `tests/frame_check.sh`'s sibling
+  discipline applies: read the verdict line, not the fact that it finished.
+  Also `-aspect` is now a **double** — it was an `int`, which silently truncated
+  both the reference's 2.02 and the single-critical-cell 2.0158 to 2.
   **Nu against a published table, with grid convergence** —
   `validation/natural_convection -conv` (added 2026-09-04) sweeps N at fixed Ra
   against de Vahl Davis (1983) for the side-heated cavity at Pr = 0.71. Ra = 1e5

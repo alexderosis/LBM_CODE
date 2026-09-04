@@ -149,6 +149,13 @@
 //    usage: rb_high_ra [-h H] [-aspect A] [-ra RA] [-pr PR] [-u U_REF]
 //                      [-amp A] [-tf N] [-out N] [-op bgk|cm] [-sop reg|bgk]
 //                      [-nz NZ] [-vtk] [-dump PREFIX] [-ic cond|cold]
+//                      [-slack S] [-grace G]
+//
+//  -aspect is a DOUBLE (it was an int, which truncated 2.02 and 2.0158 to 2
+//  in silence). -slack S sets the max-principle halt margin in units of dT,
+//  default 0.5. -grace G suppresses the max-principle HALT (never the report)
+//  for the first G free-fall times; the default is 0 for `cond` and a diffusive
+//  estimate for `cold`, both printed at startup. `-grace 0` is the old rule.
 //==============================================================================
 #include "lbm/backend.cuh"
 
@@ -288,9 +295,16 @@ static void write_plane(const std::string& path, int nx, int ny, int nz,
 }
 
 int main(int argc, char** argv) {
-  int H = 50, aspect = 2, nz = 1;
+  int H = 50, nz = 1;
+  // aspect IS A double. It was an int, which silently truncated: the reference's
+  // 101 x 51 grid is aspect 2.02 and the single-critical-cell aspect that
+  // validation/rayleigh_benard.cpp uses is 2 pi / k_c H = 2.0158, and neither
+  // could be expressed -- atoi turned both into 2 without complaint.
+  double aspect = 2.0;
   double Ra = 1e14, Pr = 0.71, U = 0.01, amp = 0.01;
   double tf = 10000.0, out_every = 1.0;
+  double slack = 0.5;                  // max-principle halt margin, in units of dT
+  double grace = -1.0;                 // < 0 means "choose from the IC", see below
   std::string op = "cm", sop = "reg";
   std::string dump, ic = "cond";
   bool vtk = false;
@@ -298,7 +312,7 @@ int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "-h"      && i + 1 < argc) H         = std::atoi(argv[++i]);
-    if (a == "-aspect" && i + 1 < argc) aspect    = std::atoi(argv[++i]);
+    if (a == "-aspect" && i + 1 < argc) aspect    = std::atof(argv[++i]);
     if (a == "-nz"     && i + 1 < argc) nz        = std::atoi(argv[++i]);
     if (a == "-ra"     && i + 1 < argc) Ra        = std::atof(argv[++i]);
     if (a == "-pr"     && i + 1 < argc) Pr        = std::atof(argv[++i]);
@@ -306,6 +320,8 @@ int main(int argc, char** argv) {
     if (a == "-amp"    && i + 1 < argc) amp       = std::atof(argv[++i]);
     if (a == "-tf"     && i + 1 < argc) tf        = std::atof(argv[++i]);
     if (a == "-out"    && i + 1 < argc) out_every = std::atof(argv[++i]);
+    if (a == "-slack"  && i + 1 < argc) slack     = std::atof(argv[++i]);
+    if (a == "-grace"  && i + 1 < argc) grace     = std::atof(argv[++i]);
     if (a == "-op"     && i + 1 < argc) op        = argv[++i];
     if (a == "-sop"    && i + 1 < argc) sop       = argv[++i];
     if (a == "-vtk")                    vtk       = true;
@@ -323,13 +339,107 @@ int main(int argc, char** argv) {
   const double nu    = U * double(H) * std::sqrt(Pr / Ra);
   const double alpha = nu / Pr;
 
-  const int nx = aspect * H, ny = H + 2;
+  const int nx = int(aspect * double(H) + 0.5), ny = H + 2;
   const Op which = (op == "bgk") ? Op::BGK : Op::CentralMoments;
   const ScalarOp swhich = (sop == "bgk") ? ScalarOp::BGK : ScalarOp::Regularised;
 
   const double t_ff = double(H) / U;                       // one free-fall time
   const std::size_t T_end = std::size_t(tf * t_ff);
   const std::size_t probe = std::size_t(out_every * t_ff) ? std::size_t(out_every * t_ff) : 1;
+
+  //============================================================================
+  //  THE GRACE WINDOW, AND WHY A COLD START NEEDS ONE.
+  //
+  //  The maximum principle is this driver's stop rule and it earns that place:
+  //  it caught a Ra = 1e14 failure long before the Nusselt numbers looked
+  //  wrong. But a COLD START begins with the whole dT across one half cell, and
+  //  a D3Q7 scalar near omega = 2 undershoots rather than smoothing it, so the
+  //  stop rule can fire on the initial condition instead of on a failure.
+  //
+  //  HOW BIG THE UNDERSHOOT IS DEPENDS ON THE SCALAR OPERATOR, and this was
+  //  measured rather than assumed -- because the assumption was WRONG. Worst
+  //  T_min over the run, cold start, against a halt threshold of -0.5:
+  //
+  //      ScalarBGK, Kokkos twin, 100 t_ff   Ra = 1e10  -0.552   Ra = 1e14  -0.813
+  //      regularised, here, 20 t_ff         Ra = 1e14  -0.112
+  //      -sop bgk,    here, 20 t_ff         Ra = 1e14  -0.307  (worst at 6 t_ff,
+  //                                                             -0.221 by 20)
+  //      regularised, here, 50 t_ff, at the SAME omega_g = 1.997 as H = 998,
+  //      Ra = 1e11:  worst -0.160 at 42 t_ff, and RECOVERED to [0.005, 0.919]
+  //      by the end while convecting (Nu_top 2.7 -> 6.2, max|u| = 0.025).
+  //
+  //  So the premise this window was first written for -- "a cold start cannot be
+  //  run, the stop rule kills it" -- does not hold for the DEFAULT operator. The
+  //  -0.552/-0.813 pair belongs to `ScalarBGK`, which relaxes the ghost moments
+  //  at the same omega and so reflects rather than damps them at omega -> 2. The
+  //  regularised operator annihilates them, and its cold-start excursion is a
+  //  fifth of the way to the threshold and transient.
+  //
+  //  THE WINDOW IS THEREFORE INSURANCE, NOT AN ENABLER, and the useful half of
+  //  this change is the REPORT: before it, a run that completed said nothing
+  //  about whether it had stayed inside the bounds, which with a cold start is
+  //  the first thing you need to know. Now every run ends with the worst
+  //  excursion, when it happened, and whether it recovered -- and "RECOVERED, so
+  //  treat only the in-bounds tail as data" is a usable instruction where a
+  //  silent completion was not.
+  //
+  //  WHAT IS AND IS NOT RELAXED. Three failures still halt unconditionally, at
+  //  any time, because none of them recovers: a non-finite T, a non-finite Nu,
+  //  and max|u| > 1. A bounds excursion is the only thing the window touches,
+  //  and even then only up to `-slack`; beyond FOUR times the physical range
+  //  the run stops whatever the window says, because a D3Q7 scalar smoothing a
+  //  step undershoots by a fraction of dT and does not undershoot by 4 dT.
+  //
+  //  AND NOTHING IS HIDDEN. Every output line still prints T_min and T_max, a
+  //  line inside the window that is out of bounds is marked with a `!`, and the
+  //  worst excursion of the whole run is reported at the end together with the
+  //  time it happened and whether it had recovered by the end. A cold-start run
+  //  therefore finishes and SAYS it started outside the bounds, which is more
+  //  useful than a run that stops at t = 2 and says the same thing once.
+  //
+  //  THE DEFAULT COMES FROM DIFFUSION, NOT FROM TASTE. The undershoot is the
+  //  scalar failing to resolve a step, so it decays as the step does: the layer
+  //  thickens as delta = sqrt(alpha t), and the excursion is gone once delta
+  //  covers several cells. Taking four cells,
+  //
+  //      t_smooth = 16 / alpha   steps  =  16 / (alpha t_ff)  free-fall times,
+  //
+  //  and the window is 4x that, printed at startup with both numbers so it can
+  //  be checked rather than trusted. It is ZERO for `cond`, which starts inside
+  //  its bounds and should still be held to them from step 0. `-grace` overrides
+  //  either way, and `-grace 0` restores the old behaviour exactly.
+  //
+  //  A WINDOW IS ONLY LEGITIMATE IF THE EXCURSION IS ACTUALLY TRANSIENT, and
+  //  whether it is depends on the parameters, not on the scheme. t_smooth
+  //  carries 1/alpha while the run carries t_ff, so
+  //
+  //      t_smooth / run  =  16 sqrt(Pr Ra) / (H^2 tf)
+  //
+  //      H = 998,  Ra = 1e11,  tf = 200    t_smooth =  4.3 t_ff     2% of the run
+  //      H = 50,   Ra = 1e14,  tf = 1e4    t_smooth = 5.4e4 t_ff   540% of the run
+  //
+  //  At the reference's own point the step NEVER smooths: alpha is so small that
+  //  the temperature field is still a discontinuity when the run ends, so the
+  //  undershoot is PERMANENT and halting on it is correct. So when the derived
+  //  window would exceed a quarter of the run the answer is not to shorten the
+  //  window -- it is to REFUSE it and set it to zero. Capping it to a quarter of
+  //  the run was the first version of this and it was wrong in the worst
+  //  available direction: it printed "the halt is right" while suppressing that
+  //  halt for 2500 free-fall times. A window that outlives the transient it
+  //  exists for is a disabled stop rule wearing a justification.
+  //
+  //  So: `-ic cold` runs where the step smooths and is refused where it does
+  //  not, with the arithmetic printed either way. `-grace` overrides, because
+  //  someone deliberately reproducing the reference's divergence needs to be
+  //  able to; that is an explicit choice on the command line rather than a
+  //  default.
+  //============================================================================
+  const double t_smooth_tff = 16.0 / (alpha * t_ff);
+  bool grace_refused = false;
+  if (grace < 0.0) {
+    grace = (ic == "cold") ? 4.0 * t_smooth_tff : 0.0;
+    if (grace > 0.25 * tf) { grace = 0.0; grace_refused = true; }
+  }
 
   // The resolution statement, printed rather than assumed. See the banner.
   const double Nu_est = 0.14 * std::pow(Ra, 0.29);
@@ -342,7 +452,7 @@ int main(int argc, char** argv) {
   std::printf("  scalar operator: %s\n",
               swhich == ScalarOp::BGK ? "BGK  (rings at omega -> 2; see the banner)"
                                       : "regularised (ghost moments annihilated)");
-  std::printf("  %d x %d x %d   H = %d   aspect = %d   %.3e cells\n",
+  std::printf("  %d x %d x %d   H = %d   aspect = %.4f   %.3e cells\n",
               nx, ny, nz, H, aspect, double(nx) * ny * nz);
   std::printf("  Ra = %.3e   Pr = %.4f   U_f = %.4g   Ma = %.4f\n",
               Ra, Pr, U, U * std::sqrt(3.0));
@@ -362,8 +472,37 @@ int main(int argc, char** argv) {
   std::printf("  one free-fall time = %.0f steps;  %zu steps = %.0f of them\n",
               t_ff, T_end, tf);
   std::printf("  RESOLUTION: Nu ~ %.0f (2-D, 0.14 Ra^0.29) -> thermal BL = %.4f cells."
-              "  %s\n\n", Nu_est, cells_in_bl,
+              "  %s\n", Nu_est, cells_in_bl,
               cells_in_bl >= 10.0 ? "Resolved." : "UNDER-RESOLVED: Nu below is the scheme, not Ra.");
+
+  // The initial condition and the stop rule it implies. See the grace banner.
+  std::printf("  initial condition: %s\n",
+              ic == "cold" ? "COLD -- the whole layer at T_cold; the entire dT sits "
+                             "across the bottom half cell at t = 0"
+                           : "conductive -- linear from T_hot at y = 0.5 to T_cold "
+                             "at y = H + 0.5");
+  std::printf("  max-principle halt at T outside [%.2f, %.2f] (slack %.3g dT)",
+              T_cold - slack * dT, T_hot + slack * dT, slack);
+  if (grace_refused)
+    std::printf(", enforced from step 0.\n"
+                "     ** GRACE WINDOW REFUSED. The step needs %.3g t_ff to diffuse over "
+                "four cells,\n"
+                "        which is %.0fx this whole run: at these parameters a cold start "
+                "is NOT a\n"
+                "        transient -- the undershoot is permanent and the halt is right, "
+                "so this run\n"
+                "        will stop early. Use -ic cond, or raise H (Ra_max ~ "
+                "(H/0.28)^(1/0.29)).\n"
+                "        -grace N forces a window anyway, deliberately. **",
+                t_smooth_tff, t_smooth_tff / tf);
+  else if (grace > 0.0)
+    std::printf(", suppressed for the\n     first %.1f t_ff (4 x the %.3g t_ff the step "
+                "needs to diffuse over four cells).\n     Excursions inside the window "
+                "are printed and marked `!`, never hidden; nan, a\n     non-finite Nu "
+                "and max|u| > 1 still halt at any time.", grace, t_smooth_tff);
+  else
+    std::printf(", enforced from step 0.");
+  std::printf("\n\n");
 
   backend::Fluid  fl(nx, ny, nz, which, Real(nu));
   backend::Scalar sc(nx, ny, nz, Real(alpha), Real(T0), swhich);
@@ -416,6 +555,11 @@ int main(int argc, char** argv) {
   // A run that diverges at 3.25e6 of 5e7 otherwise reports the full 5e7 and an
   // MLUPS fifteen times too high -- a throughput number nothing measured.
   std::size_t steps_run = T_end;
+  // The worst bounds excursion of the whole run, and when. Tracked whether or
+  // not it halts, so a run inside the grace window still reports it.
+  double worst_lo = T_cold, worst_hi = T_hot, worst_lo_t = 0.0, worst_hi_t = 0.0;
+  double last_lo = T_cold, last_hi = T_hot;
+  bool   ever_out = false;
 
   for (std::size_t t = 0; t <= T_end; ++t) {
     if (t % probe == 0) {
@@ -496,15 +640,28 @@ int main(int argc, char** argv) {
       const double Nu_floor =
           double(H) * vrms * trms / (alpha * dT * std::sqrt(ncell));
 
+      // Track the excursion before anything decides whether to stop.
+      const double now_tff = double(t) / t_ff;
+      if (!nbad) {
+        if (tmin < worst_lo) { worst_lo = tmin; worst_lo_t = now_tff; }
+        if (tmax > worst_hi) { worst_hi = tmax; worst_hi_t = now_tff; }
+        last_lo = tmin;  last_hi = tmax;
+        if (tmin < T_cold || tmax > T_hot) ever_out = true;
+      }
+      // `!` marks a line that is out of bounds. It is printed whether or not the
+      // grace window is letting the run continue, so the window can never make
+      // an excursion invisible -- only non-fatal.
+      const char* mark = (!nbad && (tmin < T_cold || tmax > T_hot)) ? " !" : "";
+
       if (nbad)
         std::printf("  %10.2f %11s %9s %9s %9s %10s %8s %8s %9s"
                     "   (%ld of %.0f cells non-finite)\n",
                     double(t) / t_ff, "nan", "-", "-", "-", "-", "nan", "nan",
                     "-", nbad, ncell);
       else
-        std::printf("  %10.2f %11.4f %9.4f %9.4f %9.4f %10.3e %8.4f %8.4f %9.2e\n",
+        std::printf("  %10.2f %11.4f %9.4f %9.4f %9.4f %10.3e %8.4f %8.4f %9.2e%s\n",
                     double(t) / t_ff, Nu_vol, Nu_floor, Nu_bot, Nu_top, peak,
-                    tmin, tmax, resid);
+                    tmin, tmax, resid, mark);
       std::fflush(stdout);
       std::fprintf(series, "%.6f %.8f %.8f %.8f %.8f %.6e %.6e %.6e %.6e %.6e\n",
                    double(t) / t_ff, Nu_vol, Nu_bot, Nu_top, Nu_ref,
@@ -539,18 +696,34 @@ int main(int argc, char** argv) {
       // "convection" was an overshoot rather than a plume. Bounds at twice the
       // physical range, so a small overshoot is reported and a real failure
       // stops the run.
-      const double slack = 0.5 * dT;
-      if (nbad || !std::isfinite(Nu_vol) || peak > 1.0
-          || tmin < T_cold - slack || tmax > T_hot + slack) {
+      // THREE FAILURES HALT UNCONDITIONALLY, because none of them recovers.
+      const bool fatal = nbad || !std::isfinite(Nu_vol) || peak > 1.0;
+
+      // The bounds excursion is the ONLY thing the grace window touches, and
+      // only up to `slack`. Beyond four times the physical range the run stops
+      // whatever the window says: a D3Q7 scalar smoothing a step undershoots by
+      // a fraction of dT, not by 4 dT, so that is a different failure.
+      const double m = slack * dT;
+      const bool   out_soft = (tmin < T_cold - m)     || (tmax > T_hot + m);
+      const bool   out_hard = (tmin < T_cold - 4 * dT) || (tmax > T_hot + 4 * dT);
+      const bool   in_grace = now_tff < grace;
+      const bool   bounds_stop = out_hard || (out_soft && !in_grace);
+
+      if (fatal || bounds_stop) {
         std::printf("  STOPPED at t = %zu: %s\n", t,
                     nbad ? "T not finite"
                     : !std::isfinite(Nu_vol) ? "Nu not finite"
                     : peak > 1.0 ? "max|u| > 1"
+                    : out_hard ? "T outside FOUR times its physical range"
                     : "T outside twice its physical range");
         diverged = true;
         steps_run = t;
         break;
       }
+      if (out_soft && in_grace)
+        std::printf("     (out of bounds by %.4f dT, inside the %.1f t_ff grace "
+                    "window -- continuing)\n",
+                    std::max(T_cold - tmin, tmax - T_hot) / dT, grace);
     }
     if (t < T_end) {
       // Refresh T first, so the fluid collides against the temperature at its
@@ -571,5 +744,26 @@ int main(int argc, char** argv) {
   if (!dump.empty())
     std::printf("  %d frame(s) as %s_T_*.bin and %s_u_*.bin  (%d x %d float32,"
                 " two int32 of header)\n", frame, dump.c_str(), dump.c_str(), nx, ny);
+
+  // THE MAXIMUM-PRINCIPLE VERDICT, ALWAYS PRINTED. A run that completes must
+  // still say whether it stayed inside the bounds, because with a grace window
+  // "it finished" no longer implies "it was in bounds" -- and a Nusselt number
+  // measured while T was outside [T_cold, T_hot] is not a measurement.
+  if (!ever_out) {
+    std::printf("  maximum principle: T stayed inside [%.2f, %.2f] throughout.\n",
+                T_cold, T_hot);
+  } else {
+    const bool recovered = (last_lo >= T_cold) && (last_hi <= T_hot);
+    std::printf("  maximum principle: VIOLATED. worst T_min = %.4f at t/t_ff = %.2f,"
+                "  worst T_max = %.4f at t/t_ff = %.2f\n"
+                "     (%.4f dT below / %.4f dT above the physical range)\n"
+                "     by the end: T in [%.4f, %.4f] -- %s\n",
+                worst_lo, worst_lo_t, worst_hi, worst_hi_t,
+                (T_cold - worst_lo) / dT, (worst_hi - T_hot) / dT,
+                last_lo, last_hi,
+                recovered ? "RECOVERED, so treat only the in-bounds tail as data"
+                          : "STILL OUT OF BOUNDS: nothing in this run is a "
+                            "measurement of Ra");
+  }
   return diverged ? 1 : 0;
 }
