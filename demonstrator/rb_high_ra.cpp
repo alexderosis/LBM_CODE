@@ -360,8 +360,16 @@ int main(int argc, char** argv) {
         // CONSISTENT across a hundredfold change in D, which says the spurious
         // velocity is spatially correlated over some 900 cells rather than
         // independent per cell, so dividing by sqrt(N) is too generous by
-        // sqrt(900). Do not read this column as "the noise"; read it as "below
-        // this it is CERTAINLY noise".
+        // sqrt(900).
+        //
+        // AND IT IS A WEAK INSTRUMENT, weaker than the paragraph above first
+        // claimed. On 604 x 302 at Ra = 1e10, in the pure-conduction phase where
+        // both plate estimators agree to four decimals at 1.0, Nu_vol ran -8.7,
+        // +35.2, -28.0, +52.0, -44.7, +58.1, -55.8 against a floor of 0.10 to
+        // 0.18 -- eighty to three hundred times ABOVE its floor and still
+        // unambiguously noise. So the floor rules out almost nothing at this
+        // resolution. Read it only as a hard lower bound, never as a threshold
+        // for belief; the two reliable signals are the ones below.
         //
         // Two signatures are sharper than any noise model, and both are visible
         // in those numbers. Nu_vol ALTERNATES SIGN -- a convective flux is
