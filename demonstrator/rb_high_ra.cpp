@@ -55,6 +55,36 @@
 //  500 here against the 1600 the physics wants. Whatever Nu this prints is a
 //  property of the discretisation.
 //
+//  MEASURED, and this is the part to read before choosing Ra. A 200 x 100 layer
+//  at U_f = 0.05, conductive initial condition, out to 100 free-fall times:
+//
+//    Ra      tau_f - 1/2   BL cells   Nu_bot   Nu_top   verdict
+//    1e6     1.24e-02       6.37       7.40     7.48    agree to 1%, and to 7%
+//                                                       of 0.14 Ra^0.29 = 8.0
+//    1e10    1.24e-04       0.44      46.57    46.79    agree to 0.5%, but that
+//                                                       is the CEILING H/2 = 49,
+//                                                       not the physical 111
+//    1e14    1.24e-06       0.031        --       --    DIVERGES by t/t_ff ~ 30
+//
+//  Three things follow. The scheme is quantitatively right where the boundary
+//  layer is resolved -- 7% of a published correlation at Ra = 1e6, which is the
+//  positive control this file needed. The Nusselt CEILING is real and measured,
+//  not argued: at Ra = 1e10 the two plate estimators agree with each other to
+//  0.5% and land on H/2 rather than on the physics. And Ra = 1e14 is not
+//  reachable at this H with either initial condition -- the conductive profile
+//  removes the immediate undershoot the cold start causes, but the run still
+//  dies once convection develops, which is the tau floor rather than the seed.
+//
+//  So the ceiling sets the usable Ra: Nu <= H/2 with Nu = 0.14 Ra^0.29 gives
+//  Ra_max ~ (H/0.28)^(1/0.29), i.e. ~6e8 at H = 98 and ~2e12 at H = 998. Ra =
+//  1e14 needs H >= 2 x 1607 = 3200 for a single cell in the layer, and ten
+//  times that to resolve it properly.
+//
+//  ONE CALIBRATION NOTE ON THE STARTUP WARNING. It prints UNDER-RESOLVED below
+//  ten cells in the layer, and Ra = 1e6 above got within 7% on 6.37 cells. Ten
+//  is a comfort criterion, not a correctness cliff; treat the warning as "check
+//  this" rather than "discard this".
+//
 //  So the run prints the evidence rather than the claim: the volume estimator
 //  and BOTH plate estimators, which agree only when resolved, and -- the sharpest
 //  of the lot -- the RANGE of T. The advection-diffusion equation with Dirichlet
@@ -256,6 +286,7 @@ int main(int argc, char** argv) {
 
         double flux = 0, peak = 0, bot = 0, top = 0;
         double tmin = 1e300, tmax = -1e300;
+        long nbad = 0;                          // non-finite T, see below
         double mv = 0, mt = 0;                  // <u_y> and <T>, see below
         double qv = 0, qt = 0;                  // and their mean squares
         for (Index z = 0; z < nz; ++z)
@@ -270,8 +301,11 @@ int main(int argc, char** argv) {
                                          double(huy(n)) * double(huy(n)) +
                                          double(huz(n)) * double(huz(n)));
               if (s > peak) peak = s;
-              if (Tv < tmin) tmin = Tv;
-              if (Tv > tmax) tmax = Tv;
+              // A nan compares false BOTH ways, so a nan field left tmin and
+              // tmax at their sentinels and the run printed +1e300 and -1e300
+              // as the temperature range -- a number that looks like data.
+              if (!std::isfinite(Tv)) ++nbad;
+              else { if (Tv < tmin) tmin = Tv; if (Tv > tmax) tmax = Tv; }
               if (y == 1) bot += Tv;
               if (y == H) top += Tv;
             }
@@ -361,9 +395,16 @@ int main(int argc, char** argv) {
         }
         Tprev = Tnow;
 
-        std::printf("  %10.2f %11.4f %10.4f %10.4f %10.4f %10.3e %8.4f %8.4f %9.2e\n",
-                    double(t) / t_ff, Nu_vol, Nu_floor, Nu_bot, Nu_top, peak,
-                    tmin, tmax, resid);
+        if (nbad) {
+          std::printf("  %10.2f %11s %10s %10s %10s %10s %8s %8s %9s   "
+                      "(%ld of %.0f cells non-finite)\n",
+                      double(t) / t_ff, "nan", "-", "-", "-", "-", "nan", "nan",
+                      "-", nbad, ncell);
+        } else {
+          std::printf("  %10.2f %11.4f %10.4f %10.4f %10.4f %10.3e %8.4f %8.4f %9.2e\n",
+                      double(t) / t_ff, Nu_vol, Nu_floor, Nu_bot, Nu_top, peak,
+                      tmin, tmax, resid);
+        }
         std::fflush(stdout);
 
         if (!dump.empty()) {
@@ -382,9 +423,10 @@ int main(int argc, char** argv) {
 
         // The maximum principle, as a stopping rule. See the banner: this
         // catches the failure well before the Nusselt numbers look wrong.
-        if (!std::isfinite(Nu_vol) || peak > 1.0 || tmin < -1.0 || tmax > 1.0) {
+        if (nbad || !std::isfinite(Nu_vol) || peak > 1.0 || tmin < -1.0 || tmax > 1.0) {
           std::printf("  STOPPED at t = %zu: %s\n", t,
-                      !std::isfinite(Nu_vol) ? "not finite"
+                      nbad ? "T not finite"
+                      : !std::isfinite(Nu_vol) ? "Nu not finite"
                       : peak > 1.0 ? "max|u| > 1"
                       : "T outside [-1, 1], i.e. twice its physical range");
           bad = true; steps_run = t; rc = 1;

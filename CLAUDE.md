@@ -307,6 +307,19 @@ Do not spend time on these without saying so first; several are deliberate.
   bounded rather than diverging, so it averages into a plausible number.
   `rb_high_ra` defaults to the regularised operator and keeps `-sop bgk` to
   reproduce the ringing on demand.
+  `demonstrator/rb_high_ra` (Kokkos, D3Q27 CM + D3Q7 BGK) measures where that
+  configuration is usable, at 200x100, U_f = 0.05, conductive IC, 100 free-fall
+  times: Ra = 1e6 gives Nu_bot/Nu_top = 7.40/7.48, agreeing to 1% and to 7% of
+  0.14 Ra^0.29 = 8.0; Ra = 1e10 gives 46.57/46.79, agreeing to 0.5% but landing
+  on the ceiling H/2 = 49 rather than the physical 111; Ra = 1e14 DIVERGES by
+  t/t_ff ~ 30 with either IC. So Ra_max ~ (H/0.28)^(1/0.29) -- 6e8 at H = 98,
+  2e12 at H = 998 -- and Ra = 1e14 wants H >= 3200. Two traps that cost real
+  time: the volume Nusselt relation must use the FLUCTUATIONS,
+  <vT> - <v><T>, because Guo's half shift leaves a uniform F/(2 rho) in the
+  reported velocity (the textbook form read Nu = 53.77 for a fluid AT REST);
+  and Nu_vol carries H/D = 1.7e8 at Ra = 1e14, so it is pure amplified noise
+  unless it is far above its floor -- believe the two plate estimators when they
+  agree with each other.
   One property to know rather than a gap: **regularised walls are not mass
   conserving**, since BC3 overwrites populations. A closed box holds its mass
   exactly; a driven cavity leaks linearly and does not saturate (−1.7e-2 over

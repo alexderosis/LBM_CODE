@@ -8256,6 +8256,40 @@ the fitted rate is blamed on the scheme.
   $\nu=UH\sqrt{\mathrm{Pr}/\mathrm{Ra}}$, going to $H=1000$ moves
   $\tau_f-1/2$ from $1.26\e{-7}$ to $2.53\e{-6}$ and lifts the Nusselt ceiling
   from $25$ to $500$ at the same time.
+
+  The Kokkos twin (\code{demonstrator/rb\_high\_ra}) puts numbers on where the
+  configuration is usable. A $200\times100$ layer at $U_f=0.05$ with the
+  conductive initial condition, out to a hundred free-fall times:
+  $\mathrm{Ra}=10^{6}$ gives $\mathrm{Nu}_{\rm bot}=7.40$ and
+  $\mathrm{Nu}_{\rm top}=7.48$, agreeing with each other to 1\% and with
+  $0.14\,\mathrm{Ra}^{0.29}=8.0$ to 7\% --- the positive control that makes the
+  rest of the sweep readable. $\mathrm{Ra}=10^{10}$ gives $46.57$ and $46.79$,
+  agreeing to 0.5\% and landing on the CEILING $H/2=49$ rather than on the
+  physical $111$, which measures the ceiling rather than assuming it.
+  $\mathrm{Ra}=10^{14}$ diverges by $t/t_f\simeq30$ with EITHER initial
+  condition: the conductive profile removes the immediate undershoot the
+  reference's cold start causes ($T_{\min}=-0.81$ against a floor of $-0.5$),
+  but the run still dies once convection develops, so the seed and the $\tau$
+  floor are separate failures acting at separate times. The ceiling therefore
+  sets the usable Rayleigh number, $\mathrm{Ra}_{\max}\sim(H/0.28)^{1/0.29}$:
+  about $6\e{8}$ at $H=98$ and $2\e{12}$ at $H=998$, so $\mathrm{Ra}=10^{14}$
+  wants $H\gtrsim3200$ for a single cell in the layer.
+
+  Two further cautions from that sweep. The volume estimator
+  $\mathrm{Nu}_{\rm vol}$ carries a factor $H/D$ --- $1.7\e{8}$ at
+  $\mathrm{Ra}=10^{14}$ --- so an accidental velocity--temperature correlation is
+  amplified enormously; in a state that is provably not convecting it read
+  $180$, $606$, $1216$, $1719$ while both plate estimators sat correctly at
+  $1.0$, and at $\mathrm{Ra}=10^{10}$ it alternated sign. Its uncorrelated-noise
+  floor $H u'_{\rm rms}T'_{\rm rms}/(D\,\Delta T\sqrt{N})$ is exceeded by a
+  factor $28$--$36$, consistently across a hundredfold change in $D$, because
+  the spurious velocity is correlated over some $900$ cells; the floor is a
+  lower bound and the reliable signal is agreement between the two plate
+  estimators. And the volume relation must be written on the FLUCTUATIONS,
+  $\langle v T\rangle-\langle v\rangle\langle T\rangle$: Guo's half shift puts
+  a uniform $F/(2\rho)$ into the reported velocity, so with a mean temperature
+  away from $T_0$ the textbook $\langle vT\rangle$ form returned
+  $\mathrm{Nu}=53.77$ for a fluid at rest, where the answer is exactly $1$.
 \end{enumerate}
 
 %==============================================================================
