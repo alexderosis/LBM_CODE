@@ -72,7 +72,7 @@
 //  its session is lost, which is the binding constraint rather than memory.
 //
 //    usage: rb_high_ra [-ny NY] [-nx NX] [-nz NZ] [-ra RA] [-pr PR] [-u U_F]
-//                      [-amp A] [-tf N] [-out N] [-dump PREFIX]
+//                      [-amp A] [-tf N] [-out N] [-ic cold|cond] [-dump PREFIX]
 //                      [--kokkos-num-threads=4]
 //==============================================================================
 #include "collision/BGK.hpp"
@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
   Index ny = 1000, nx = 2000, nz = 1;
   double Ra = 1e14, Pr = 0.71, U = 0.05, amp = 0.01;
   double tf = 40.0, out_every = 1.0;
-  std::string dump;
+  std::string dump, ic = "cold";
 
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -117,6 +117,7 @@ int main(int argc, char** argv) {
     if (a == "-tf"   && i + 1 < argc) tf        = std::atof(argv[++i]);
     if (a == "-out"  && i + 1 < argc) out_every = std::atof(argv[++i]);
     if (a == "-dump" && i + 1 < argc) dump      = argv[++i];
+    if (a == "-ic"   && i + 1 < argc) ic        = argv[++i];
   }
 
   Kokkos::initialize(argc, argv);
@@ -156,6 +157,9 @@ int main(int argc, char** argv) {
                   "     quantised by about %.2f%%.%s **\n", nu * 3.0, ulps,
                   50.0 / ulps, ulps < 10.0 ? "  REBUILD IN FP64." : "");
     }
+    std::printf("  initial condition: %s\n", (ic == "cond")
+                ? "conductive profile (no discontinuity)"
+                : "cold layer, whole dT across the bottom half cell (the reference's)");
     std::printf("  one free-fall time = %.0f steps;  %zu steps = %.0f of them\n",
                 t_ff, T_end, tf);
     std::printf("  RESOLUTION: Nu ~ %.0f (2-D, 0.14 Ra^0.29) -> thermal BL = %.4f"
@@ -177,14 +181,27 @@ int main(int argc, char** argv) {
     th.set_wall_values([&](Index, Index y, Index) -> Real {
       return (y == 0) ? Real(T_hot) : Real(T_cold);          // hot below
     });
-    // The reference's initial condition: the whole layer COLD, the entire dT
-    // dropped across the bottom half cell at t = 0.
-    const Real Tc = Real(T_cold);
-    const Index nyc = ny;
+    // ================== THE INITIAL CONDITION IS A FLAG ==================
+    // `cold` is the reference's: the whole layer at T_cold, so the ENTIRE dT is
+    // dropped across the bottom half cell at t = 0. `cond` is the conductive
+    // profile, the same end states with no discontinuity anywhere.
+    //
+    // It is a flag because the two differ in exactly one thing, which is what
+    // makes the undershoot attributable. Nothing else changes -- the fluid's
+    // seeded density mode is identical in both -- so a difference between them
+    // is the step, and an agreement between them is not.
+    // ====================================================================
+    const bool cold = (ic != "cond");
+    const Real Tc = Real(T_cold), Th = Real(T_hot);
+    const Index nyc = ny, Hc = H;
     th.initialize_field(KOKKOS_LAMBDA(Index n) {
       Index px, py, pz; d.coords(n, px, py, pz);
       const Index y = py - d.hy;
-      return (y <= 0 || y >= nyc - 1) ? Real(0) : Tc;
+      if (y <= 0 || y >= nyc - 1) return Real(0);
+      if (cold) return Tc;
+      // The hot plane sits at y = 0.5, so the conductive profile is linear in
+      // (y - 0.5)/H and lands on the plate values at both half-cell planes.
+      return Real(double(Th) - (double(y) - 0.5) / double(Hc) * (double(Th) - double(Tc)));
     });
     th.finalize_geometry();
     th.compute_field();
@@ -218,9 +235,9 @@ int main(int argc, char** argv) {
     });
     th.set_velocity(fl.ux(), fl.uy(), fl.uz());
 
-    std::printf("  %10s %11s %11s %11s %11s %9s %9s %10s %10s\n",
-                "t/t_ff", "Nu_vol", "Nu_bot", "Nu_top", "max|u|",
-                "T_min", "T_max", "<uy>", "residual");
+    std::printf("  %10s %11s %10s %10s %10s %10s %8s %8s %9s\n",
+                "t/t_ff", "Nu_vol", "Nu_floor", "Nu_bot", "Nu_top", "max|u|",
+                "T_min", "T_max", "residual");
 
     std::vector<Real> Tprev;
     int frame = 0;
@@ -240,6 +257,7 @@ int main(int argc, char** argv) {
         double flux = 0, peak = 0, bot = 0, top = 0;
         double tmin = 1e300, tmax = -1e300;
         double mv = 0, mt = 0;                  // <u_y> and <T>, see below
+        double qv = 0, qt = 0;                  // and their mean squares
         for (Index z = 0; z < nz; ++z)
           for (Index y = 1; y <= H; ++y)
             for (Index x = 0; x < nx; ++x) {
@@ -247,6 +265,7 @@ int main(int argc, char** argv) {
               const double Tv = double(hT(n));
               flux += double(huy(n)) * Tv;
               mv += double(huy(n));  mt += Tv;
+              qv += double(huy(n)) * double(huy(n));  qt += Tv * Tv;
               const double s = std::sqrt(double(hux(n)) * double(hux(n)) +
                                          double(huy(n)) * double(huy(n)) +
                                          double(huz(n)) * double(huz(n)));
@@ -288,6 +307,41 @@ int main(int argc, char** argv) {
         mv /= ncell;  mt /= ncell;
         const double Nu_vol =
             1.0 + (flux / ncell - mv * mt) * double(H) / (D * dT);
+
+        // ============ Nu_vol HAS A NOISE FLOOR, AND IT IS LARGE =============
+        // Nu_vol carries a factor H/D, and at Ra = 1e14 that is 1.7e8. So an
+        // ACCIDENTAL correlation between the velocity noise and T is amplified
+        // enormously: two uncorrelated fields of scale u' and T' still leave a
+        // sample mean of order u' T' / sqrt(N), hence
+        //
+        //     Nu_floor ~ H u'_rms T'_rms / (D dT sqrt(N)).
+        //
+        // THIS IS A LOWER BOUND, NOT THE NOISE, and the gap was measured
+        // rather than assumed. On a 200 x 98 layer with the conductive initial
+        // condition -- a state that is NOT convecting, where both plate
+        // estimators correctly sit at 1.0, T stays inside its bounds and
+        // max|u| is 1e-03 -- Nu_vol ran 180, +606, +1216, +1719 at Ra = 1e14
+        // and 2.79, -1.79, +7.07, -5.33, +13.1, -10.4, +18.2 at Ra = 1e10.
+        // Against the floor below that is a factor of 28 and 36 respectively:
+        // CONSISTENT across a hundredfold change in D, which says the spurious
+        // velocity is spatially correlated over some 900 cells rather than
+        // independent per cell, so dividing by sqrt(N) is too generous by
+        // sqrt(900). Do not read this column as "the noise"; read it as "below
+        // this it is CERTAINLY noise".
+        //
+        // Two signatures are sharper than any noise model, and both are visible
+        // in those numbers. Nu_vol ALTERNATES SIGN -- a convective flux is
+        // positive in the mean because hot fluid rises, so a sign-flipping
+        // Nu_vol is noise by construction. And Nu_bot and Nu_top AGREE WITH
+        // EACH OTHER while disagreeing with Nu_vol by three orders. That
+        // disagreement is the error bar, and this file's parent already says so:
+        // "the two estimators must agree, or the run is simply not converged."
+        // When they do and Nu_vol does not, believe them.
+        // ====================================================================
+        const double vrms = std::sqrt(std::max(qv / ncell - mv * mv, 0.0));
+        const double trms = std::sqrt(std::max(qt / ncell - mt * mt, 0.0));
+        const double Nu_floor =
+            double(H) * vrms * trms / (D * dT * std::sqrt(ncell));
         const double Nu_bot = double(H) * (T_hot - bot / plate) / (0.5 * dT);
         const double Nu_top = double(H) * (top / plate - T_cold) / (0.5 * dT);
 
@@ -307,9 +361,9 @@ int main(int argc, char** argv) {
         }
         Tprev = Tnow;
 
-        std::printf("  %10.2f %11.4f %11.4f %11.4f %11.3e %9.4f %9.4f %10.2e %10.3e\n",
-                    double(t) / t_ff, Nu_vol, Nu_bot, Nu_top, peak,
-                    tmin, tmax, mv, resid);
+        std::printf("  %10.2f %11.4f %10.4f %10.4f %10.4f %10.3e %8.4f %8.4f %9.2e\n",
+                    double(t) / t_ff, Nu_vol, Nu_floor, Nu_bot, Nu_top, peak,
+                    tmin, tmax, resid);
         std::fflush(stdout);
 
         if (!dump.empty()) {
