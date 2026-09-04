@@ -390,12 +390,13 @@ int main(int argc, char** argv) {
       // <vT> = sum / (nx H nz), and Nu = 1 + H <vT> / (alpha dT), so the
       // divisor collapses to nx nz alpha dT.
       double flux = 0.0, peak = 0.0, bot = 0.0, top = 0.0, all = 0.0;
-      double num = 0.0, den = 0.0;
+      double num = 0.0, den = 0.0, mv = 0.0, mt = 0.0;
       for (int z = 0; z < nz; ++z)
         for (int y = 1; y <= H; ++y)
           for (int x = 0; x < nx; ++x) {
             const std::size_t n = std::size_t(node_id(x, y, z, nx, ny));
             flux += double(uy[n]) * double(Tf[n]);
+            mv += double(uy[n]);  mt += double(Tf[n]);
             const double s = std::sqrt(double(ux[n]) * double(ux[n]) +
                                        double(uy[n]) * double(uy[n]) +
                                        double(uz[n]) * double(uz[n]));
@@ -408,7 +409,17 @@ int main(int argc, char** argv) {
         all += double(uy[n]) * double(Tf[n]);
 
       const double plate = double(nx) * nz;
-      const double Nu_vol = 1.0 + flux / (double(nx) * nz * alpha * dT);
+      // ON THE FLUCTUATIONS, NOT THE RAW CORRELATION. Nu = 1 + H <v T>/(a dT)
+      // needs <v> = 0, which the reported velocity does not give: Guo's half
+      // shift adds F/(2 rho), so a mean temperature away from T0 leaves a
+      // uniform vertical offset that belongs to the forcing scheme. With the
+      // cold-start initial condition that offset made the raw form read 53.77
+      // at t = 0 with the fluid AT REST, where the answer is exactly 1. The
+      // correlation of the fluctuations, <v T> - <v><T>, is identically zero
+      // for a uniform state and reduces to the raw form when <v> = 0.
+      const double ncell = double(nx) * double(H) * nz;
+      mv /= ncell;  mt /= ncell;
+      const double Nu_vol = 1.0 + (flux / ncell - mv * mt) * double(H) / (alpha * dT);
       const double Nu_bot = double(H) * (T_hot - bot / plate) / (0.5 * dT);
       const double Nu_top = double(H) * (top / plate - T_cold) / (0.5 * dT);
       const double Nu_ref = 1.0 + all / (alpha * dT * double(nx - 1) * nz);

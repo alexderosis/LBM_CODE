@@ -210,16 +210,33 @@ static RB run(Index H, double Ra, double Pr, Real uc, std::size_t nsteps,
   }
   const double nu_wall = accw / double(nx);
 
-  // (b) Nu = 1 + <v T> H / (D dT), the exact volume relation.
-  double accv = 0, umax = 0;
+  // (b) Nu = 1 + <v' T'> H / (D dT), the volume relation -- on the
+  // FLUCTUATIONS. The textbook form uses <v T> and is equivalent only where
+  // <v> = 0. That is true of an incompressible closed layer but NOT of the
+  // velocity this scheme reports: Guo's half shift adds F/(2 rho), so a layer
+  // whose mean temperature differs from T0 carries a uniform vertical offset
+  // belonging to the forcing scheme rather than to any mass flux.
+  //
+  // It is zero for every case in THIS file, because they all start from the
+  // conduction profile and its mean is exactly zero in the symmetric +/- 1/2
+  // gauge -- so none of the numbers below move. It is written correctly anyway
+  // because the term is not small when the mean is not zero: a cold-start
+  // initial condition at Ra = 1e14 made the textbook form read 53.77 at t = 0,
+  // with the fluid at rest, where the answer is exactly 1
+  // (demonstrator/rb_high_ra.cpp records the arithmetic).
+  double accv = 0, umax = 0, accu = 0, acct = 0;
   Index ncell = 0;
   for (Index y = ylo; y <= yhi; ++y)
     for (Index x = 0; x < nx; ++x) {
       accv += double(hv(d.id(x, y))) * double(hT(d.id(x, y)));
+      accu += double(hv(d.id(x, y)));
+      acct += double(hT(d.id(x, y)));
       umax = std::max(umax, std::hypot(double(hu(d.id(x, y))), double(hv(d.id(x, y)))));
       ++ncell;
     }
-  const double nu_vol = 1.0 + (accv / double(ncell)) * double(H) / double(D);
+  const double nu_vol = 1.0 + (accv / double(ncell)
+                               - (accu / double(ncell)) * (acct / double(ncell)))
+                              * double(H) / double(D);
 
   return {nu_wall, nu_vol, 0, umax, taken, true};
 }
