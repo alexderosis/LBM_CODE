@@ -307,6 +307,19 @@ Do not spend time on these without saying so first; several are deliberate.
   bounded rather than diverging, so it averages into a plausible number.
   `rb_high_ra` defaults to the regularised operator and keeps `-sop bgk` to
   reproduce the ringing on demand.
+  **Nu against a published table, with grid convergence** —
+  `validation/natural_convection -conv` (added 2026-09-04) sweeps N at fixed Ra
+  against de Vahl Davis (1983) for the side-heated cavity at Pr = 0.71. Ra = 1e5
+  falls monotonically -1.00, -0.39, -0.18, -0.05 % at N = 32/48/64/96, order
+  2.4-3.4. Ra = 1e3 and 1e4 are already inside the TABLE's own precision (it
+  prints four figures, so +/-0.045, 0.022, 0.011 % of its value) and Ra = 1e4's
+  deviation crosses zero, so no order can be fitted there — an order is only
+  measurable where the error exceeds the reference's precision, and that is
+  stated in the banner rather than papered over. This validates the buoyancy
+  coupling, the isothermal walls and the Nu wall-gradient evaluation externally;
+  it does NOT validate Rayleigh-Benard in the turbulent regime, for which no
+  matched published table has been located.
+
   **Rayleigh-Benard now checks three references, not one** (`-conv`,
   `-marginal`, `-rate` in `validation/rayleigh_benard.cpp`). Ra_c converges at
   order **2.36** for the midway wall pair (+0.25% at H=48) and only **1.75** for
