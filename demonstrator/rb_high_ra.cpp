@@ -102,12 +102,46 @@
 //  its session is lost, which is the binding constraint rather than memory.
 //
 //    usage: rb_high_ra [-ny NY] [-nx NX] [-nz NZ] [-ra RA] [-pr PR] [-u U_F]
-//                      [-amp A] [-tf N] [-out N] [-ic cold|cond] [-dump PREFIX]
+//                      [-amp A] [-tf N] [-out N] [-ic cond|cold] [-dump PREFIX]
+//                      [-sop reg|bgk] [-slack S] [-grace G]
 //                      [--kokkos-num-threads=4]
-//==============================================================================
+//
+//  ============ ALIGNED WITH GPU/src/rb_high_ra.cu (2026-09-04) =============
+//  These two drivers solve the same case in two independent codebases, which is
+//  only worth anything if they are the same SETUP. Four ways they were not, all
+//  found by reading them side by side against the D3Q19 reference:
+//
+//    * SCALAR OPERATOR. This used ScalarBGK, which relaxes the D3Q7 ghost
+//      moments at omega and so REFLECTS them as omega -> 2. The reference
+//      relaxes only the flux moments and sends every higher one to
+//      equilibrium, and so does GPU/. `ScalarRegularised` (new, in src/) is
+//      that operator for this tree; `-sop reg` is now the default and
+//      `-sop bgk` reproduces the old behaviour. It is not a small difference:
+//      worst cold-start T_min against a floor of T_cold is -0.813 under BGK
+//      and -0.112 under the regularised form at the same point.
+//    * omega_bulk. This left it at -1, "follow omega", so the trace of the
+//      second moment relaxed at 1.9984. The reference sets it to 1 (its
+//      k4 = R) and so does GPU/. Now 1.
+//    * Nu_ref. GPU/ prints the reference's own Nusselt normalisation beside
+//      the exact one so the two can go in a table. Added, with a note on the
+//      two terms it cannot reproduce in this gauge.
+//    * THE INITIAL CONDITION DEFAULT. This defaulted to `cold`, GPU/ to
+//      `cond`. Two drivers of the same case defaulting to different initial
+//      conditions is the "comparison of drivers" that CLAUDE.md's measurement
+//      discipline warns about. Now `cond` in both.
+//
+//  DELIBERATELY STILL DIFFERENT: the temperature gauge. This one is symmetric
+//  about zero (T_hot = +1/2, T_cold = -1/2) and GPU/'s is [0, 1] with
+//  T_ref = 1/2. A gauge is not physics, and the symmetric one is the defence
+//  CLAUDE.md recommends -- `field = 0` then means neutrally buoyant, which is
+//  what makes an adiabatic scalar node harmless. It does mean T_min/T_max and
+//  Nu_ref are not comparable digit-for-digit between the two; Nu_bot, Nu_top
+//  and Nu_vol are.
+//  ==========================================================================
 #include "collision/BGK.hpp"
 #include "collision/MomentCollision.hpp"
 #include "collision/ScalarBGK.hpp"
+#include "collision/ScalarRegularised.hpp"
 #include "core/Types.hpp"
 #include "forcing/Forcing.hpp"
 #include "memory/EsotericPull.hpp"
@@ -127,30 +161,27 @@ using namespace lbm;
 using FL = D3Q27;
 using SL = D3Q7;
 using FluidColl = MomentCollision<FL, BoussinesqGuo, ShiftedPopulations, true>;
-using ScalColl  = ScalarBGK<SL>;
 
-int main(int argc, char** argv) {
-  Index ny = 1000, nx = 2000, nz = 1;
-  double Ra = 1e14, Pr = 0.71, U = 0.05, amp = 0.01;
-  double tf = 40.0, out_every = 1.0;
-  std::string dump, ic = "cold";
+// Everything the run needs, AT NAMESPACE SCOPE and not inside main. `run` below
+// is a template on the scalar operator and its body contains KOKKOS_LAMBDAs,
+// and nvcc forbids a FUNCTION-LOCAL type as a template argument of a function
+// that does -- so a struct declared in main would compile here and fail the
+// moment this file is built for CUDA. validation/cmbench.cpp carries the same
+// note for the same restriction.
+struct Opts {
+  Index nx, ny, nz;
+  double Ra, Pr, U, amp, tf, out_every, slack, grace;
+  std::string ic, dump;
+};
 
-  for (int i = 1; i < argc; ++i) {
-    const std::string a = argv[i];
-    if (a == "-ny"   && i + 1 < argc) ny        = Index(std::atol(argv[++i]));
-    if (a == "-nx"   && i + 1 < argc) nx        = Index(std::atol(argv[++i]));
-    if (a == "-nz"   && i + 1 < argc) nz        = Index(std::atol(argv[++i]));
-    if (a == "-ra"   && i + 1 < argc) Ra        = std::atof(argv[++i]);
-    if (a == "-pr"   && i + 1 < argc) Pr        = std::atof(argv[++i]);
-    if (a == "-u"    && i + 1 < argc) U         = std::atof(argv[++i]);
-    if (a == "-amp"  && i + 1 < argc) amp       = std::atof(argv[++i]);
-    if (a == "-tf"   && i + 1 < argc) tf        = std::atof(argv[++i]);
-    if (a == "-out"  && i + 1 < argc) out_every = std::atof(argv[++i]);
-    if (a == "-dump" && i + 1 < argc) dump      = argv[++i];
-    if (a == "-ic"   && i + 1 < argc) ic        = argv[++i];
-  }
-
-  Kokkos::initialize(argc, argv);
+template <class ScalColl>
+static int run(const Opts& o) {
+  const Index nx = o.nx, ny = o.ny, nz = o.nz;
+  const double Ra = o.Ra, Pr = o.Pr, U = o.U, amp = o.amp;
+  const double tf = o.tf, out_every = o.out_every, slack = o.slack;
+  const std::string& ic = o.ic;
+  const std::string& dump = o.dump;
+  double grace = o.grace;
   int rc = 0;
   {
     const Index H = ny - 2;                       // fluid rows 1 .. H
@@ -167,10 +198,35 @@ int main(int argc, char** argv) {
     const double Nu_est = 0.14 * std::pow(Ra, 0.29);
     const double bl_cells = double(H) / (2.0 * Nu_est);
 
+    // ================== THE GRACE WINDOW, AS IN THE CUDA TWIN ================
+    // A cold start drops the whole dT across the bottom half cell and the D3Q7
+    // scalar near omega = 2 undershoots rather than smoothing it, so the
+    // maximum-principle stop rule can fire on the INITIAL CONDITION instead of
+    // on a failure. How far it undershoots is a property of the SCALAR
+    // OPERATOR, not of the IC: worst T_min against a floor of T_cold,
+    //
+    //     ScalarBGK          Ra = 1e10  -0.552      Ra = 1e14  -0.813
+    //     ScalarRegularised  Ra = 1e14  -0.112, and it recovers
+    //
+    // which is why `-sop reg` is now the default here. The window suppresses
+    // the HALT (never the report) while the step is still diffusing away:
+    // delta = sqrt(D t), so four cells takes 16/D steps, and the window is 4x
+    // that. It is REFUSED -- set to zero, with the arithmetic printed -- when
+    // that would exceed a quarter of the run, because then the undershoot is
+    // permanent rather than transient and stopping is the right answer.
+    // nan, a non-finite Nu and max|u| > 1 halt at any time regardless.
+    // =========================================================================
+    const double t_smooth_tff = 16.0 / (D * t_ff);
+    bool grace_refused = false;
+    if (grace < 0.0) {
+      grace = (ic == "cond") ? 0.0 : 4.0 * t_smooth_tff;
+      if (grace > 0.25 * tf) { grace = 0.0; grace_refused = true; }
+    }
+
     std::printf("Rayleigh-Benard, free-fall scaling   Kokkos   %s fluid / %s scalar\n",
                 FL::name, SL::name);
-    std::printf("  operator %s + ScalarBGK   %s   %lld x %lld x %lld   H = %lld"
-                "   %.3e cells\n", FluidColl::name,
+    std::printf("  operator %s + %s   %s   %lld x %lld x %lld   H = %lld"
+                "   %.3e cells\n", FluidColl::name, ScalColl::name,
                 sizeof(Real) == 4 ? "FP32" : "FP64",
                 (long long)nx, (long long)ny, (long long)nz, (long long)H,
                 double(nx) * double(ny) * double(nz));
@@ -193,10 +249,26 @@ int main(int argc, char** argv) {
     std::printf("  one free-fall time = %.0f steps;  %zu steps = %.0f of them\n",
                 t_ff, T_end, tf);
     std::printf("  RESOLUTION: Nu ~ %.0f (2-D, 0.14 Ra^0.29) -> thermal BL = %.4f"
-                " cells, Nu ceiling ~ H/2 = %lld.  %s\n\n",
+                " cells, Nu ceiling ~ H/2 = %lld.  %s\n",
                 Nu_est, bl_cells, (long long)(H / 2),
                 bl_cells >= 10.0 ? "Resolved."
                                  : "UNDER-RESOLVED: Nu below is the scheme, not Ra.");
+    std::printf("  max-principle halt at T outside [%.2f, %.2f] (slack %.3g dT)",
+                T_cold - slack * dT, T_hot + slack * dT, slack);
+    if (grace_refused)
+      std::printf(", enforced from step 0.\n"
+                  "     ** GRACE WINDOW REFUSED: the step needs %.3g t_ff to diffuse over "
+                  "four cells,\n        which is %.0fx this whole run -- at these "
+                  "parameters a cold start is NOT a\n        transient, so this run will "
+                  "stop early. Use -ic cond, or raise H. **",
+                  t_smooth_tff, t_smooth_tff / tf);
+    else if (grace > 0.0)
+      std::printf(", suppressed for the\n     first %.1f t_ff (4 x the %.3g t_ff the step "
+                  "needs to diffuse over four cells).\n     Out-of-bounds lines are marked "
+                  "`!`, never hidden; nan and max|u| > 1 still halt.", grace, t_smooth_tff);
+    else
+      std::printf(", enforced from step 0.");
+    std::printf("\n\n");
 
     Domain d(nx, ny, nz, /*periodic x*/ true, /*y*/ false, /*z*/ true);
 
@@ -244,6 +316,14 @@ int main(int argc, char** argv) {
 
     FluidColl fcoll;
     fcoll.omega = FluidColl::omega_from_viscosity(Real(nu));
+    // THE TRACE GOES STRAIGHT TO EQUILIBRIUM, which is what the reference does
+    // (its k4 = R, rate 1) and what GPU/'s twin does (its Solver defaults
+    // omega_bulk to 1). This driver was leaving omega_bulk at -1, i.e. "follow
+    // omega", so the bulk viscosity was relaxed at 1.9984 while both siblings
+    // relaxed it at 1 -- a third configuration belonging to neither. The trace
+    // carries no shear physics here, so sending it to equilibrium is both the
+    // reference's choice and the better-damped one.
+    fcoll.omega_bulk = Real(1);
     fcoll.forcing = force;
     FluidSolver<FL, EsotericPull<FL>, FluidColl> fl(d, fcoll);
     fl.set_geometry([&](Index, Index y, Index) -> CellType {
@@ -265,14 +345,21 @@ int main(int argc, char** argv) {
     });
     th.set_velocity(fl.ux(), fl.uy(), fl.uz());
 
-    std::printf("  %10s %11s %10s %10s %10s %10s %8s %8s %9s\n",
-                "t/t_ff", "Nu_vol", "Nu_floor", "Nu_bot", "Nu_top", "max|u|",
-                "T_min", "T_max", "residual");
+    std::printf("  %10s %11s %10s %10s %10s %10s %10s %8s %8s %9s\n",
+                "t/t_ff", "Nu_vol", "Nu_floor", "Nu_bot", "Nu_top", "Nu_ref",
+                "max|u|", "T_min", "T_max", "residual");
 
     std::vector<Real> Tprev;
     int frame = 0;
     bool bad = false;
     std::size_t steps_run = T_end;
+    // The worst bounds excursion of the whole run, and when. Tracked whether or
+    // not it halts, so a run that finishes inside the window still reports it:
+    // with a grace window "it completed" no longer implies "it stayed in
+    // bounds", and a Nu measured while T was outside them is not a measurement.
+    double worst_lo = T_cold, worst_hi = T_hot, worst_lo_t = 0.0, worst_hi_t = 0.0;
+    double last_lo = T_cold, last_hi = T_hot;
+    bool   ever_out = false;
     const auto wall0 = std::chrono::steady_clock::now();
 
     for (std::size_t t = 0; t <= T_end; ++t) {
@@ -387,6 +474,25 @@ int main(int argc, char** argv) {
         const double Nu_bot = double(H) * (T_hot - bot / plate) / (0.5 * dT);
         const double Nu_top = double(H) * (top / plate - T_cold) / (0.5 * dT);
 
+        // THE REFERENCE'S OWN NORMALISATION, VERBATIM, so the two can be put in
+        // one table. It sums u_y T over EVERY node -- wall rows included -- and
+        // divides by (nx - 1) rather than by ncell/H, which for its 101 x 51
+        // grid is 100 against 103.02, so its Nu - 1 runs 3.0% high. It is also
+        // the RAW correlation, not the fluctuation one, so it inherits the
+        // artefact described above.
+        //
+        // TWO THINGS IT DOES NOT REPRODUCE, and they matter before anyone lines
+        // the columns up. The reference's wall nodes are FLUID nodes that
+        // collide and get forced, so each carries u_y = gb (T - T0)/2 at rest
+        // and its bottom row alone contributes 0.25 gb / D to Nu -- +8.4 at its
+        // own parameters, where the answer is 1. Here the wall rows are Solid,
+        // never collide, and the sum below runs y = 1..H, so that term is
+        // absent. And this gauge is symmetric about zero while the reference's
+        // is [0, 1], so <T> differs by T0 between them. Nu_ref is the
+        // reference's ARITHMETIC on this code's field, which is the honest
+        // half of the comparison; the offset is not portable.
+        const double Nu_ref = 1.0 + flux / (D * dT * double(nx - 1) * double(nz));
+
         // Whole-field residual over the INTERVAL. A per-step change is bounded
         // by the timestep and shrinks under refinement whether or not the flow
         // has settled; over an interval it is a statement about the field.
@@ -403,15 +509,29 @@ int main(int argc, char** argv) {
         }
         Tprev = Tnow;
 
+        // Track the excursion before anything decides whether to stop.
+        const double now_tff = double(t) / t_ff;
+        if (!nbad) {
+          if (tmin < worst_lo) { worst_lo = tmin; worst_lo_t = now_tff; }
+          if (tmax > worst_hi) { worst_hi = tmax; worst_hi_t = now_tff; }
+          last_lo = tmin;  last_hi = tmax;
+          if (tmin < T_cold || tmax > T_hot) ever_out = true;
+        }
+        // `!` marks an out-of-bounds line whether or not the window is letting
+        // the run continue, so the window can only make an excursion
+        // non-fatal, never invisible.
+        const char* mark = (!nbad && (tmin < T_cold || tmax > T_hot)) ? " !" : "";
+
         if (nbad) {
-          std::printf("  %10.2f %11s %10s %10s %10s %10s %8s %8s %9s   "
+          std::printf("  %10.2f %11s %10s %10s %10s %10s %10s %8s %8s %9s   "
                       "(%ld of %.0f cells non-finite)\n",
-                      double(t) / t_ff, "nan", "-", "-", "-", "-", "nan", "nan",
-                      "-", nbad, ncell);
+                      double(t) / t_ff, "nan", "-", "-", "-", "-", "-", "nan",
+                      "nan", "-", nbad, ncell);
         } else {
-          std::printf("  %10.2f %11.4f %10.4f %10.4f %10.4f %10.3e %8.4f %8.4f %9.2e\n",
-                      double(t) / t_ff, Nu_vol, Nu_floor, Nu_bot, Nu_top, peak,
-                      tmin, tmax, resid);
+          std::printf("  %10.2f %11.4f %10.4f %10.4f %10.4f %10.4f %10.3e %8.4f"
+                      " %8.4f %9.2e%s\n",
+                      double(t) / t_ff, Nu_vol, Nu_floor, Nu_bot, Nu_top, Nu_ref,
+                      peak, tmin, tmax, resid, mark);
         }
         std::fflush(stdout);
 
@@ -429,17 +549,32 @@ int main(int argc, char** argv) {
           ++frame;
         }
 
-        // The maximum principle, as a stopping rule. See the banner: this
+        // THE MAXIMUM PRINCIPLE, AS A STOPPING RULE. See the banner: it
         // catches the failure well before the Nusselt numbers look wrong.
-        if (nbad || !std::isfinite(Nu_vol) || peak > 1.0 || tmin < -1.0 || tmax > 1.0) {
+        // Three failures halt unconditionally because none of them recovers;
+        // only the bounds excursion is gated by the window, and only up to
+        // `slack`. Beyond four times the physical range it stops regardless --
+        // a scalar smoothing a step undershoots by a fraction of dT, not by
+        // 4 dT, so that is a different failure wearing the same symptom.
+        const bool fatal = nbad || !std::isfinite(Nu_vol) || peak > 1.0;
+        const double m = slack * dT;
+        const bool out_soft = (tmin < T_cold - m)         || (tmax > T_hot + m);
+        const bool out_hard = (tmin < T_cold - 4.0 * dT)  || (tmax > T_hot + 4.0 * dT);
+        const bool in_grace = now_tff < grace;
+        if (fatal || out_hard || (out_soft && !in_grace)) {
           std::printf("  STOPPED at t = %zu: %s\n", t,
                       nbad ? "T not finite"
                       : !std::isfinite(Nu_vol) ? "Nu not finite"
                       : peak > 1.0 ? "max|u| > 1"
-                      : "T outside [-1, 1], i.e. twice its physical range");
+                      : out_hard ? "T outside FOUR times its physical range"
+                      : "T outside twice its physical range");
           bad = true; steps_run = t; rc = 1;
           break;
         }
+        if (out_soft && in_grace)
+          std::printf("     (out of bounds by %.4f dT, inside the %.1f t_ff grace "
+                      "window -- continuing)\n",
+                      std::max(T_cold - tmin, tmax - T_hot) / dT, grace);
       }
       if (t < T_end) { fl.step(true); th.step(); }
     }
@@ -453,7 +588,64 @@ int main(int argc, char** argv) {
       std::printf("  %d frame(s) as %s_T_*.bin and %s_u_*.bin  (%lld x %lld float32,"
                   " two int32 of header)\n", frame, dump.c_str(), dump.c_str(),
                   (long long)nx, (long long)ny);
+
+    // THE MAXIMUM-PRINCIPLE VERDICT, ALWAYS PRINTED, for the reason given where
+    // the tracking is declared.
+    if (!ever_out) {
+      std::printf("  maximum principle: T stayed inside [%.2f, %.2f] throughout.\n",
+                  T_cold, T_hot);
+    } else {
+      const bool recovered = (last_lo >= T_cold) && (last_hi <= T_hot);
+      std::printf("  maximum principle: VIOLATED. worst T_min = %.4f at t/t_ff = %.2f,"
+                  "  worst T_max = %.4f at t/t_ff = %.2f\n"
+                  "     (%.4f dT below / %.4f dT above the physical range)\n"
+                  "     by the end: T in [%.4f, %.4f] -- %s\n",
+                  worst_lo, worst_lo_t, worst_hi, worst_hi_t,
+                  (T_cold - worst_lo) / dT, (worst_hi - T_hot) / dT,
+                  last_lo, last_hi,
+                  recovered ? "RECOVERED, so treat only the in-bounds tail as data"
+                            : "STILL OUT OF BOUNDS: nothing in this run is a "
+                              "measurement of Ra");
+    }
   }
+  return rc;
+}
+
+int main(int argc, char** argv) {
+  Opts o;
+  o.ny = 1000; o.nx = 2000; o.nz = 1;
+  o.Ra = 1e14; o.Pr = 0.71; o.U = 0.05; o.amp = 0.01;
+  o.tf = 40.0; o.out_every = 1.0;
+  o.slack = 0.5;                 // max-principle halt margin, in units of dT
+  o.grace = -1.0;                // < 0 means "choose from the IC"
+  o.ic = "cond";                 // matches GPU/rb_high_ra; `cold` is the reference's
+  std::string sop = "reg";       // ScalarRegularised, matching GPU/'s default
+
+  for (int i = 1; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (a == "-ny"    && i + 1 < argc) o.ny        = Index(std::atol(argv[++i]));
+    if (a == "-nx"    && i + 1 < argc) o.nx        = Index(std::atol(argv[++i]));
+    if (a == "-nz"    && i + 1 < argc) o.nz        = Index(std::atol(argv[++i]));
+    if (a == "-ra"    && i + 1 < argc) o.Ra        = std::atof(argv[++i]);
+    if (a == "-pr"    && i + 1 < argc) o.Pr        = std::atof(argv[++i]);
+    if (a == "-u"     && i + 1 < argc) o.U         = std::atof(argv[++i]);
+    if (a == "-amp"   && i + 1 < argc) o.amp       = std::atof(argv[++i]);
+    if (a == "-tf"    && i + 1 < argc) o.tf        = std::atof(argv[++i]);
+    if (a == "-out"   && i + 1 < argc) o.out_every = std::atof(argv[++i]);
+    if (a == "-slack" && i + 1 < argc) o.slack     = std::atof(argv[++i]);
+    if (a == "-grace" && i + 1 < argc) o.grace     = std::atof(argv[++i]);
+    if (a == "-dump"  && i + 1 < argc) o.dump      = argv[++i];
+    if (a == "-ic"    && i + 1 < argc) o.ic        = argv[++i];
+    if (a == "-sop"   && i + 1 < argc) sop         = argv[++i];
+  }
+
+  Kokkos::initialize(argc, argv);
+  // The scalar operator is a TEMPLATE parameter, so the flag dispatches to two
+  // instantiations rather than switching a branch. That is the parent tree's
+  // convention -- collision operators are types, not enums -- and it is why
+  // `run` is a template and `Opts` sits at namespace scope.
+  const int rc = (sop == "bgk") ? run<ScalarBGK<SL>>(o)
+                                : run<ScalarRegularised<SL>>(o);
   Kokkos::finalize();
   return rc;
 }

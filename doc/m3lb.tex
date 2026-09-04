@@ -8404,6 +8404,29 @@ the fitted rate is blamed on the scheme.
   $\tau_f-1/2$ from $1.26\e{-7}$ to $2.53\e{-6}$ and lifts the Nusselt ceiling
   from $25$ to $500$ at the same time.
 
+  \emph{Both codebases now carry that operator, and the two drivers were aligned
+  on 2026-09-04.} \code{src/collision/ScalarRegularised.hpp} is the parent
+  tree's form of it: the same equilibrium, the same diffusivity, identical to
+  \code{ScalarBGK} population-by-population at $\omega=1$ (checked exactly, to
+  $0.000000$, on D2Q5 and D3Q7 in \code{tests/test\_collision.cpp}), and the
+  same scalar and flux moments at every $\omega$ --- differing only in that the
+  three ghosts land on equilibrium instead of being relaxed. Its inverse is
+  closed-form rather than a transform, because on a rest-plus-axial-pairs
+  lattice the axes decouple, and it compiles to 36 instructions against BGK's
+  78 with no stack frame at all.
+
+  The alignment mattered beyond that: the Kokkos driver had been running
+  \code{ScalarBGK}, \code{omega\_bulk} $=-1$ (so the trace relaxed at $1.9984$
+  where both the reference and the CUDA twin use $1$), and a default initial
+  condition of \code{cold} against the twin's \code{cond}. Two independent
+  implementations of one case are only evidence if they are the same setup, and
+  those three made them three different setups. The temperature gauge is left
+  deliberately different --- symmetric about zero in the Kokkos driver, $[0,1]$
+  in the CUDA one --- since a gauge is not physics; the consequence is that
+  $\mathrm{Nu}_{\rm bot}$, $\mathrm{Nu}_{\rm top}$ and $\mathrm{Nu}_{\rm vol}$
+  are comparable between them while $T_{\min}$, $T_{\max}$ and
+  $\mathrm{Nu}_{\rm ref}$ are not.
+
   The Kokkos twin (\code{demonstrator/rb\_high\_ra}) puts numbers on where the
   configuration is usable. A $200\times100$ layer at $U_f=0.05$ with the
   conductive initial condition, out to a hundred free-fall times:

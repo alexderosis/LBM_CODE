@@ -63,7 +63,7 @@ cmake --build build -j4          # 75 = T4/Turing, 80 = A100, 90 = Hopper
 | physics | use | notes |
 |---|---|---|
 | single-phase, single-component | `FluidSolver` | **the default — see the rule below** |
-| + temperature / passive scalar | `ScalarSolver` alongside | own lattice, velocity is an input |
+| + temperature / passive scalar | `ScalarSolver` alongside | own lattice, velocity is an input; `ScalarBGK` by default, `ScalarRegularised` above ω ≈ 1.9 |
 | + magnetic field | `MagneticSolver` | Dellar vector distribution |
 | two-phase, diffuse interface | `PhaseFieldSolver` | conservative Allen–Cahn, prescribed interface width, density ratio ~100 |
 | two-phase, diffuse, high ratio | `ColourGradientSolver` | no interface equation; width is an *outcome*; 1000 in the source paper's own static tests |
@@ -96,7 +96,7 @@ transport coefficient into a relaxation rate, and most turn it back:
 | operator | forward | inverse |
 |---|---|---|
 | `BGK`, `TRT`, `MomentCollision`, `MultiphaseBGK`, `MhdBGK`, `MhdCentralMoments` | `omega_from_viscosity(nu)` | `viscosity_from_omega(w)` |
-| `ScalarBGK` | `omega_from_diffusivity(d)` | `diffusivity_from_omega(w)` |
+| `ScalarBGK`, `ScalarRegularised` | `omega_from_diffusivity(d)` | `diffusivity_from_omega(w)` |
 | `MagneticBGK` | `omega_from_resistivity(eta)` | — |
 | `PhaseFieldBGK` | `omega_from_mobility(m)` | — |
 | `ColourGradient` | — | `viscosity_from_tau(tau)` |
@@ -374,7 +374,25 @@ Do not spend time on these without saying so first; several are deliberate.
   curvature; and the growth rate's zero crossing (1719.6) agrees with the
   bisected Ra_c (1718.9) to 0.04%, which is a far stronger use of the same runs
   than bracketing the sign of sigma.
-  `demonstrator/rb_high_ra` (Kokkos, D3Q27 CM + D3Q7 BGK) measures where that
+  **The two `rb_high_ra` drivers were ALIGNED on 2026-09-04**, because two
+  independent implementations of one case are only worth something if they are
+  the same setup, and four things differed. `demonstrator/rb_high_ra` now uses
+  the new **`ScalarRegularised<D3Q7>`** (`src/collision/ScalarRegularised.hpp`)
+  rather than `ScalarBGK` — same equilibrium, same diffusivity, identical at
+  ω = 1, but it relaxes only the flux moments and annihilates the three ghosts,
+  which is what the reference does and what `GPU/` does. BGK relaxes the ghosts
+  at ω too, and at ω → 2 that is a *reflection*: they invert every step and
+  never damp. It also now sets **`omega_bulk = 1`** (it was −1, "follow omega",
+  so the trace relaxed at 1.9984 while both siblings used 1), prints
+  **`Nu_ref`**, and defaults to **`-ic cond`** like its twin. `-sop reg|bgk`
+  selects the operator — a template dispatch, not a runtime branch, so `Opts`
+  and `run` sit at namespace scope for the nvcc restriction. The temperature
+  gauge stays deliberately different (symmetric here, [0,1] there): a gauge is
+  not physics, and symmetric is the defence recommended above. So `Nu_bot`,
+  `Nu_top` and `Nu_vol` are comparable between the twins and `T_min`/`T_max`
+  and `Nu_ref` are not.
+
+  `demonstrator/rb_high_ra` (Kokkos, D3Q27 CM + D3Q7 scalar) measures where that
   configuration is usable, at 200x100, U_f = 0.05, conductive IC, 100 free-fall
   times: Ra = 1e6 gives Nu_bot/Nu_top = 7.40/7.48, agreeing to 1% and to 7% of
   0.14 Ra^0.29 = 8.0; Ra = 1e10 gives 46.57/46.79, agreeing to 0.5% but landing

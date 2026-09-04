@@ -6,10 +6,19 @@
 //      and mass is still conserved. That pins the forcing scheme down: get the
 //      half-velocity shift or the (1 - omega/2) prefactor wrong and it fails.
 //    - Raw and shifted storage produce the same physics.
+//    - The regularised scalar operator conserves the scalar, is IDENTICAL to
+//      ScalarBGK at omega = 1, leaves the same scalar and flux moments as BGK
+//      at any omega, and differs from it only in the ghosts. Those four
+//      together say it is the same physics with a different ghost treatment,
+//      which is exactly the claim ScalarRegularised.hpp makes.
 //==============================================================================
 #include "Check.hpp"
 #include "collision/BGK.hpp"
+#include "collision/ScalarRegularised.hpp"
 #include "core/Types.hpp"
+
+#include <cmath>
+#include <string>
 
 using namespace lbm;
 
@@ -122,6 +131,71 @@ void viscosity_roundtrip() {
   }
 }
 
+//------------------------------------------------------------------------------
+//  THE REGULARISED SCALAR, against ScalarBGK on the same state.
+//
+//  The ghost moments on these lattices are the AXIAL SECOND MOMENTS
+//  M_a = sum_i h_i c_ia^2. Their equilibrium is cs2 * dT, so "annihilated" and
+//  "at equilibrium" are the same statement, and the check below is that BGK
+//  does NOT put them there while this operator does.
+//------------------------------------------------------------------------------
+template <class L>
+static void scalar_regularised(Real w) {
+  const std::string n = std::string(L::name) + " w=" + std::to_string(double(w));
+  const Real dT = Real(0.37), ux = Real(0.031), uy = Real(-0.017), uz = Real(0.009);
+
+  ScalarBGK<L>         bgk;   bgk.omega = w;   bgk.T_ref = Real(0.5);
+  ScalarRegularised<L> reg;   reg.omega = w;   reg.T_ref = Real(0.5);
+
+  Real hb[L::Q], hr[L::Q];
+  for (int i = 0; i < L::Q; ++i)
+    hb[i] = hr[i] = weight<L, Real>(i) * dT +
+                    Real(0.021) * Real((i * 5) % 4 - 1);   // off equilibrium
+  const Real dT0 = ScalarBGK<L>::deviation(hb);
+
+  bgk.collide(hb, dT0, ux, uy, uz, w);
+  reg.collide(hr, dT0, ux, uy, uz, w);
+
+  // 1. the scalar is conserved, exactly
+  check::near(ScalarBGK<L>::deviation(hr), dT0, TOL(),
+              n + ": regularised conserves the scalar");
+
+  // 2. and the flux moments agree with BGK's -- the physical content is the same
+  for (int a = 0; a < L::D; ++a) {
+    Real jb = Real(0), jr = Real(0);
+    for (int i = 0; i < L::Q; ++i) {
+      jb += hb[i] * Real(cvel<L>(i, a));
+      jr += hr[i] * Real(cvel<L>(i, a));
+    }
+    check::near(jr, jb, TOL(), n + ": same flux moment " + std::to_string(a));
+  }
+
+  // 3. the ghosts are at equilibrium, which BGK's are not (except at w = 1)
+  const Real d_eq = cs2<L, Real>() * dT0;
+  for (int a = 0; a < L::D; ++a) {
+    Real Mb = Real(0), Mr = Real(0);
+    for (int i = 0; i < L::Q; ++i) {
+      const Real c2 = Real(cvel<L>(i, a)) * Real(cvel<L>(i, a));
+      Mb += hb[i] * c2;  Mr += hr[i] * c2;
+    }
+    check::near(Mr, d_eq, TOL(), n + ": ghost " + std::to_string(a) + " annihilated");
+    if (w != Real(1))
+      check::ok(std::abs(double(Mb - d_eq)) > 1e-4,
+                n + ": BGK leaves ghost " + std::to_string(a) + " OFF equilibrium");
+  }
+
+  // 4. at omega = 1 the two operators are the same function, population by
+  //    population. If this ever fails the two are not the scheme they claim.
+  if (w == Real(1)) {
+    double worst = 0.0;
+    for (int i = 0; i < L::Q; ++i)
+      worst = std::max(worst, std::abs(double(hb[i]) - double(hr[i])));
+    check::ok(worst <= double(TOL()),
+              n + ": identical to BGK at omega = 1 (worst " +
+                  std::to_string(worst) + ")");
+  }
+}
+
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   {
@@ -137,6 +211,10 @@ int main(int argc, char** argv) {
       forced_momentum<D3Q19, ShiftedPopulations>(w);
       storage_equivalence<D2Q9>(w);
       storage_equivalence<D3Q19>(w);
+    }
+    for (Real w : {Real(0.4), Real(1.0), Real(1.8), Real(1.997)}) {
+      scalar_regularised<D3Q7>(w);
+      scalar_regularised<D2Q5>(w);
     }
     viscosity_roundtrip<D2Q9>();
     viscosity_roundtrip<D3Q19>();
