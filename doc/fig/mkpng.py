@@ -71,6 +71,14 @@ def render(src, dst, pct=0.99):
     a = sorted(abs(x) for x in v)
     vmax = a[min(len(a) - 1, int(pct * len(a)))]
     vpeak = a[-1]
+    # A UNIFORMLY ZERO FIELD IS A LEGITIMATE INPUT and used to divide by zero
+    # here. render_seq already guarded its range; this did not. It arises for
+    # real: the departure of a conductive initial condition from its own
+    # horizontal mean is identically zero, so the first frame of a perturbation
+    # sequence is all zeros and crashed the render mid-loop, leaving a gap in
+    # the numbering that ffmpeg then silently started past.
+    if vmax <= 0.0:
+        vmax = 1.0
     rgb = bytearray(nx*ny*3)
     for y in range(ny):
         yy = ny - 1 - y                       # flip so y increases upward
