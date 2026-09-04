@@ -8244,7 +8244,18 @@ the fitted rate is blamed on the scheme.
   falling to $0.004\%$. The consequence for \code{rb\_high\_ra} is that a
   Nusselt number from an unresolved run is a property of the discretisation, and
   the driver prints the volume and both plate estimators so the disagreement
-  between them is visible rather than inferred.
+  between them is visible rather than inferred. At the reference point itself
+  ($H=50$, $\mathrm{Ra}=10^{14}$, FP64, central moments) the run does not
+  survive: conduction is clean for some five hundred free-fall times and then it
+  diverges as soon as buoyancy wins, $\mathrm{Nu}_{\rm vol}$ running
+  $1.04\to6.50\to504\to$ NaN while $\max|u|$ climbs
+  $2.8\e{-6}\to5.8\e{-5}\to1.0\e{-3}$. The step at which that happens is not
+  quoted as a measurement --- \S\ref{sec:known} already records that a
+  blow-up step moves by $2\times$ with the backend alone --- but the order of
+  events is reproducible, and the lever is $H$: since
+  $\nu=UH\sqrt{\mathrm{Pr}/\mathrm{Ra}}$, going to $H=1000$ moves
+  $\tau_f-1/2$ from $1.26\e{-7}$ to $2.53\e{-6}$ and lifts the Nusselt ceiling
+  from $25$ to $500$ at the same time.
 \end{enumerate}
 
 %==============================================================================

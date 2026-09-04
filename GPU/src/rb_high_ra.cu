@@ -33,9 +33,21 @@
 //  and wrong. `Scalar` takes the diffusivity and reads its own lattice's cs2,
 //  which is why the constructor is handed alpha and not a relaxation rate.
 //
-//  BUILD THIS IN FP64. At the reference point tau - 1/2 = 1.264e-07, and the
-//  FP32 spacing at 0.5 is 2^-24 = 5.96e-08. The excess viscosity is two ulp:
-//  nu is quantised to about 6% and Ra with it, and the error grows with H.
+//  BUILD THIS IN FP64 -- but the reason is H-dependent, so it is printed rather
+//  than asserted. nu = U H sqrt(Pr/Ra), so tau - 1/2 grows LINEARLY with H while
+//  the FP32 spacing at 0.5 stays at 2^-24 = 5.96e-08. At the reference point
+//  (H = 50) the excess viscosity is 1.264e-07, TWO ulp: nu is quantised by ~24%
+//  and Ra with it, and FP32 is simply solving a different problem. By H = 1000
+//  it is 2.53e-06, forty-two ulp, and the quantisation is ~1.2% -- immaterial
+//  next to a run this under-resolved. The startup line prints the ulp count and
+//  says which case it is; do not carry the H = 50 answer to another H.
+//
+//  MEASURED COST, T4, FP64, central moments (2026-09-04). H = 50 is 5200 cells
+//  and launch-latency-bound: 134 MLUPS, 38.7 us/step. H = 1000 is 2.0M cells and
+//  runs at ~17 ms/step, i.e. ~120 MLUPS -- NOT bandwidth-bound (that would be
+//  ~300), because a consumer card's FP64 ALU rate is 1/32 of its FP32 one and
+//  the central-moment collision is arithmetic-heavy. One free-fall time at
+//  H = 1000 is 100000 steps, so about 28 minutes.
 //  This is not a stability question, it is a question of which Ra is being
 //  solved. Configure with -DLBM_DOUBLE=ON. The cost is ~2x here (the kernels
 //  are bandwidth-bound, not FP64-throughput-bound) and at these grid sizes the
@@ -77,6 +89,25 @@
 //
 //  At a resolved steady state all three agree. The size of their disagreement
 //  is the honest error bar, and it is why `-h` is the first flag to sweep.
+//
+//  ============ AND AT THE REFERENCE POINT IT DOES NOT SURVIVE =============
+//  H = 50, Ra = 1e14, FP64, central moments, T4: conduction runs cleanly for
+//  ~500 free-fall times, then the run DIVERGES the moment buoyancy wins ---
+//  Nu_vol 1.0383 -> 6.50 -> 504.5 -> nan over 100 free-fall times, with max|u|
+//  climbing 2.8e-06 -> 5.8e-05 -> 1.0e-03. tau_f - 1/2 = 1.26e-07 leaves nothing
+//  to damp the flow once it starts, and a Nu_vol of 504 is impossible anyway
+//  against the H/2 = 25 ceiling above.
+//
+//  The STEP at which it blows up is deliberately not quoted as a measurement:
+//  this tree has been burned by that before (the blow-up step moves by 2x with
+//  the Kokkos backend alone). What is reproducible is the ORDER of events ---
+//  clean conduction, then divergence at onset --- and that raising H is the
+//  lever, because nu = U H sqrt(Pr/Ra) grows with H: H = 1000 gives
+//  tau_f - 1/2 = 2.53e-06, twenty times further off the floor, and lifts the Nu
+//  ceiling from 25 to 500 at the same time. Lowering Ra at fixed H does the same
+//  thing to tau and does NOT help the resolution, which is why it is the worse
+//  of the two knobs.
+//  ===========================================================================
 //
 //  ONE MORE ARITHMETIC NOTE ON Nu. The reference sums v T over ALL nx*ny nodes
 //  and divides by (nx - 1). The exact volume average times H/alpha divides by
@@ -254,10 +285,14 @@ int main(int argc, char** argv) {
               nu / (1.0 / 3.0) + 0.5, 1.0 / (nu / (1.0 / 3.0) + 0.5));
   std::printf("  tau_g  = %.10f (omega %.8f)   [D3Q7,  cs2 = 1/4 -- NOT 3a+1/2]\n",
               alpha / 0.25 + 0.5, 1.0 / (alpha / 0.25 + 0.5));
-  if (sizeof(Real) == 4)
-    std::printf("  ** FP32: tau - 1/2 = %.3e against an ulp of %.3e at 0.5."
-                "  Rebuild with -DLBM_DOUBLE=ON. **\n",
-                nu * 3.0, 5.96e-8);
+  if (sizeof(Real) == 4) {
+    const double ulps = nu * 3.0 / 5.96e-8;        // FP32 spacing at 0.5 is 2^-24
+    std::printf("  ** FP32: tau - 1/2 = %.3e is %.1f ulp at 0.5, so nu and Ra are\n"
+                "     quantised by about %.2f%%.%s **\n",
+                nu * 3.0, ulps, 50.0 / ulps,
+                ulps < 10.0 ? "  REBUILD WITH -DLBM_DOUBLE=ON."
+                            : "  Tolerable, but FP64 is the reference.");
+  }
   std::printf("  one free-fall time = %.0f steps;  %zu steps = %.0f of them\n",
               t_ff, T_end, tf);
   std::printf("  RESOLUTION: Nu ~ %.0f (2-D, 0.14 Ra^0.29) -> thermal BL = %.4f cells."
@@ -307,6 +342,10 @@ int main(int argc, char** argv) {
 
   const auto wall0 = std::chrono::steady_clock::now();
   bool diverged = false;
+  // The summary must count the steps actually TAKEN, not the steps asked for.
+  // A run that diverges at 3.25e6 of 5e7 otherwise reports the full 5e7 and an
+  // MLUPS fifteen times too high -- a throughput number nothing measured.
+  std::size_t steps_run = T_end;
 
   for (std::size_t t = 0; t <= T_end; ++t) {
     if (t % probe == 0) {
@@ -364,6 +403,7 @@ int main(int argc, char** argv) {
       if (!std::isfinite(Nu_vol) || peak > 1.0) {
         std::printf("  DIVERGED at t = %zu  (max|u| = %.3e)\n", t, peak);
         diverged = true;
+        steps_run = t;
         break;
       }
     }
@@ -381,7 +421,7 @@ int main(int argc, char** argv) {
       std::chrono::steady_clock::now() - wall0).count();
   std::fclose(series);
   std::printf("\n  %zu steps in %.2f s  ->  %.1f MLUPS\n",
-              T_end, sec, double(fl.nodes()) * double(T_end) / sec / 1e6);
+              steps_run, sec, double(fl.nodes()) * double(steps_run) / sec / 1e6);
   std::printf("  series in rb_high_ra.dat%s\n", vtk ? ", fields in vtk_fluid/" : "");
   return diverged ? 1 : 0;
 }
