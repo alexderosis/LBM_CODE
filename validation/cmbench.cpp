@@ -10,16 +10,29 @@
 //  happens only on the device, in which case the host cannot see it at all.
 //  That is a fork worth resolving before anyone books GPU time.
 //
-//  MEASURED, 48^3, FP64, four host threads:
+//  MEASURED, 48^3, FP64, four host threads, MEAN OF FIVE RUNS (spread 3.4 to
+//  5.5%, which is why five and not one -- see the caution below):
 //
-//      BGK                       41.7 MLUPS
-//      TRT                       36.5           1.14x BGK
-//      MomentCollision central   15.5           2.69x BGK
-//      MomentCollision raw MRT    9.7           4.30x BGK
+//      BGK                       43.5 MLUPS
+//      TRT                       37.4           1.16x BGK
+//      MomentCollision central   20.0           2.18x BGK
+//      MomentCollision raw MRT   20.3           2.14x BGK
 //
-//  So the arithmetic is FINE. 2.69x is an unremarkable price for a 27-moment
+//  So the arithmetic is FINE. 2.18x is an unremarkable price for a 27-moment
 //  transform, and it is four orders of magnitude away from the device figure.
 //  The collapse is device-specific and the host will not reproduce it.
+//
+//  Note also that central moments and raw MRT cost the SAME here, 2.18 against
+//  2.14. They share the transform and differ only in the relaxation schedule,
+//  so that is the expected answer and a useful sanity check on the bench.
+//
+//  A CORRECTION THIS FILE SHOULD CARRY, because it is the mistake this tree
+//  keeps making. The first version of these numbers was a SINGLE run each and
+//  reported 2.69x and 4.30x. Repeated five times on a quiet machine they are
+//  2.18x and 2.14x -- so the MRT figure was wrong by a factor of two, and it was
+//  wrong in the direction that would have made raw MRT look like a second
+//  problem needing its own explanation. One sample of a wall-clock timing on a
+//  four-thread laptop is not a measurement.
 //
 //  A CAUTION ON THAT DEVICE FIGURE, which this file's existence should not
 //  lend credibility to. "Did not finish in seventeen minutes" is a timeout, not
@@ -34,8 +47,17 @@
 //  If it really is four orders, something pathological is happening instead and
 //  the local-memory story is the wrong tree.
 //
-//  WHAT THIS DOES NOT MEASURE: anything device-side, which is the whole point,
-//  and anything about accuracy. It is a stopwatch.
+//  IT IS MEANT TO BE BUILT FOR CUDA TOO, and that is the point of it now: it
+//  bounds the experiment. 48^3 x 60 steps is 6.6e6 cell updates, about 1.3 ms at
+//  an H200's BGK rate, so even a four-orders-slower central moment finishes
+//  inside a minute. A timeout cannot happen, which is exactly what the original
+//  seventeen-minute observation could not promise.
+//
+//      cmake -S . -B build-gpu -DCMAKE_BUILD_TYPE=Release \
+//            -DLBM_GPU_BACKEND=cuda -DLBM_GPU_ARCH=HOPPER90 -DLBM_PRECISION=float
+//      cmake --build build-gpu -j8 --target cmbench && ./build-gpu/validation/cmbench
+//
+//  WHAT THIS DOES NOT MEASURE: accuracy. It is a stopwatch.
 //==============================================================================
 #include "collision/BGK.hpp"
 #include "collision/MomentCollision.hpp"
@@ -49,11 +71,18 @@
 using namespace lbm;
 using L = D3Q27;
 
-template <class Coll, class Setup>
-static double run(const char* name, Index N, std::size_t steps, Setup setup) {
+// THE COLLISION ARRIVES CONFIGURED, BY VALUE, and that is an nvcc constraint
+// rather than a style choice. This function contains a KOKKOS_LAMBDA, i.e. an
+// extended __host__ __device__ lambda, and nvcc forbids a FUNCTION-LOCAL type
+// as a template argument of any function that does -- so taking a `Setup`
+// callable deduced from a lambda in main() compiles on the host and fails under
+// nvcc. That is restriction six in this tree's own list (it cost `galilean` a
+// build once, fixed the same way: keep the template arguments at namespace
+// scope). Configuring in main and passing the object sidesteps it entirely, and
+// this file exists to be built for CUDA.
+template <class Coll>
+static double run(const char* name, Index N, std::size_t steps, Coll coll) {
   Domain d(N, N, N, true, true, true);
-  Coll coll;
-  setup(coll);
   FluidSolver<L, EsotericPull<L>, Coll> s(d, coll);
   const Real u0 = Real(0.04);
   s.initialize_field(KOKKOS_LAMBDA(Index n) {
@@ -88,15 +117,16 @@ int main(int argc, char** argv) {
     using T2 = TRT<L, SecondOrderEquilibrium<L>, NoForcing, ShiftedPopulations>;
     using CM = MomentCollision<L, NoForcing, ShiftedPopulations, true>;
     using MR = MomentCollision<L, NoForcing, ShiftedPopulations, false>;
-    const double b = run<B>("BGK", N, steps, [&](auto& c) {
-      c.omega = B::omega_from_viscosity(nu); });
-    run<T2>("TRT", N, steps, [&](auto& c) {
-      c.omega_p = T2::omega_from_viscosity(nu);
-      c.omega_m = T2::omega_minus_for(c.omega_p, T2::magic_3_16); });
-    const double cm = run<CM>("MomentCollision central", N, steps, [&](auto& c) {
-      c.omega = CM::omega_from_viscosity(nu); });
-    const double mr = run<MR>("MomentCollision raw MRT", N, steps, [&](auto& c) {
-      c.omega = MR::omega_from_viscosity(nu); });
+    B  cb;  cb.omega = B::omega_from_viscosity(nu);
+    T2 ct;  ct.omega_p = T2::omega_from_viscosity(nu);
+            ct.omega_m = T2::omega_minus_for(ct.omega_p, T2::magic_3_16);
+    CM cc;  cc.omega = CM::omega_from_viscosity(nu);
+    MR cr;  cr.omega = MR::omega_from_viscosity(nu);
+
+    const double b  = run<B> ("BGK",                     N, steps, cb);
+                      run<T2>("TRT",                     N, steps, ct);
+    const double cm = run<CM>("MomentCollision central", N, steps, cc);
+    const double mr = run<MR>("MomentCollision raw MRT", N, steps, cr);
     std::printf("\n  CM / BGK = %.2fx slower      MRT / BGK = %.2fx slower\n\n",
                 b / cm, b / mr);
   }
