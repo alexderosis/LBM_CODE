@@ -36,6 +36,57 @@ static void check(bool ok, const char* what, double detail = 0.0) {
 }
 static double worst(double a, double b) { return std::fabs(a) > std::fabs(b) ? a : b; }
 
+//==============================================================================
+//  THE PHI CONSERVATION BOUND, AND WHY IT IS 4 ULP/STEP RATHER THAN 1.
+//
+//  phi conservation is EXACT in the algorithm: sum_i S_i = 0, and streaming and
+//  collision are both conservative. So any measured drift is round-off, and the
+//  bound exists to separate round-off from a real leak. It is normalised by the
+//  working precision's ulp so that ONE bound serves FP32 and FP64.
+//
+//  It used to be one ulp/step, and that was calibrated in FP32 on D3Q7. Built in
+//  FP64 the D3Q27 blocks reported 4.45 (BGK) and 5.51 (CM) and failed. Measured
+//  rather than adjusted, and two separate things were wrong.
+//
+//  FIRST, MOST OF THAT WAS THE INSTRUMENT. total_phase() summed Q*N slots
+//  sequentially -- 62208 of them on D3Q27 -- and in FP64 the reduction's own
+//  error dominated the drift it was measuring. Compensating it (hostsim.hpp)
+//  took D3Q27 BGK from 4.451 to 0.351 ulp/step, i.e. seven eighths of the
+//  "drift" was the sum. In FP32 the two agree to three digits, which is exactly
+//  why this only surfaced in FP64: there the algorithm's round-off is a hundred
+//  thousand times larger than the reduction's and hides it.
+//
+//  SECOND, THE DRIFT DOES NOT ACCUMULATE, so a per-step figure is an ENVELOPE
+//  and not a rate. Total relative drift, D3Q27 BGK, FP64, over 600 / 1200 /
+//  2400 / 9600 steps: -4.6e-14, -1.0e-13, -3.3e-13, -4.4e-13 -- sixty-four
+//  times the steps for ten times the drift. In FP32 it stops dead: -5.0419e-05
+//  at 600 and -8.8306e-05 at both 2400 AND 9600, to every digit, because the
+//  increments fall below an ulp of the accumulated total. Dividing a saturating
+//  drift by the window therefore makes the bound STRICTER the shorter the
+//  window, which is backwards; the same run reads 18.3 ulp/step at 150 steps and
+//  0.46 at 9600.
+//
+//  THE MEASURED ENVELOPE, over both 600-step windows, both precisions, D3Q7 BGK
+//  and D3Q27 BGK and CM: worst 0.813 (FP32, D3Q27 CM) and 0.415 (FP64, D3Q27
+//  BGK); over longer windows worst 0.866 (FP64, D3Q27 BGK, 1200->2400). Four
+//  gives a factor 4.6 over the worst of those -- enough that this is not a
+//  flaky test -- while still bounding phi to 4 x 600 x ulp = 5.3e-13 relative
+//  over 600 FP64 steps.
+//
+//  WHAT IT DOES NOT COVER. It is not a bound on a leak smaller than round-off:
+//  a defect losing under ~1e-15 of phi per step is invisible here at any
+//  precision, and no test at this precision can see it. It says nothing about
+//  conservation under geometry -- every case here is periodic, and a wall slot
+//  holds populations in flight, which is why total_phase() sums populations and
+//  not the phi field. And the envelope was measured on ONE configuration (the
+//  flat interface, W = 4, mobility 0.05); a case with far more interface cells
+//  per unit volume has not been measured. What it does catch is any leak worth
+//  the name: a loss of 1e-12 of phi per step is 4545 ulp/step in FP64, three
+//  orders over the bound.
+//==============================================================================
+static const double PHI_ULP_BOUND = 4.0;
+static double ulp_of_real() { return (sizeof(Real) == 4) ? 1.19e-7 : 2.2e-16; }
+
 // Zeroth moment of a 27-population array. The anti-diffusion source must have
 // none, in any basis and at any shift velocity -- that is what makes phi
 // conserved rather than merely nearly conserved.
@@ -220,25 +271,21 @@ int main() {
     // Pure diffusion at this mobility would reach sqrt(4 M t) = 11, so this is
     // a wide margin against the failure mode, not a tight one against noise.
     check(w1 < 6.0, "and is nowhere near the sqrt(4 M t) = 11 of pure diffusion", w1);
-    // PHI CONSERVATION IS EXACT IN THE ALGORITHM -- sum_i S_i = 0 and both
-    // streaming and collision are conservative -- and FP32 cannot represent
-    // that. So the test bounds the drift PER STEP against one ulp of the
-    // working precision: round-off cannot do better and a real conservation bug
-    // would exceed it by orders of magnitude. Two windows are measured rather
-    // than one so that a leak, which would grow, is separated from round-off,
-    // which does not have to.
-    //
-    // Measured in FP32 over 150 / 600 / 2400 / 9600 steps, the TOTAL drift runs
-    // -2.9e-06, -3.4e-05, -1.0e-04, -1.4e-04: it grows fast while the seeded
-    // profile relaxes onto the discrete equilibrium and then nearly stops, so
-    // quadrupling the run from 2400 to 9600 costs only 30% more. In FP64 it
-    // stays at 1e-13 for all four. Neither is a leak; the FP32 figure is the
-    // price of the precision and is worth knowing before a long run.
+    // See PHI_ULP_BOUND above for the whole argument. Two windows rather than
+    // one so that a leak, which grows, is separated from round-off, which
+    // saturates. Measured in FP32 over 600 / 1200 / 2400 / 9600 steps the total
+    // drift runs -3.4e-05, -6.7e-05, -1.0e-04, -1.4e-04: it grows while the
+    // seeded profile relaxes onto the discrete equilibrium and then nearly
+    // stops. In FP64 it stays at 1e-15 to 1e-13 throughout. Neither is a leak;
+    // the FP32 figure is the price of the precision and is worth knowing before
+    // a long run.
     const double d1 = (m1 - m0) / m0, d2 = (m2 - m1) / m0;
-    const double ulp = (sizeof(Real) == 4) ? 1.19e-7 : 2.2e-16;
-    check(std::fabs(d1) / 600.0 < ulp, "phi conserved to under one ulp per step",
+    const double ulp = ulp_of_real();
+    check(std::fabs(d1) / 600.0 < PHI_ULP_BOUND * ulp,
+          "phi conserved to within the round-off envelope",
           std::fabs(d1) / 600.0 / ulp);
-    check(std::fabs(d2) / 600.0 < ulp, "  ... and still so over the next 600",
+    check(std::fabs(d2) / 600.0 < PHI_ULP_BOUND * ulp,
+          "  ... and still so over the next 600",
           std::fabs(d2) / 600.0 / ulp);
     std::printf("        (total phi %.10f -> %.10f -> %.10f;"
                 " %.2f then %.2f ulp/step)\n", m0, m1, m2,
@@ -637,16 +684,26 @@ int main() {
       const double w0 = width_now(), m0 = pf.total_phase();
       for (int t = 0; t < 600; ++t) pf.step();
       const double w1 = width_now(), m1 = pf.total_phase();
+      // A SECOND WINDOW, as section 4 has. One window cannot tell a leak from
+      // round-off: both look like a number. A leak grows across windows and
+      // round-off need not, and this block was the one measuring only the first.
+      for (int t = 0; t < 600; ++t) pf.step();
+      const double m2 = pf.total_phase();
 
       char buf[160];
       std::snprintf(buf, sizeof buf, "D3Q27 %s: the interface holds its width", name);
       check(std::fabs(w1 - w0) / w0 < 0.05, buf, (w1 - w0) / w0);
-      const double ulp = (sizeof(Real) == 4) ? 1.19e-7 : 2.2e-16;
-      std::snprintf(buf, sizeof buf, "D3Q27 %s: phi conserved to under one ulp/step",
-                    name);
-      check(std::fabs((m1 - m0) / m0) / 600.0 < ulp, buf,
-            std::fabs((m1 - m0) / m0) / 600.0 / ulp);
-      std::printf("        (%s: W %.2f -> %.2f)\n", name, w0, w1);
+      const double ulp = ulp_of_real();
+      const double e1 = std::fabs((m1 - m0) / m0) / 600.0 / ulp;
+      const double e2 = std::fabs((m2 - m1) / m0) / 600.0 / ulp;
+      std::snprintf(buf, sizeof buf,
+                    "D3Q27 %s: phi conserved to within the round-off envelope", name);
+      check(e1 < PHI_ULP_BOUND, buf, e1);
+      std::snprintf(buf, sizeof buf,
+                    "D3Q27 %s:   ... and still so over the next 600", name);
+      check(e2 < PHI_ULP_BOUND, buf, e2);
+      std::printf("        (%s: W %.2f -> %.2f;  %.2f then %.2f ulp/step)\n",
+                  name, w0, w1, e1, e2);
       return w1;
     };
 

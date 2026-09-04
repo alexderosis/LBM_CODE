@@ -728,9 +728,22 @@ class PhaseField {
   // the same number as summing phi over the bulk, and the difference is not a
   // leak: under an in-place scheme a population in flight toward a wall spends a
   // step in a slot the wall owns.
+  //
+  // COMPENSATED, AND THE COMPENSATION IS NOT COSMETIC. A naive sequential sum
+  // over Q*N slots carries its own error, and in FP64 that error DOMINATES what
+  // a conservation check is trying to see. Measured on the D3Q27 flat interface
+  // (62208 slots, 600 steps): naive reports a drift of -5.08e-10 where Kahan
+  // reports -3.99e-11, so seven eighths of the "drift" was the instrument. In
+  // FP32 the two agree to three digits, because there the algorithm's own
+  // round-off is far larger than the reduction's -- which is exactly why the
+  // problem only appeared once the tree was built in FP64.
   double total_phase() const {
-    double s = 0;
-    for (Real v : h_) s += double(v);
+    double s = 0, c = 0;
+    for (Real v : h_) {                       // Kahan
+      const double y = double(v) - c, t = s + y;
+      c = (t - s) - y;
+      s = t;
+    }
     return s;
   }
 
