@@ -4799,6 +4799,57 @@ boundaries half a spacing apart, which corrupts $\mathrm{Ra}$ itself rather than
 merely adding an error. The box is one critical wavelength wide,
 $2\pi/k_c = 2.0158\,H$.
 
+\paragraph{Three references, not one.} Linear stability of a rigid--rigid layer
+gives $\mathrm{Ra}_c=1707.762$ at $k_cH=3.117$, and near onset a growth rate
+proportional to the supercriticality. All three are now measured
+(\code{-conv}, \code{-marginal}, \code{-rate}).
+
+\emph{Convergence in $H$.} $\mathrm{Ra}_c$ deviates by $+3.29$, $+1.33$, $+0.65$
+and $+0.25$\,\% at $H=16,24,32,48$ for the midway pair --- observed order
+$2.36$ ($R^2=0.9996$). The on-node pair (regularised velocity $+$ moment scalar)
+gives $+3.61$, $+1.73$, $+1.05$, $+0.53$\,\%, i.e.\ order $1.75$ ($R^2=0.9997$)
+and twice the error at $H=48$. That is the curvature-induced wall slip of
+Eq.~\eqref{eq:curvslip2} showing up as a \emph{convergence} signature rather
+than only as an offset: a slip proportional to
+$\partial^2u_\parallel/\partial n^2$ drags second order toward first. The
+bisection bracket resolves $\mathrm{Ra}$ to $0.68$, which is $16\%$ of the
+$H=48$ deviation, so that finest point carries that uncertainty.
+
+\emph{The preferred wavelength, and why it is the sharper test.} Sweeping the
+box width samples the neutral curve $\mathrm{Ra}(k)$, whose minimum locates
+$k_c$ independently of any box chosen by hand. Measured: $k_cH=3.1107$
+($-0.20\%$) at $H=16$ and $3.1196$ ($+0.08\%$) at $H=32$, against
+$\mathrm{Ra}_c$ errors of $+3.27\%$ and $+0.65\%$ from the \emph{same} runs ---
+a sixteenfold difference in accuracy at the coarse resolution. The reason is
+structural: the $O(1/H^2)$ error shifts the whole curve vertically in
+$\mathrm{Ra}$, and a vertical shift does not move a vertex sideways. So the
+wavelength is the more discriminating of the two references at modest
+resolution, which inverts how this section previously used them.
+
+\emph{A trap in locating that minimum.} The neutral curve is strongly
+asymmetric --- measured $\mathrm{d}^2\mathrm{Ra}/\mathrm{d}k^2$ of $839$ on the
+low-$k$ side against $393$ on the high-$k$ side, a ratio of $2.13$, reproduced
+as $2.19$ at $H=16$ --- so a parabola fitted across the whole sampled range is
+the wrong model and places the vertex toward the shallower side. It returned
+$k_cH=3.2045$ ($+2.81\%$) where a three-point fit about the minimum gives
+$3.1196$ ($+0.08\%$) and a quartic through all seven gives $3.1085$
+($-0.27\%$). The residual uncertainty is therefore the estimator rather than the
+simulation, and the driver prints the biased global fit beside the local one so
+the size of the bias stays on the record.
+
+\emph{The growth rate.} Near onset $\sigma\propto(\mathrm{Ra}/\mathrm{Ra}_c-1)$,
+which gives two parameter-free predictions: $\sigma$ linear in $\mathrm{Ra}$,
+and a zero crossing at $\mathrm{Ra}_c$. Measured at $H=32$ over
+$1650\le\mathrm{Ra}\le1800$: $R^2=0.999961$, zero crossing $1719.6$ against the
+independently bisected $1718.9$ --- agreement to $0.04\%$ between two unrelated
+routes to the same constant. Extending to $\mathrm{Ra}=2200$ the local slope
+drifts monotonically from $0.335$ to $0.300$ per $50$ in $\mathrm{Ra}$, the
+expected departure from the leading-order result. The slope itself,
+$\mathrm{d}\sigma/\mathrm{d}(\mathrm{Ra}/\mathrm{Ra}_c)=11.28$ per diffusive
+time near onset, is reported as a measurement and has \emph{not} been checked
+against a source. Bracketing only the sign of $\sigma$, which the onset mode
+does, uses one bit of each run by comparison.
+
 \paragraph{Onset.} Linear stability of a rigid--rigid layer gives
 $\mathrm{Ra}_c = 1707.762$ at $k_cH = 3.117$. This is the sharpest single number
 this configuration can be asked for: the buoyancy coupling, both boundary

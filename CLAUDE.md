@@ -307,6 +307,20 @@ Do not spend time on these without saying so first; several are deliberate.
   bounded rather than diverging, so it averages into a plausible number.
   `rb_high_ra` defaults to the regularised operator and keeps `-sop bgk` to
   reproduce the ringing on demand.
+  **Rayleigh-Benard now checks three references, not one** (`-conv`,
+  `-marginal`, `-rate` in `validation/rayleigh_benard.cpp`). Ra_c converges at
+  order **2.36** for the midway wall pair (+0.25% at H=48) and only **1.75** for
+  the on-node pair with twice the error — the curvature slip showing up as a
+  convergence signature, not just an offset. The neutral curve's minimum gives
+  k_c H = 3.1107 (-0.20%) at H=16 and 3.1196 (+0.08%) at H=32, against Ra_c
+  errors of +3.27% and +0.65% from the SAME runs: **k_c is the sharper test**,
+  because the O(1/H^2) error shifts the curve vertically and a vertical shift
+  does not move a vertex sideways. Two traps: locating that minimum with a
+  parabola over the whole sampled range is biased (+2.81% against +0.08% for a
+  local 3-point fit) because the curve is asymmetric by a factor 2.13 in
+  curvature; and the growth rate's zero crossing (1719.6) agrees with the
+  bisected Ra_c (1718.9) to 0.04%, which is a far stronger use of the same runs
+  than bracketing the sign of sigma.
   `demonstrator/rb_high_ra` (Kokkos, D3Q27 CM + D3Q7 BGK) measures where that
   configuration is usable, at 200x100, U_f = 0.05, conductive IC, 100 free-fall
   times: Ra = 1e6 gives Nu_bot/Nu_top = 7.40/7.48, agreeing to 1% and to 7% of

@@ -43,6 +43,8 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace lbm;
 
@@ -62,9 +64,15 @@ struct RB {
 // of depth exactly H, so Ra means the same thing in each:
 //   false -- bounce-back + anti-bounce-back, planes midway at 0.5 and H+0.5;
 //   true  -- regularised + moment, planes ON nodes 0 and H.
+// `aspect` is the box width in units of H, and since the box is periodic it IS
+// the imposed horizontal wavelength: k H = 2 pi / aspect. The default 2.0158 is
+// the critical wavelength, 2 pi / 3.117. Making it a parameter is what turns
+// this from a test of Ra_c into a test of the whole MARGINAL CURVE Ra(k), whose
+// minimum is the second seven-figure number in the problem.
 static RB run(Index H, double Ra, double Pr, Real uc, std::size_t nsteps,
-              bool measure_growth, bool on_node = false) {
-  const Index nx = Index(std::lround(2.0158 * double(H)));   // one critical wavelength
+              bool measure_growth, bool on_node = false,
+              double aspect = 2.0158) {
+  const Index nx = Index(std::lround(aspect * double(H)));
   const Index ny = on_node ? (H + 1) : (H + 2);
 
   const Real nu = Real(double(H) * double(uc) * std::sqrt(Pr / Ra));
@@ -248,6 +256,7 @@ int main(int argc, char** argv) {
     double Pr = 0.71;
     Real uc = Real(0.02);
     bool onset = true, sweep = true, on_node = false, conv = false;
+    bool marginal = false, rate = false;
     for (int i = 1; i < argc; ++i) {
       const std::string a = argv[i];
       if (a == "-h"  && i + 1 < argc) H = std::atoi(argv[++i]);
@@ -257,6 +266,8 @@ int main(int argc, char** argv) {
       if (a == "-nosweep") sweep = false;
       if (a == "-onnode") on_node = true;
       if (a == "-conv") conv = true;
+      if (a == "-marginal") marginal = true;
+      if (a == "-rate") rate = true;
     }
     const Index nxp = Index(std::lround(2.0158 * double(H)));
 
@@ -269,6 +280,19 @@ int main(int argc, char** argv) {
                         : "bounce-back + anti-bounce-back  (planes midway)");
     std::printf("  layer depth exactly H either way, so Ra means the same thing\n\n");
 
+    // The bracket has to hold the whole marginal curve, not just its minimum:
+    // away from k_c the neutral Rayleigh number rises steeply, so [1400, 2100]
+    // is enough for the critical wavelength and not for the wings. 13 halvings
+    // of [1500, 5000] leave 0.43, well inside the O(1/H^2) discretisation.
+    auto find_rac_k = [&](Index Hh, bool onn, double aspect) {
+      double lo = 1500, hi = 5000;
+      for (int it = 0; it < 13; ++it) {
+        const double mid = 0.5 * (lo + hi);
+        const RB r = run(Hh, mid, Pr, uc, 0, true, onn, aspect);
+        if (r.ok && r.growth > 0) hi = mid; else lo = mid;
+      }
+      return 0.5 * (lo + hi);
+    };
     auto find_rac = [&](Index Hh, bool onn) {
       double lo = 1400, hi = 2100;
       for (int it = 0; it < 10; ++it) {
@@ -292,6 +316,179 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
       }
       std::printf("\n  reference Ra_c = 1707.762 (rigid-rigid, k_c H = 3.117)\n\n");
+      Kokkos::finalize();
+      return 0;
+    }
+
+    //=========================================================================
+    // THE MARGINAL CURVE, and its minimum. Linear stability of a rigid-rigid
+    // layer gives a neutral curve Ra(k) with a single minimum,
+    //
+    //     min Ra = 1707.762   at   k_c H = 3.117,
+    //
+    // and BOTH numbers are references. Ra_c alone can be hit by a code that has
+    // the wrong preferred wavelength, because this box only admits k = 2 pi / L
+    // and the case picks L = 2 pi / k_c by hand -- so measuring Ra_c at the
+    // assumed k_c tests one number and assumes the other. Sweeping L measures
+    // the curve, and the LOCATION of its minimum is then an independent check
+    // on k_c that no choice of box width can fake.
+    //
+    // k H is quantised because nx is an integer, so the requested and the
+    // realised k H both print; the fit uses the realised one.
+    //=========================================================================
+    if (marginal) {
+      std::printf("  --- marginal curve Ra(k), and where its minimum lies ---\n");
+      std::printf("  %8s %10s %6s %12s\n", "k H req", "k H", "nx", "Ra_c");
+      std::printf("  %s\n", std::string(40, '-').c_str());
+      std::vector<double> kk, rr;
+      for (double khr : {2.2, 2.6, 3.0, 3.117, 3.4, 3.8, 4.2}) {
+        const double aspect = 2.0 * M_PI / khr;
+        const Index nxk = Index(std::lround(aspect * double(H)));
+        const double kh = 2.0 * M_PI * double(H) / double(nxk);
+        const double rac = find_rac_k(H, on_node, double(nxk) / double(H));
+        std::printf("  %8.3f %10.4f %6d %12.1f\n", khr, kh, int(nxk), rac);
+        std::fflush(stdout);
+        kk.push_back(kh); rr.push_back(rac);
+      }
+      // THE VERTEX MUST BE FITTED LOCALLY, and getting this wrong cost a
+      // factor of thirty in accuracy. A parabola across the whole sampled range
+      // is the WRONG model: the neutral curve is markedly asymmetric -- measured
+      // here, the low-k side is 2.13x steeper in d2Ra/dk2 than the high-k side --
+      // so a global fit trades vertical error against horizontal position and
+      // places the vertex toward the shallower side. On this data it returned
+      // k_c H = 3.2045 (+2.81%) where a three-point fit around the minimum gives
+      // 3.1196 (+0.08%) and a quartic through all seven gives 3.1085 (-0.27%).
+      //
+      // So the answer is the three-point parabola through the lowest sample and
+      // its neighbours -- textbook parabolic interpolation for a minimum -- and
+      // the global fit is printed BESIDE it rather than deleted, because the
+      // size of its bias is the evidence for the asymmetry and someone will
+      // otherwise reach for it again.
+      //
+      // The residual uncertainty is the estimator, not the simulation: the two
+      // sound estimators bracket 3.117 at +0.08% and -0.27%. Sampling the vertex
+      // more finely needs a larger H, because nx is an integer and k H = 2 pi
+      // H / nx is quantised at about 0.05 near the minimum at H = 32.
+      double S[5] = {0, 0, 0, 0, 0}, T[3] = {0, 0, 0};
+      for (std::size_t i = 0; i < kk.size(); ++i) {
+        double x = kk[i], p = 1.0;
+        for (int j = 0; j < 5; ++j) { S[j] += p; p *= x; }
+        T[0] += rr[i]; T[1] += rr[i] * x; T[2] += rr[i] * x * x;
+      }
+      // solve the 3x3 normal equations by Cramer
+      const double M[3][3] = {{S[0], S[1], S[2]}, {S[1], S[2], S[3]}, {S[2], S[3], S[4]}};
+      auto det3 = [](const double m[3][3]) {
+        return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+             - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+             + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+      };
+      const double D0 = det3(M);
+      double c[3];
+      for (int j = 0; j < 3; ++j) {
+        double Mj[3][3];
+        for (int r2 = 0; r2 < 3; ++r2)
+          for (int c2 = 0; c2 < 3; ++c2) Mj[r2][c2] = (c2 == j) ? T[r2] : M[r2][c2];
+        c[j] = det3(Mj) / D0;
+      }
+      const double kglob = -c[1] / (2.0 * c[2]);
+
+      // Three-point parabola about the lowest sample: the local, unbiased one.
+      std::size_t im = 0;
+      for (std::size_t i = 1; i < rr.size(); ++i) if (rr[i] < rr[im]) im = i;
+      if (im == 0) im = 1;
+      if (im + 1 >= rr.size()) im = rr.size() - 2;
+      auto vertex3 = [&](std::size_t i) {
+        const double x1 = kk[i - 1], x2 = kk[i], x3 = kk[i + 1];
+        const double y1 = rr[i - 1], y2 = rr[i], y3 = rr[i + 1];
+        const double den = (x1 - x2) * (x1 - x3) * (x2 - x3);
+        const double A = (x3 * (y2 - y1) + x2 * (y1 - y3) + x1 * (y3 - y2)) / den;
+        const double B = (x3 * x3 * (y1 - y2) + x2 * x2 * (y3 - y1)
+                        + x1 * x1 * (y2 - y3)) / den;
+        const double C = y2 - A * x2 * x2 - B * x2;
+        const double xv = -B / (2.0 * A);
+        return std::pair<double, double>{xv, A * xv * xv + B * xv + C};
+      };
+      const auto [kmin, ramin] = vertex3(im);
+      // Curvature of each wing, which is the evidence that a global fit is wrong.
+      const double cl = (kk.size() >= 3) ? vertex3(1).first : 0.0;
+      double dlo = 0, dhi = 0;
+      {
+        const double x1 = kk[0], x2 = kk[1], x3 = kk[2];
+        const double y1 = rr[0], y2 = rr[1], y3 = rr[2];
+        dlo = 2.0 * ((y3 - y2) / (x3 - x2) - (y2 - y1) / (x2 - x1)) / (x3 - x1);
+        const std::size_t n2 = kk.size();
+        const double u1 = kk[n2 - 3], u2 = kk[n2 - 2], u3 = kk[n2 - 1];
+        const double v1 = rr[n2 - 3], v2 = rr[n2 - 2], v3 = rr[n2 - 1];
+        dhi = 2.0 * ((v3 - v2) / (u3 - u2) - (v2 - v1) / (u2 - u1)) / (u3 - u1);
+      }
+      (void)cl;
+      std::printf("\n  vertex, 3 points about the minimum (THE answer):\n");
+      std::printf("    k_c H = %.4f   (reference 3.117, %+.2f%%)\n",
+                  kmin, 100.0 * (kmin - 3.117) / 3.117);
+      std::printf("    Ra_c  = %.1f    (reference 1707.762, %+.2f%%)\n",
+                  ramin, 100.0 * (ramin - 1707.762) / 1707.762);
+      std::printf("\n  for the record, a parabola fitted to ALL points gives\n");
+      std::printf("    k_c H = %.4f   (%+.2f%%)  -- BIASED, see the banner\n",
+                  kglob, 100.0 * (kglob - 3.117) / 3.117);
+      std::printf("    because the curve is asymmetric: d2Ra/dk2 = %.0f on the low-k\n"
+                  "    side against %.0f on the high-k side, a ratio of %.2f\n",
+                  dlo, dhi, dhi != 0.0 ? dlo / dhi : 0.0);
+      std::printf("\n  NOTE the two references are contaminated DIFFERENTLY. The O(1/H^2)\n"
+                  "  error shifts the whole curve up in Ra, and a vertical shift does not\n"
+                  "  move a vertex sideways -- so k_c is good to ~0.1%% here where Ra_c is\n"
+                  "  only good to %+.2f%%. The preferred wavelength is the sharper test of\n"
+                  "  the two at modest resolution, which is the opposite of how this file\n"
+                  "  used them before: Ra_c as the headline and k_c baked into the box.\n\n",
+                  100.0 * (ramin - 1707.762) / 1707.762);
+      Kokkos::finalize();
+      return 0;
+    }
+
+    //=========================================================================
+    // THE GROWTH RATE AGAINST LINEAR THEORY, in the one way that needs no
+    // remembered coefficient.
+    //
+    // Near onset the linear growth rate is proportional to the supercriticality,
+    // sigma = A (Ra/Ra_c - 1) + O(...)^2, and it must pass through ZERO exactly
+    // at Ra_c. Two parameter-free predictions follow: sigma is linear in Ra, and
+    // its zero crossing is the SAME Ra_c the bisection finds independently. The
+    // slope A is a genuine reference number too, but not one this file asserts
+    // from memory -- it is reported as a measurement, for checking against a
+    // source rather than against itself. Bracketing the sign of sigma, which is
+    // all -onset does, is much weaker: it uses one bit of each run.
+    //=========================================================================
+    if (rate) {
+      std::printf("  --- growth rate vs supercriticality, at k H = 3.117 ---\n");
+      std::printf("  %10s %10s %16s\n", "Ra", "Ra/Ra_c", "d ln E / dt");
+      std::printf("  %s\n", std::string(40, '-').c_str());
+      std::vector<double> xr, yr;
+      for (double Ra : {1650.0, 1700.0, 1750.0, 1800.0, 1900.0, 2000.0, 2200.0}) {
+        const RB r = run(H, Ra, Pr, uc, 0, true, on_node);
+        if (!r.ok) { std::printf("  %10.0f %10.3f %16s\n", Ra, Ra / 1707.762, "unusable"); continue; }
+        std::printf("  %10.0f %10.3f %16.5f\n", Ra, Ra / 1707.762, r.growth);
+        std::fflush(stdout);
+        xr.push_back(Ra); yr.push_back(r.growth);
+      }
+      const std::size_t n = xr.size();
+      double sx = 0, sy = 0, sxx = 0, sxy = 0;
+      for (std::size_t i = 0; i < n; ++i)
+        { sx += xr[i]; sy += yr[i]; sxx += xr[i] * xr[i]; sxy += xr[i] * yr[i]; }
+      const double m = (double(n) * sxy - sx * sy) / (double(n) * sxx - sx * sx);
+      const double b0 = (sy - m * sx) / double(n);
+      double ss = 0, rs = 0; const double ybar = sy / double(n);
+      for (std::size_t i = 0; i < n; ++i)
+        { ss += (yr[i] - ybar) * (yr[i] - ybar);
+          rs += (yr[i] - (m * xr[i] + b0)) * (yr[i] - (m * xr[i] + b0)); }
+      const double zero = -b0 / m;
+      const double rac_bis = find_rac(H, on_node);
+      std::printf("\n  least squares:    R^2 = %.5f   (linear in Ra, as theory requires)\n",
+                  1.0 - rs / ss);
+      std::printf("  zero crossing:    Ra = %.1f\n", zero);
+      std::printf("  bisected Ra_c:    Ra = %.1f    the two agree to %+.2f%%\n",
+                  rac_bis, 100.0 * (zero - rac_bis) / rac_bis);
+      std::printf("  slope d sigma/d(Ra/Ra_c) = %.4f per diffusive time"
+                  "  (MEASURED, not checked against a source)\n\n",
+                  m * 1707.762);
       Kokkos::finalize();
       return 0;
     }
