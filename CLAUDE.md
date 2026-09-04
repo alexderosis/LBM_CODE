@@ -347,6 +347,21 @@ Do not spend time on these without saying so first; several are deliberate.
   and Nu_vol carries H/D = 1.7e8 at Ra = 1e14, so it is pure amplified noise
   unless it is far above its floor -- believe the two plate estimators when they
   agree with each other.
+  **FP16 population storage was measured and rejected** (2026-09-04).
+  `-DLBM_STORE16_EMULATE=ON` quantises on the way into the existing FP32 array,
+  so it costs memory nothing, buys speed nothing, and reproduces the arithmetic
+  exactly — the accuracy question answered with no GPU and no layout change.
+  Result: host_check 0 -> 2 failures, host_physics 0 -> 30. The sharp number is
+  newpaths' shear decay WITH the shift on: FP16 gives 0.0071934 against 0.005217
+  at A = 1e-2 (38% off) and -0.966 at A = 1e-5, where RAW FP32 gives -0.968 —
+  i.e. **FP16 storage costs exactly what removing the shift costs**. The
+  arithmetic predicts it: FP16 loses 2^13 = 3.9 decimal digits, the shift buys
+  1/(3u) = 0.8 digits at u = 0.05, and they cancel at u = 4.1e-05, which is
+  where the measurement crosses over. This does not refute FluidX3D — it uses a
+  custom 16-bit layout (~0.9 digits back, still 2.2 short) and targets
+  percent-level accuracy, whereas this tree asserts Poiseuille x H^2 to three
+  digits and mass drift of exactly zero. The trade is 1.7x traffic for the
+  accuracy standard; the flag is kept as a standing instrument for retrying it.
   One property to know rather than a gap: **regularised walls are not mass
   conserving**, since BC3 overwrites populations. A closed box holds its mass
   exactly; a driven cavity leaks linearly and does not saturate (−1.7e-2 over

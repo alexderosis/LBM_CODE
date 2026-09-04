@@ -198,6 +198,102 @@ inline std::uint8_t unknown_mask(int x, int y, int z, int nx, int ny, int nz,
   return m;
 }
 
+//==============================================================================
+//  FP16 STORAGE, EMULATED -- the accuracy half of the mixed-precision question,
+//  answered before any memory layout changes and without FP16 hardware.
+//
+//  A real implementation would store the populations as 16-bit and compute in
+//  32-bit, roughly halving the traffic of a kernel this tree has measured at
+//  64% of a T4's peak bandwidth: 328 -> 192 B per cell per step for the coupled
+//  fluid and D3Q7 scalar, so about 1.7x. The question is what it costs in
+//  accuracy, and that does NOT need the layout change: quantising the value on
+//  its way INTO the existing 32-bit array reproduces the arithmetic exactly,
+//  because memory then holds only FP16-representable numbers. Zero speed-up,
+//  full accuracy effect, and it runs on a laptop.
+//
+//  ON STORE ONLY, deliberately. Loads need no quantisation because what is in
+//  memory is already quantised; wrapping them too would round twice and
+//  overstate the damage.
+//
+//  WHY IT MIGHT NOT WORK, so the measurement has something to refute. FP16
+//  carries 10 explicit mantissa bits, a relative precision of 4.88e-04. Shifted
+//  storage (g_i = f_i - w_i, see core.cuh) is what makes this plausible at all:
+//  it spends those bits on the DEVIATION rather than on the w_i ~ 0.03 pedestal.
+//  But the physically meaningful part of g_i is the non-equilibrium part that
+//  carries the viscous stress, and to order of magnitude
+//
+//      f_neq / g  ~  cs^2 (tau - 1/2) / L,
+//
+//  which equals 4.88e-04 at Re ~ 100 independently of L. A naive per-cell
+//  reading of that says FP16 cannot see the stress above Re ~ 100 at all.
+//  FluidX3D runs far higher Re in FP16, so the naive reading must be too strict
+//  -- the storage error is zero-mean and the hydrodynamic limit averages it over
+//  cells and steps. Which of those wins is an empirical question and this switch
+//  exists to settle it.
+//
+//  THE INSTRUMENT IS ALREADY CALIBRATED. Raw (unshifted) FP32 storage broke the
+//  Poiseuille error x H^2 constant -- 0.336 at H = 16 drifting to 0.498 at
+//  H = 32 -- and shifted storage was added to fix it. So that constant is known
+//  to be sensitive to storage precision at exactly this level, and it is the
+//  first place damage will show.
+//
+//  This quantises EVERY population array that goes through these functions --
+//  fluid, scalar, magnetic, phase field -- which is the honest "what if all
+//  storage were 16-bit" question rather than a fluid-only one.
+//
+//  ======================= THE ANSWER, MEASURED ==============================
+//  NO-GO for plain IEEE binary16, and the reason is arithmetic rather than
+//  circumstantial. Host suites, FP32 against FP16-emulated storage:
+//
+//      host_check     0 failures  ->   2
+//      host_physics   0 failures  ->  30
+//
+//  The sharp one is newpaths' shear-decay error, because it is the test the
+//  tree already used to justify shifted storage. With the shift ON:
+//
+//      A = 1e-2    FP32  0.0052153      FP16  0.0071934   (38% off)
+//      A = 1e-5    FP32  0.0052145      FP16 -0.965987    (signal gone)
+//      A = 1e-5    raw FP32            -0.967929
+//
+//  FP16-with-shift at A = 1e-5 lands on -0.966 where raw FP32 lands on -0.968.
+//  That is the whole finding: FP16 STORAGE COSTS EXACTLY WHAT REMOVING THE
+//  SHIFT COSTS. It hands back the precision shifted storage was added to
+//  recover.
+//
+//  The arithmetic, which predicts it: FP16 loses 2^13 = 8192 against FP32, i.e.
+//  3.9 decimal digits. The shift buys 1/(3u), because the stored deviation is
+//  g/f ~ 3u -- 0.8 digits at u = 0.05, 1.5 at u = 0.01. So at any useful
+//  velocity the shift returns about a fifth of what FP16 takes, and the two
+//  cancel exactly at 1/(3u) = 8192, u = 4.1e-05. The measurement crosses over
+//  at A = 1e-5. Same mechanism, no fitting.
+//
+//  WHY FLUIDX3D IS NOT REFUTED BY THIS, and it is worth being clear. It does
+//  not store plain binary16: it uses a custom 16-bit layout that spends fewer
+//  bits on the exponent, since populations have a narrow dynamic range -- worth
+//  perhaps 0.9 digits, which still leaves 2.2 short at u = 0.05. The larger
+//  difference is the accuracy STANDARD. This tree asserts a Poiseuille
+//  error x H^2 constant to three digits, cross-code energy agreement to 5.3e-04
+//  and mass drift of exactly 0.000e+00. A code targeting percent-level
+//  engineering accuracy passes its own tests in FP16 and would fail every one
+//  of those. So the real question is not technical: it is whether a 1.7x is
+//  worth lowering the bar, and at the moment the bar is the asset.
+//
+//  KEPT rather than deleted, because it is a cheap standing instrument: if the
+//  shift baseline ever changes, or a custom 16-bit format is tried, this is how
+//  to find out whether it helped without touching a memory layout or a GPU.
+//  ===========================================================================
+#if defined(LBM_STORE16_EMULATE)
+LBM_HD LBM_INLINE Real q16(Real v) {
+#if defined(__CUDA_ARCH__)
+  return Real(__half2float(__float2half(float(v))));
+#else
+  return Real(float(_Float16(float(v))));
+#endif
+}
+#else
+LBM_HD LBM_INLINE Real q16(Real v) { return v; }
+#endif
+
 //------------------------------------------------------------------------------
 // Esoteric Pull load / store, templated on parity so there is no runtime test
 // inside the hot loop.
@@ -212,8 +308,8 @@ LBM_HD LBM_INLINE void load_pair(const Real* f, long N, long self, long nb,
 template <int Parity>
 LBM_HD LBM_INLINE void store_pair(Real* f, long N, long self, long nb,
                                   int i, Real a, Real b) {
-  if (Parity == 0) { f[long(i + 1) * N + nb] = a;  f[long(i) * N + self]     = b; }
-  else             { f[long(i) * N + nb]     = a;  f[long(i + 1) * N + self] = b; }
+  if (Parity == 0) { f[long(i + 1) * N + nb] = q16(a);  f[long(i) * N + self]     = q16(b); }
+  else             { f[long(i) * N + nb]     = q16(a);  f[long(i + 1) * N + self] = q16(b); }
 }
 
 //------------------------------------------------------------------------------
@@ -248,11 +344,11 @@ template <int Parity, class L = D3Q27>
 LBM_HD LBM_INLINE void init_scatter(Real* f, long N, int x, int y, int z,
                                     int nx, int ny, int nz, const Real* in) {
   const long self = node_id(x, y, z, nx, ny);
-  f[self] = in[0];
+  f[self] = q16(in[0]);
   for (int i = 1; i < L::Q; i += 2) {
     const long nb = neighbour<L>(x, y, z, i, nx, ny, nz);
-    if (Parity == 0) { f[long(i) * N + self]     = in[i]; f[long(i + 1) * N + nb] = in[i + 1]; }
-    else             { f[long(i + 1) * N + self] = in[i]; f[long(i) * N + nb]     = in[i + 1]; }
+    if (Parity == 0) { f[long(i) * N + self]     = q16(in[i]); f[long(i + 1) * N + nb] = q16(in[i + 1]); }
+    else             { f[long(i + 1) * N + self] = q16(in[i]); f[long(i) * N + nb]     = q16(in[i + 1]); }
   }
 }
 
@@ -260,7 +356,7 @@ template <int Parity, class L = D3Q27>
 LBM_HD LBM_INLINE void scatter(Real* f, long N, int x, int y, int z,
                                int nx, int ny, int nz, const Real* in) {
   const long self = node_id(x, y, z, nx, ny);
-  f[self] = in[0];
+  f[self] = q16(in[0]);
   for (int i = 1; i < L::Q; i += 2) {
     const long nb = neighbour<L>(x, y, z, i, nx, ny, nz);
     store_pair<Parity>(f, N, self, nb, i, in[i], in[i + 1]);

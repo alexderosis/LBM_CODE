@@ -39,6 +39,11 @@ endif()
 
 set(LBM_GPU_ARCH "75" CACHE STRING "CUDA architecture, e.g. 75 for a T4")
 option(LBM_DOUBLE "Build in FP64 (slow on consumer cards)" OFF)
+# Emulated 16-bit population STORAGE with 32-bit arithmetic: quantises on the
+# way into the existing 32-bit array, so it costs memory nothing and buys speed
+# nothing. It exists to measure the accuracy of the mixed-precision scheme
+# before implementing it -- see the banner in include/lbm/streaming.cuh.
+option(LBM_STORE16_EMULATE "Emulate FP16 population storage (accuracy probe)" OFF)
 option(LBM_PTXAS_VERBOSE "Report registers and spills per kernel" OFF)
 # OFF BY DEFAULT, ON PRECAUTIONARY GROUNDS -- AND THE MEASUREMENT SAYS SO
 # EXPLICITLY, BECAUSE THE FIRST VERSION OF THIS NOTE CLAIMED MORE THAN IT COULD.
@@ -73,6 +78,10 @@ endif()
 
 add_library(lbm_cuda_core INTERFACE)
 target_include_directories(lbm_cuda_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(LBM_STORE16_EMULATE)
+  target_compile_definitions(lbm_cuda_core INTERFACE LBM_STORE16_EMULATE)
+  message(STATUS "LBM: emulating FP16 population storage (accuracy probe, no speed-up)")
+endif()
 if(LBM_DOUBLE)
   target_compile_definitions(lbm_cuda_core INTERFACE LBM_DOUBLE)
 endif()
