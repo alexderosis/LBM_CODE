@@ -76,10 +76,18 @@ the root or set `M3LB_ROOT`; both scripts check and fail with the fix printed.
 
 ```bash
 cd ~/scratch/M3LB
-sbatch GPU/csf3/cmbench.sub             # do this first: under a minute
-sbatch GPU/csf3/rb_cold.sub             # the Ra = 1e11 array, three resolutions
-sbatch --array=0 GPU/csf3/rb_cold.sub   # or just the H = 498 replication
+sbatch GPU/csf3/cmbench.sub                          # first: under a minute
+sbatch --array=0 GPU/csf3/rb_cold.sub                # H = 498,  ~5 min
+sbatch --array=1 GPU/csf3/rb_cold.sub                # H = 998,  ~45 min
+sbatch --array=2 --time=12:00:00 GPU/csf3/rb_cold.sub  # H = 1998, ~6 h
 ```
+
+**Ask for the wallclock you need, not the maximum.** SLURM backfills short jobs
+into gaps ahead of long ones, so a 1-day request can only start when a 1-day
+hole opens. Submitting the 45-minute H = 998 element with `-t 1-0` got it
+scheduled to start **sixteen hours later** with reason `(Priority)`; at
+`--time=2:00:00` it schedules against a two-hour hole instead. The script now
+defaults to 2 h, which covers elements 0 and 1; element 2 must override.
 
 ### Checking on it
 

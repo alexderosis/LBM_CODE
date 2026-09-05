@@ -56,15 +56,29 @@
 #  failure being studied is a boundary-layer one and there is no reason to add
 #  a second error to it. Build with -DLBM_DOUBLE=ON.
 #
-#    sbatch rb_cold.sub                 # all three
-#    sbatch --array=0 rb_cold.sub       # just the H = 498 replication
+#  ASK FOR THE WALLCLOCK YOU NEED, NOT THE MAXIMUM. This cost sixteen hours of
+#  queue on the first try. SLURM backfills short jobs into gaps ahead of long
+#  ones, so a 1-day request can only start when a 1-day hole opens: element 1,
+#  which runs for 45 minutes, was scheduled to START 16 hours after submission
+#  with reason (Priority). Resubmitted at --time=2:00:00 it schedules against a
+#  two-hour hole instead. The three elements here differ by 70x in cost, and one
+#  array shares one -t, so the default covers 0 and 1 and element 2 is expected
+#  to override it.
+#
+#    sbatch --array=0 rb_cold.sub                    # H = 498,  ~5 min
+#    sbatch --array=1 rb_cold.sub                    # H = 998,  ~45 min
+#    sbatch --array=2 --time=12:00:00 rb_cold.sub    # H = 1998, ~6 h
+#    sbatch --array=0,1 rb_cold.sub                  # the cheap pair together
 #==============================================================================
 #SBATCH -p gpuA                # A100 80GB, open to all users.
                                # gpuH = H200 141GB but access is RESTRICTED;
                                # gpuL = L40S, AVOID -- Ada is 1/64 FP64.
 #SBATCH -G 1                   # one GPU: no MPI, no multi-GPU
 #SBATCH -c 4                   # host cores (up to 12 per GPU on gpuA, 8 on gpuH)
-#SBATCH -t 1-0                 # 1 day; H=1998 is ~6 h at 1.5 GLUPS. Max 4-0.
+#SBATCH -t 2:00:00             # ASK FOR WHAT YOU NEED -- see the note below.
+                               # Covers elements 0 (~5 min) and 1 (~45 min).
+                               # Element 2 needs --time=12:00:00 on the command
+                               # line; the cap on gpuA is 4-0.
 #SBATCH -a 0-2                 # the three resolutions below
 #SBATCH -J rbcold
 #SBATCH -o rbcold-%A_%a.log
