@@ -190,6 +190,40 @@ ffmpeg -y -framerate 10 -pattern_type glob -i 'png/T_*.png' \
 first row at the top, so the raw image has the HOT plate at the top and the
 plumes falling. Without the flip the physics reads upside down.
 
+### ParaView
+
+`doc/fig/bin2vtk.py` converts the dumps to legacy VTK, which ParaView opens
+directly. Pure stdlib, and the output is the same size as the input rather than
+the ~5x an ASCII VTK costs:
+
+```bash
+cd runs/rb_cold_h998
+python3 ../../doc/fig/bin2vtk.py --glob 'rb_cold_h998_T_*.bin' \
+        --out h998 --pair rb_cold_h998_u
+```
+
+That writes `h998_0000.vtk .. h998_00NN.vtk`, each carrying **both** scalars --
+`Temperature` and `Speed` -- so you can switch fields in ParaView without
+reloading. Open the collapsed name (`h998_..vtk`) in the file dialog and
+ParaView groups them as a time series with the animation controls live.
+
+Two things the script exists to get right. Legacy VTK binary is specified
+**big-endian** whatever machine wrote it; native little-endian floats produce a
+file ParaView opens without complaint and renders as values around 1e-40 and
+1e38, which looks like a diverged simulation rather than a byte-order mistake.
+And the dumps carry a two-`int32` header that a raw reader has to be told to
+skip.
+
+If you would rather not convert, ParaView's **Raw (binary) Files** reader can
+open a `.bin` directly: Data Extent `0 nx-1  0 ny-1  0 0`, Scalar Type `float`,
+Byte Order `LittleEndian`, **Header Size `8`**. That last one is the two int32s;
+without it the first two values are read as floats and the field is shifted by
+two cells.
+
+The driver's own `-vtk` flag also writes real VTK, but ASCII and only if you
+decide before the run: ~40 MB per frame at 2004 x 1000 against 8 MB for the
+binary dump.
+
 For the linear phase the raw field is useless — the perturbation is four orders
 below the mean profile. Render the departure from the horizontal average
 instead, `T'(x,y) = T(x,y) − ⟨T⟩ₓ(y)`, with the diverging map:
