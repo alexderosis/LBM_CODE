@@ -1,0 +1,77 @@
+#!/bin/bash --login
+#==============================================================================
+#  cmbench on a GPU -- the one experiment that has been blocked on hardware.
+#
+#  RUN THIS BEFORE THE RAYLEIGH-BENARD ARRAY. It is under a minute and it
+#  answers a question that has been open since the port.
+#
+#  THE QUESTION. `src/`'s central-moment operator is unusable on a GPU: two
+#  MomentCollision configurations did not finish 50 steps at 64^3 in SEVENTEEN
+#  MINUTES on a T4, where BGK took 0.03 s. That is roughly four orders of
+#  magnitude and the campaign, the aorta and rb_high_ra all run central
+#  moments -- so the ~447 MLUPS BGK figure is NOT this code's GPU throughput
+#  and must not be quoted as such.
+#
+#  WHAT HAS BEEN RULED OUT, all without a GPU:
+#    * the scheme        GPU/'s independent CUDA central moments runs at 99.6%
+#                        of BGK on the same T4;
+#    * the arithmetic    validation/cmbench puts it at 2.18x BGK on four host
+#                        threads -- an unremarkable price for a 27-moment
+#                        transform, and four orders from the device figure;
+#    * register spilling `-Xptxas -v` reported zero spills, 96-byte frame --
+#                        though see below, that figure did not describe this
+#                        kernel.
+#
+#  A MECHANISM WAS FOUND ON 2026-09-04 IN COMPILER OUTPUT and removed: one loop
+#  in collide() did not unroll, so the basis's 432-byte exponent table went to
+#  memory, the p it returned indexed Qf/Aw, and the 27-moment array followed.
+#  Frame bytes, arm64 clang, FP64: BGK 0, MomentCollision 464 before and 368
+#  after, with the live loop and every register-indexed access gone. On a CPU
+#  that frame is L1-resident and costs ~nothing (cmbench reads 20.0 -> 20.2
+#  MLUPS across the fix); in DEVICE code it is per-thread LOCAL memory, i.e.
+#  off-chip DRAM with every subscript uncoalesced, and this tree has measured
+#  that exact mechanism at 47x in GPU/'s colour gradient.
+#
+#  SO THIS RUN IS THE VERDICT, and three outcomes mean three different things:
+#    ~2x BGK    the fix landed; the collapse is closed.
+#    ~50x       local-memory traffic remains -- look at ColourGradient, which
+#               still has the largest frame in the tree and needs the
+#               closed-form derivation rather than loop unrolling.
+#    ~1e4x      something else entirely is happening and the local-memory
+#               story was the wrong tree.
+#
+#  IT CANNOT HANG, which is the point of using cmbench rather than a real case.
+#  48^3 x 60 steps is 6.6e6 cell-updates, about 1.3 ms at an A100's BGK rate,
+#  so even a four-orders-slower operator finishes inside a minute. The original
+#  "did not finish in seventeen minutes" was a TIMEOUT, not a measurement, on a
+#  shared machine with documented throttling -- this replaces it with a number.
+#
+#  NOTE THIS BUILDS THE KOKKOS TREE, not GPU/. They are separate CMake
+#  projects; cmbench lives in the parent's validation/.
+#
+#    cd $SCRATCH/M3LB
+#    cmake -S . -B build-gpu -DCMAKE_BUILD_TYPE=Release \
+#          -DLBM_GPU_BACKEND=cuda -DLBM_GPU_ARCH=AMPERE80 -DLBM_PRECISION=float
+#    cmake --build build-gpu -j4 --target cmbench
+#    sbatch GPU/csf3/cmbench.sub
+#
+#  AMPERE80 for the A100, HOPPER90 for an H200. Note this one is FP32: the
+#  question is operator throughput, not accuracy, and FP32 is the precision the
+#  original 447 MLUPS BGK figure was measured in, so it is the comparable one.
+#==============================================================================
+#SBATCH -p gpuA
+#SBATCH -G 1
+#SBATCH -c 2
+#SBATCH -t 0-0:20              # twenty minutes is generous by three orders
+#SBATCH -J cmbench
+#SBATCH -o cmbench-%j.log
+
+set -euo pipefail
+
+module purge
+module load libs/cuda/12.8.1
+
+cd "$SLURM_SUBMIT_DIR/../.."   # repo root: cmbench is the parent tree's
+nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+
+./build-gpu/validation/cmbench

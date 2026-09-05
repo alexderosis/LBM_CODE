@@ -1,0 +1,88 @@
+#!/bin/bash --login
+#==============================================================================
+#  Rayleigh-Benard, Ra = 1e11, COLD start -- three resolutions as a job array.
+#
+#  This is the case that FAILED on four CPU threads. demonstrator/rb_high_ra
+#  (the Kokkos twin) at H = 498, Ra = 1e11, conductive start ran 25 free-fall
+#  times in three hours and then halted on the maximum principle: T reached
+#  1.1897 against a physical maximum of 0.5, with Nu_bot = 80.4 against
+#  Nu_top = 57.4 -- a 40% disagreement, so nothing in it was quotable. The
+#  failure was in the BOTTOM boundary layer (0.69 dT above the hot plate
+#  against 0.046 below the cold one) and it was abrupt: the overshoot ran
+#  0.0046, 0.0089, 0.0170, then 0.690 in successive free-fall times.
+#
+#  H = 498 IS NOT ENOUGH FOR Ra = 1e11, and the tree's own sizing rule did not
+#  predict that. Ra_max ~ (H/0.28)^(1/0.29) gives 1.6e11 at H = 498, so 1e11
+#  sat at 62% of it and should have been fine. That formula is built from the
+#  NUSSELT CEILING -- a resolution criterion -- and this run says it does not
+#  predict stability at nonlinear onset. Treat it as a guide to whether Nu is
+#  representable, not to whether the run survives.
+#
+#  Hence the array: the same case at H = 498, 998 and 1998. The first
+#  reproduces the CPU run exactly (1000 x 500, so it is a cross-code check of
+#  a known failure, which is worth more than a third resolution would be); the
+#  other two are the refinement. One resolution cannot separate scheme error
+#  from grid error, which is the hole this whole exercise exists to close.
+#
+#  ASPECT IS 2.008, NOT 2. That is 1000/498 -- it makes the H = 498 element
+#  exactly the grid the CPU run used, and keeps all three self-consistent. The
+#  single-critical-cell aspect is 2 pi / k_c H = 2.0158 if you would rather
+#  seed exactly one critical cell; -aspect is a double, so either is
+#  expressible. It was an int until 2026-09-04 and silently truncated both.
+#
+#  WHAT TO WATCH, in order:
+#    1. T_min / T_max. Outside [0, 1] is the scheme failing and nothing else.
+#       Lines outside are marked `!`; the run halts at twice the range. The
+#       final line states the worst excursion and whether it recovered -- a run
+#       that COMPLETED is not thereby a run that stayed in bounds.
+#    2. Nu_bot against Nu_top. They must agree with each other. Their
+#       disagreement is the error bar, and it is the reason for the array.
+#    3. Nu_vol only when it is far above Nu_floor AND not flipping sign. It
+#       carries a factor H/alpha and is mostly amplified noise below that.
+#
+#  A COLD START IS THE REFERENCE'S, and it is not free: the whole dT sits
+#  across the bottom half cell at t = 0, so T leaves its bounds while the D3Q7
+#  scalar smooths the step. The driver grants a grace window of exactly the
+#  time that takes -- 16/(alpha t_ff) free-fall times, 17.2 / 4.3 / 1.1 for the
+#  three H here -- and REFUSES one where that would exceed a quarter of the
+#  run. nan and max|u| > 1 halt at any time regardless.
+#
+#  ONE GPU. GPU/ has no MPI and no multi-GPU, so -G 1 always. Asking for a
+#  whole node idles three A100s (or seven H200s) and queues far longer.
+#
+#  FP64 IS NOT OPTIONAL HERE. nu = U H sqrt(Pr/Ra) puts tau - 1/2 at 2.0e-04
+#  (H = 498) to 8.0e-04 (H = 1998); the FP32 spacing at 0.5 is 5.96e-08, so
+#  FP32 quantises nu by a few tenths of a per cent -- tolerable, but the
+#  failure being studied is a boundary-layer one and there is no reason to add
+#  a second error to it. Build with -DLBM_DOUBLE=ON.
+#
+#    sbatch rb_cold.sub                 # all three
+#    sbatch --array=0 rb_cold.sub       # just the H = 498 replication
+#==============================================================================
+#SBATCH -p gpuA                # A100 80GB, open to all users.
+                               # gpuH = H200 141GB but access is RESTRICTED;
+                               # gpuL = L40S, AVOID -- Ada is 1/64 FP64.
+#SBATCH -G 1                   # one GPU: no MPI, no multi-GPU
+#SBATCH -c 4                   # host cores (up to 12 per GPU on gpuA, 8 on gpuH)
+#SBATCH -t 1-0                 # 1 day; H=1998 is ~6 h at 1.5 GLUPS. Max 4-0.
+#SBATCH -a 0-2                 # the three resolutions below
+#SBATCH -J rbcold
+#SBATCH -o rbcold-%A_%a.log
+#SBATCH --mail-type=END,FAIL
+
+set -euo pipefail
+
+module purge
+module load libs/cuda/12.8.1   # check `module avail cuda` if this has moved
+
+H_LIST=(498 998 1998)          # 1000x500, 2004x1000, 4012x2000
+OUT_LIST=(1 2 5)               # dump cadence, chosen to keep each run ~1 GB
+H=${H_LIST[$SLURM_ARRAY_TASK_ID]}
+OUT=${OUT_LIST[$SLURM_ARRAY_TASK_ID]}
+
+cd "$SLURM_SUBMIT_DIR"
+nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+
+echo "=== H = $H, Ra = 1e11, cold start, -out $OUT ==="
+../build/rb_high_ra -h "$H" -aspect 2.008 -ra 1e11 -pr 0.71 -u 0.05 \
+                    -ic cold -tf 100 -out "$OUT" -dump "rb_cold_h${H}"

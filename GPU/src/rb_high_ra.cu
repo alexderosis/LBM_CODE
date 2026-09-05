@@ -404,10 +404,19 @@ int main(int argc, char** argv) {
   //
   //      t_smooth = 16 / alpha   steps  =  16 / (alpha t_ff)  free-fall times,
   //
-  //  and the window is 4x that, printed at startup with both numbers so it can
-  //  be checked rather than trusted. It is ZERO for `cond`, which starts inside
-  //  its bounds and should still be held to them from step 0. `-grace` overrides
-  //  either way, and `-grace 0` restores the old behaviour exactly.
+  //  and the window is EXACTLY that, printed at startup so it can be checked
+  //  rather than trusted: the halt is suppressed for precisely as long as the
+  //  step is still sharper than four cells, and not one free-fall time longer.
+  //  The first version used 4x t_smooth, which is padding with no argument
+  //  behind it, and the padding is what did the damage -- at H = 498,
+  //  Ra = 1e11, tf = 100 the step smooths in 17 t_ff, comfortably 17% of the
+  //  run, yet 4x17 = 69 t_ff tripped the refusal below and the message then
+  //  blamed the physics for a multiplier this file had chosen. A window with a
+  //  meaning beats a window with a safety factor.
+  //
+  //  It is ZERO for `cond`, which starts inside its bounds and should still be
+  //  held to them from step 0. `-grace` overrides either way, and `-grace 0`
+  //  restores the old behaviour exactly.
   //
   //  A WINDOW IS ONLY LEGITIMATE IF THE EXCURSION IS ACTUALLY TRANSIENT, and
   //  whether it is depends on the parameters, not on the scheme. t_smooth
@@ -437,7 +446,7 @@ int main(int argc, char** argv) {
   const double t_smooth_tff = 16.0 / (alpha * t_ff);
   bool grace_refused = false;
   if (grace < 0.0) {
-    grace = (ic == "cold") ? 4.0 * t_smooth_tff : 0.0;
+    grace = (ic == "cold") ? t_smooth_tff : 0.0;
     if (grace > 0.25 * tf) { grace = 0.0; grace_refused = true; }
   }
 
@@ -485,21 +494,21 @@ int main(int argc, char** argv) {
               T_cold - slack * dT, T_hot + slack * dT, slack);
   if (grace_refused)
     std::printf(", enforced from step 0.\n"
-                "     ** GRACE WINDOW REFUSED. The step needs %.3g t_ff to diffuse over "
+                "     ** GRACE WINDOW REFUSED: the step needs %.3g t_ff to diffuse over "
                 "four cells,\n"
-                "        which is %.0fx this whole run: at these parameters a cold start "
-                "is NOT a\n"
-                "        transient -- the undershoot is permanent and the halt is right, "
-                "so this run\n"
-                "        will stop early. Use -ic cond, or raise H (Ra_max ~ "
-                "(H/0.28)^(1/0.29)).\n"
-                "        -grace N forces a window anyway, deliberately. **",
-                t_smooth_tff, t_smooth_tff / tf);
+                "        which is %.1f%% of this %.0f t_ff run -- more than the quarter of "
+                "it this\n"
+                "        window is allowed to cover. The undershoot is not a transient on "
+                "THIS run's\n"
+                "        timescale, so the halt stands and the run may stop early. "
+                "Lengthen -tf,\n"
+                "        use -ic cond, raise H, or force a window with -grace N. **",
+                t_smooth_tff, 100.0 * t_smooth_tff / tf, tf);
   else if (grace > 0.0)
-    std::printf(", suppressed for the\n     first %.1f t_ff (4 x the %.3g t_ff the step "
-                "needs to diffuse over four cells).\n     Excursions inside the window "
+    std::printf(", suppressed for the\n     first %.1f t_ff -- the time the step needs to "
+                "diffuse over four cells.\n     Excursions inside the window "
                 "are printed and marked `!`, never hidden; nan, a\n     non-finite Nu "
-                "and max|u| > 1 still halt at any time.", grace, t_smooth_tff);
+                "and max|u| > 1 still halt at any time.", grace);
   else
     std::printf(", enforced from step 0.");
   std::printf("\n\n");
