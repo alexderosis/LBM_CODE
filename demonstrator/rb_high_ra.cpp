@@ -80,6 +80,38 @@
 //  1e14 needs H >= 2 x 1607 = 3200 for a single cell in the layer, and ten
 //  times that to resolve it properly.
 //
+//  ======== Ra_max IS A RESOLUTION RULE, NOT A STABILITY RULE (2026-09-05) ====
+//  It does not predict whether a run SURVIVES, and two measurements at
+//  Ra = 1e11 say so in opposite directions.
+//
+//    H = 498, 1000 x 500, conductive start, four threads. Ra/Ra_max = 0.62, so
+//    the rule says comfortable. It HALTED at t/t_ff = 25 on the maximum
+//    principle, T reaching 1.19 against a physical 0.5, with Nu_bot = 80.4
+//    against Nu_top = 57.4. The overshoot was abrupt -- 0.0046, 0.0089, 0.0170,
+//    then 0.690 in successive free-fall times -- and the failure was in the
+//    BOTTOM boundary layer, 0.69 dT above the hot plate against 0.046 below the
+//    cold one. GPU/'s independent CUDA driver reproduced it from a COLD start
+//    on an A100, exiting 1 after 97 s. So H = 498 fails at Ra = 1e11 from both
+//    initial conditions in both codebases.
+//
+//    H = 98, 200 x 100, cold start, 64 free-fall times. Ra/Ra_max = 169, so the
+//    rule says hopeless -- and it is, but it did NOT halt. T_min reached -0.92
+//    at t = 20 (0.42 dT below the floor, within 0.08 of the stop threshold) and
+//    stayed out of bounds every row from t = 5 to t = 64, while Nu_bot ~ 95 sat
+//    at THIRTY TIMES Nu_top ~ 3.1. The bulk never warmed: <T> at mid-depth was
+//    still -0.5000 at t = 19. Heat leaves the bottom at Nu ~ 95 and arrives at
+//    the top at Nu ~ 3, which is a layer filling rather than a steady state.
+//
+//  Neither is a measurement of Ra = 1e11. What is worth noticing is the ORDER:
+//  the grid 25x coarser SURVIVED where the finer one halted. A hypothesis with
+//  two points behind it and no third: when Nu is far above the H/2 ceiling the
+//  scheme clips and behaves as an implicit LES, and when Nu sits NEAR the
+//  ceiling it attempts a layer it cannot represent and fails. It predicts that
+//  H = 998 (Nu/ceiling = 0.43) should be better behaved than H = 498
+//  (0.87), not worse -- which is the point of the CSF3 array in GPU/csf3/.
+//  Treat it as something to test, not as a result.
+//  ===========================================================================
+//
 //  ONE CALIBRATION NOTE ON THE STARTUP WARNING. It prints UNDER-RESOLVED below
 //  ten cells in the layer, and Ra = 1e6 above got within 7% on 6.37 cells. Ten
 //  is a comfort criterion, not a correctness cliff; treat the warning as "check
@@ -335,6 +367,17 @@ static int run(const Opts& o) {
     //
     // `cond` is untouched -- same density seed at mid-depth, no temperature
     // perturbation -- so every number already measured with it still stands.
+    //
+    // AND IT WORKS, measured at 200 x 100, Ra = 1e11, cold, out to 64 free-fall
+    // times. The horizontal fluctuation rms of T grows from the seed at
+    // 1.47x per free-fall time (sigma = 0.38/t_ff) from t = 2, saturating
+    // around t = 12, with its peak row at y = 1 to 2 -- AT THE HOT PLATE, which
+    // is where a cold start's instability lives. The old mid-depth seed on the
+    // same physics decayed instead. max|u| went 4.9e-04 -> 7.4e-03 between
+    // t = 10 and 15, and Nu_top lifted off zero at t ~ 25 as the first plumes
+    // crossed. Compare sigma = 0.45/t_ff for the conductive start at H = 498:
+    // the same order, which is the check that this is the same instability and
+    // not an artefact of the seed.
     // ====================================================================
     const bool cold = (ic != "cond");
     const Real Tc = Real(T_cold), Th = Real(T_hot);

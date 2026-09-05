@@ -392,6 +392,34 @@ Do not spend time on these without saying so first; several are deliberate.
   `Nu_top` and `Nu_vol` are comparable between the twins and `T_min`/`T_max`
   and `Nu_ref` are not.
 
+  **Ra_max is a RESOLUTION rule, not a stability rule** (measured 2026-09-05,
+  and it contradicts itself in both directions at Ra = 1e11). At H = 498,
+  Ra/Ra_max = 0.62 — "comfortable" — and the run HALTED at t/t_ff = 25 with
+  T = 1.19 against a physical 0.5 and Nu_bot/Nu_top = 80.4/57.4; `GPU/`
+  reproduced that from a *cold* start on an A100, so H = 498 fails from both
+  ICs in both codebases. At H = 98, Ra/Ra_max = 169 — "hopeless" — and it did
+  NOT halt: T_min hit −0.92 at t = 20 and stayed out of bounds to t = 64, with
+  Nu_bot ≈ 95 at **thirty times** Nu_top ≈ 3.1 and ⟨T⟩ at mid-depth still
+  −0.5000 at t = 19, i.e. a layer filling rather than a steady state. Neither is
+  a measurement. The grid 25× coarser SURVIVED where the finer one halted — a
+  two-point hypothesis, stated as one: far above the H/2 ceiling the scheme
+  clips and acts as an implicit LES; *near* the ceiling it attempts a layer it
+  cannot represent and fails. It predicts H = 998 (Nu/ceiling = 0.43) behaves
+  better than H = 498 (0.87), which is what `GPU/csf3/rb_cold.sub` tests.
+
+  **A COLD START'S SEED HAS TO GO WHERE THE GRADIENT IS.** Both drivers seeded a
+  density mode at mid-depth — right for `cond`, useless for `cold`, because a
+  cold start has no gradient except in the diffusing layer at the bottom plate
+  and δ = √(D t) is 2.55 cells at t/t_ff = 7 (H = 498). Measured: the mode
+  decayed 9.69e-05 → 6.26e-05 over seven free-fall times with its peak pinned to
+  the seed row, while `cond` at the same parameters had it *growing* at ×1.51.
+  Since 2026-09-05 `cold` seeds the TEMPERATURE in the boundary layer instead —
+  non-negative, so the initial field itself stays inside the maximum principle,
+  and broadband, because the layer picks its wavelength from δ (≈ 5 cells here)
+  not from the box. Measured at 200×100: fluctuation rms grows ×1.47/t_ff
+  (σ = 0.38) from t = 2 with its peak at y = 1–2, against σ = 0.45 for `cond`.
+  `cond` is untouched, so every number measured with it still stands.
+
   `demonstrator/rb_high_ra` (Kokkos, D3Q27 CM + D3Q7 scalar) measures where that
   configuration is usable, at 200x100, U_f = 0.05, conductive IC, 100 free-fall
   times: Ra = 1e6 gives Nu_bot/Nu_top = 7.40/7.48, agreeing to 1% and to 7% of

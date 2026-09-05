@@ -53,3 +53,10 @@ GPU/build*/
 runs/
 rbcold-*.log
 cmbench-*.log
+
+# Local run directories from demonstrator/rb_high_ra. Field planes plus a log,
+# hundreds of MB each, and every one is regenerable from the command in its own
+# log header. The MEASUREMENTS off them live in the driver banner and in
+# doc/m3lb.tex, which is where a number belongs.
+run_rb*/
+run_csf3_*/

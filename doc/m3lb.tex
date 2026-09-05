@@ -8427,6 +8427,48 @@ the fitted rate is blamed on the scheme.
   are comparable between them while $T_{\min}$, $T_{\max}$ and
   $\mathrm{Nu}_{\rm ref}$ are not.
 
+  \textbf{$\mathrm{Ra_{max}}$ is a resolution rule, not a stability rule}
+  (2026-09-05). It says nothing about whether a run survives, and two
+  measurements at $\mathrm{Ra}=10^{11}$ contradict it in opposite directions.
+  At $H=498$ on $1000\times500$, $\mathrm{Ra}/\mathrm{Ra_{max}}=0.62$ --- the
+  rule says comfortable --- and the run \emph{halted} at $t/t_{ff}=25$ with
+  $T=1.19$ against a physical maximum of $0.5$ and
+  $\mathrm{Nu}_{\rm bot}=80.4$ against $\mathrm{Nu}_{\rm top}=57.4$, the
+  overshoot running $0.0046, 0.0089, 0.0170$ and then $0.690$ in successive
+  free-fall times. The CUDA driver reproduced that failure from a \emph{cold}
+  start on an A100, so $H=498$ fails from both initial conditions in both
+  codebases. At $H=98$ on $200\times100$, $\mathrm{Ra}/\mathrm{Ra_{max}}=169$
+  --- the rule says hopeless --- and it did \emph{not} halt: $T_{\min}$ reached
+  $-0.92$ at $t/t_{ff}=20$ and stayed out of bounds to $t/t_{ff}=64$, with
+  $\mathrm{Nu}_{\rm bot}\simeq95$ at \emph{thirty times}
+  $\mathrm{Nu}_{\rm top}\simeq3.1$ and $\langle T\rangle$ at mid-depth still
+  $-0.5000$ at $t/t_{ff}=19$ --- a layer filling, not a steady state. Neither is
+  a measurement of $\mathrm{Ra}=10^{11}$; what is worth noticing is that the
+  grid $25\times$ coarser survived where the finer one halted. The hypothesis,
+  with two points behind it and stated as one: far above the $H/2$ ceiling the
+  scheme clips and acts as an implicit LES, while \emph{near} the ceiling it
+  attempts a layer it cannot represent and fails. It predicts $H=998$
+  ($\mathrm{Nu}/\mathrm{ceiling}=0.43$) should behave better than $H=498$
+  ($0.87$), which is what the CSF3 array in \code{GPU/csf3/} is for.
+
+  \textbf{A cold start's seed has to go where the gradient is.} Both drivers
+  seeded a density mode at mid-depth, which is where the critical mode peaks for
+  a \emph{conductive} start and is useless for a cold one: a cold start has no
+  gradient except in the diffusing layer at the bottom plate, and
+  $\delta=\sqrt{\alpha t}$ is $2.55$ cells at $t/t_{ff}=7$ for $H=498$, so a
+  perturbation at $y=250$ sits in neutrally stratified fluid. Measured there:
+  the mode decayed monotonically, $9.69\e{-5}\to6.26\e{-5}$ over seven
+  free-fall times with its peak pinned to the seed row, while the conductive
+  start at the same parameters had it growing at $1.51\times$ per free-fall
+  time. Since 2026-09-05 the cold start seeds the \emph{temperature} inside the
+  boundary layer instead, non-negatively so the initial field itself stays
+  inside the maximum principle, and broadband because the layer selects its own
+  wavelength from $\delta$ rather than from the box. Measured at $200\times100$:
+  the fluctuation r.m.s.\ grows at $1.47\times$ per free-fall time
+  ($\sigma=0.38/t_{ff}$) from $t/t_{ff}=2$ with its peak at $y=1$--$2$, against
+  $\sigma=0.45/t_{ff}$ for the conductive start --- the same instability, now
+  reachable.
+
   The Kokkos twin (\code{demonstrator/rb\_high\_ra}) puts numbers on where the
   configuration is usable. A $200\times100$ layer at $U_f=0.05$ with the
   conductive initial condition, out to a hundred free-fall times:
