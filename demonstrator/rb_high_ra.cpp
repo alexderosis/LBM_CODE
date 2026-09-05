@@ -300,19 +300,61 @@ static int run(const Opts& o) {
     // dropped across the bottom half cell at t = 0. `cond` is the conductive
     // profile, the same end states with no discontinuity anywhere.
     //
-    // It is a flag because the two differ in exactly one thing, which is what
-    // makes the undershoot attributable. Nothing else changes -- the fluid's
-    // seeded density mode is identical in both -- so a difference between them
-    // is the step, and an agreement between them is not.
+    // ============ AND THE SEED HAS TO GO WHERE THE GRADIENT IS =============
+    // MEASURED, and it is the reason this paragraph exists. The fluid's density
+    // seed sits at mid-depth, y = ny/2, which is exactly where the critical
+    // mode peaks for a CONDUCTIVE start -- and is useless for a COLD one. A
+    // cold start has no gradient anywhere except in the diffusing layer at the
+    // bottom plate, and that layer is thin:
+    //
+    //     delta = sqrt(D t) = 2.55 cells at t/t_ff = 7   (H = 498, Ra = 1e11)
+    //
+    // so a perturbation at y = 250 sits in NEUTRALLY STRATIFIED fluid with no
+    // buoyancy to act on it. Measured on exactly that run: the k = 1 mode
+    // decayed monotonically, 9.69e-05 -> 6.26e-05 over seven free-fall times,
+    // with its peak pinned at y = 250 the whole way -- while the conductive
+    // start at the same parameters had it GROWING at 1.51x per free-fall time
+    // with the peak locked at y = 364. For the mid-depth seed to matter the
+    // layer would have to reach 250 cells, which takes 250^2/D = 6.7e8 steps.
+    // It never happens.
+    //
+    // So `cold` seeds the TEMPERATURE inside the boundary layer instead:
+    //
+    //     T = T_cold + amp dT * exp(-(y-1)/d0) * (1 + sum_k cos(2 pi k x/nx))/2
+    //
+    // with d0 = 4 cells and k over a resolvable band. Three properties, each
+    // deliberate. It is NON-NEGATIVE -- the (1 + cos)/2 form keeps the whole
+    // field inside [T_cold, T_cold + amp dT], so the initial condition does not
+    // itself violate the maximum principle that this driver uses as its stop
+    // rule. It is BROADBAND rather than single-mode, because a cold start's
+    // instability belongs to the layer and selects its own wavelength from
+    // delta, not from the box: the critical wavelength for a layer of depth
+    // delta is about 2 delta, i.e. FIVE CELLS here, and seeding one mode of
+    // wavelength nx would be answering a question the layer is not asking. And
+    // it is DETERMINISTIC, so two runs with the same flags agree bit for bit.
+    //
+    // `cond` is untouched -- same density seed at mid-depth, no temperature
+    // perturbation -- so every number already measured with it still stands.
     // ====================================================================
     const bool cold = (ic != "cond");
     const Real Tc = Real(T_cold), Th = Real(T_hot);
-    const Index nyc = ny, Hc = H;
+    const Index nyc = ny, Hc = H, nxs = nx;
+    const Real ampT = Real(amp) * Real(dT);
     th.initialize_field(KOKKOS_LAMBDA(Index n) {
       Index px, py, pz; d.coords(n, px, py, pz);
-      const Index y = py - d.hy;
+      const Index y = py - d.hy, x = px - d.hx;
       if (y <= 0 || y >= nyc - 1) return Real(0);
-      if (cold) return Tc;
+      if (cold) {
+        // Four modes at wavelengths nx/8 .. nx/64, all resolvable, with fixed
+        // offsets so they do not all peak at the same x.
+        double m = 0.0;
+        for (int j = 0; j < 4; ++j) {
+          const double k = double(8 << j);
+          m += Kokkos::cos(2.0 * M_PI * k * double(x) / double(nxs) + 0.7 * j);
+        }
+        const double env = Kokkos::exp(-(double(y) - 1.0) / 4.0);
+        return Real(double(Tc) + double(ampT) * env * (1.0 + m / 4.0) * 0.5);
+      }
       // The hot plane sits at y = 0.5, so the conductive profile is linear in
       // (y - 0.5)/H and lands on the plate values at both half-cell planes.
       return Real(double(Th) - (double(y) - 0.5) / double(Hc) * (double(Th) - double(Tc)));
@@ -344,8 +386,12 @@ static int run(const Opts& o) {
     // At rest, with one single-mode density perturbation on the row nearest
     // mid-depth -- the reference's seed, and deliberately not noise: the
     // question is whether THIS mode grows.
+    // The density seed is CONDUCTIVE-ONLY now. For a cold start it sits in
+    // neutrally stratified fluid and decays -- see the initial-condition banner
+    // above -- and the temperature seed there does the work instead. Leaving it
+    // on for `cold` would add an acoustic transient that buys nothing.
     const Index seed_row = ny / 2;
-    const Real ampr = Real(amp);
+    const Real ampr = cold ? Real(0) : Real(amp);
     const Index nxc = nx;
     fl.initialize_field(KOKKOS_LAMBDA(Index n) -> FlowState {
       Index px, py, pz; d.coords(n, px, py, pz);

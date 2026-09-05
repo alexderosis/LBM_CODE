@@ -213,9 +213,49 @@ struct RbInit {
 // reference's seed is not worth starting outside the maximum principle. `-ic
 // cold` restores it.
 //------------------------------------------------------------------------------
+//------------------------------------------------------------------------------
+//  COLD START: THE SEED GOES IN THE BOUNDARY LAYER, NOT AT MID-DEPTH.
+//
+//  MEASURED on the Kokkos twin, and it is the reason this is not just `return
+//  Tc`. `RbInit` puts its density seed at y = ny/2, which is exactly where the
+//  critical mode peaks for a CONDUCTIVE start and is useless for a cold one: a
+//  cold start has no gradient anywhere except the diffusing layer at the bottom
+//  plate, and that layer is thin --
+//
+//      delta = sqrt(alpha t) = 2.55 cells at t/t_ff = 7  (H = 498, Ra = 1e11)
+//
+//  -- so a perturbation at y = 250 sits in NEUTRALLY STRATIFIED fluid with
+//  nothing to act on it. On exactly that run the k = 1 mode decayed
+//  monotonically, 9.69e-05 -> 6.26e-05 over seven free-fall times with its peak
+//  pinned at the seed row the whole way, while the conductive start at the same
+//  parameters had it GROWING at 1.51x per free-fall time. For the mid-depth
+//  seed to couple, the layer would have to reach 250 cells: 250^2/alpha steps,
+//  which never happens inside a run.
+//
+//  So the cold start seeds the TEMPERATURE where the gradient is:
+//
+//      T = T_cold + amp dT * exp(-(y-1)/d0) * (1 + sum_k cos(2 pi k x/nx))/2
+//
+//  d0 = 4 cells, and three properties are deliberate. NON-NEGATIVE: the
+//  (1 + cos)/2 form keeps the field inside [T_cold, T_cold + amp dT], so the
+//  initial condition does not violate the maximum principle this driver uses as
+//  its stop rule. BROADBAND: a cold start's instability belongs to the LAYER
+//  and picks its wavelength from delta -- about 2 delta, i.e. five cells here --
+//  so seeding one mode of wavelength nx would answer a question the layer is
+//  not asking. DETERMINISTIC: two runs with the same flags agree bit for bit.
+//------------------------------------------------------------------------------
 struct ColdInit {
-  Real Tc;
-  LBM_HD Real operator()(int, int, int) const { return Tc; }
+  Real Tc, ampT;
+  int nx;
+  LBM_HD Real operator()(int x, int y, int) const {
+    double m = 0.0;
+    for (int j = 0; j < 4; ++j) {
+      const double k = double(8 << j);
+      m += cos(2.0 * M_PI * k * double(x) / double(nx) + 0.7 * j);
+    }
+    const double env = exp(-(double(y) - 1.0) / 4.0);
+    return Real(double(Tc) + double(ampT) * env * (1.0 + m / 4.0) * 0.5);
+  }
 };
 
 struct CondInit {
@@ -542,9 +582,14 @@ int main(int argc, char** argv) {
   b.rho0 = Real(1); b.beta = Real(1); b.T0 = Real(T0);
   fl.set_force(b, ForceBoussinesq);
 
-  fl.initialise_with(RbInit{nx, ny / 2, Real(amp)});
-  if (ic == "cold") sc.initialise_with(ColdInit{Real(T_cold)});
-  else              sc.initialise_with(CondInit{H, Real(T_hot), Real(T_cold)});
+  // The density seed is CONDUCTIVE-ONLY. For a cold start it sits in neutrally
+  // stratified fluid and decays (see ColdInit), and the temperature seed there
+  // does the work instead; leaving it on would add an acoustic transient that
+  // buys nothing.
+  const bool cold = (ic == "cold");
+  fl.initialise_with(RbInit{nx, ny / 2, cold ? Real(0) : Real(amp)});
+  if (cold) sc.initialise_with(ColdInit{Real(T_cold), Real(amp * dT), nx});
+  else      sc.initialise_with(CondInit{H, Real(T_hot), Real(T_cold)});
 
   if (vtk) { if (std::system("mkdir -p vtk_fluid")) {} }
   std::FILE* series = std::fopen("rb_high_ra.dat", "wt");
