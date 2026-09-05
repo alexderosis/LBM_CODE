@@ -70,17 +70,37 @@ project — see the header of `cmbench.sub`.
 
 ## The two jobs here
 
+**Submit from the repo root.** `sbatch` copies the script, so it cannot locate
+itself and the submit directory is the only handle it has. Either submit from
+the root or set `M3LB_ROOT`; both scripts check and fail with the fix printed.
+
 ```bash
-sbatch GPU/csf3/cmbench.sub          # do this first: under a minute
-sbatch GPU/csf3/rb_cold.sub          # the Ra = 1e11 array, three resolutions
+cd ~/scratch/M3LB
+sbatch GPU/csf3/cmbench.sub             # do this first: under a minute
+sbatch GPU/csf3/rb_cold.sub             # the Ra = 1e11 array, three resolutions
 sbatch --array=0 GPU/csf3/rb_cold.sub   # or just the H = 498 replication
 ```
 
+### Checking on it
+
+An array job gets a compound id, `<jobid>_<index>` — `12345_0` for `--array=0`.
+
 ```bash
-squeue --me                          # monitor
-sacct -j <jobid>                     # wallclock, peak memory, exit status
-scancel <jobid>                      # kill
+squeue --me                     # queued / running; ST is PD pending, R running
+squeue --me --start             # SLURM's estimate of when a pending job starts
+tail -f rbcold-12345_0.log      # live progress, one row per output interval
+sacct -j 12345 --format=JobID,State,Elapsed,MaxRSS,ExitCode   # after it ends
+scancel 12345_0                 # kill one array element
+scancel 12345                   # kill the whole array
 ```
+
+`squeue` showing nothing means the job has finished (or never started) — look at
+the log. A job that died in the first seconds almost always says why in the
+first ten lines: a missing module, or the `ERROR: no executable at ...` check.
+
+The log lands in the directory you submitted from; the **field dumps go to
+`runs/rb_cold_h<H>/`**, deliberately, since at `-out 1` they are hundreds of
+megabytes and have no business next to the source.
 
 **`cmbench.sub` first.** It settles the Kokkos central-moment collapse, which
 has been open since the port and is the only thing in this tree that genuinely
@@ -127,17 +147,64 @@ In this order, and the first one is not optional:
    codes can go in one table. It is the raw correlation divided by `nx-1`, and
    it is 3% high by construction. Do not mix it with `Nu_vol`.
 
-Field dumps are `<prefix>_T_*.bin` and `<prefix>_u_*.bin`, `nx × ny` float32
-behind two int32 of header. `doc/fig/mkpng.py` renders them and is pure
-stdlib — no numpy needed:
+## Post-processing
+
+Field dumps are `<prefix>_T_*.bin` (temperature) and `<prefix>_u_*.bin` (speed),
+`nx × ny` float32 behind two `int32` of header, one pair per output interval.
+
+`doc/fig/mkpng.py` renders them and is **pure stdlib** — no numpy, which matters
+because CSF3's default python may not have it:
 
 ```bash
-python3 doc/fig/mkpng.py seq rb_cold_h498_T_0050.bin T.png 0 1
+cd runs/rb_cold_h498
+python3 ../../doc/fig/mkpng.py seq rb_cold_h498_T_0050.bin T.png 0 1
 ```
 
-Pin the range (`0 1` above). Without it every frame gets its own scale and the
-colours move when the field does not; pinned, a field that leaves its physical
-range saturates visibly and the tool prints `CLIPPED`.
+**Pin the range** (`0 1` above, the physical range of T). Without it every frame
+gets its own scale and the colours move when the field does not; pinned, a field
+that leaves its physical range saturates visibly and the tool prints `CLIPPED` —
+which is how an out-of-bounds run looks in a picture rather than in a column.
+
+A whole sequence, then a video (`module load apps/binapps/ffmpeg` if `ffmpeg` is
+not already on PATH):
+
+```bash
+mkdir -p png
+for f in rb_cold_h498_T_*.bin; do
+  n=${f##*_T_}; n=${n%.bin}
+  python3 ../../doc/fig/mkpng.py seq "$f" "png/T_$n.png" 0 1
+done
+ffmpeg -y -framerate 10 -pattern_type glob -i 'png/T_*.png' \
+       -vf vflip -c:v libx264 -pix_fmt yuv420p -crf 18 rb_cold_h498.mp4
+```
+
+**`-vf vflip` is not optional.** The dump writes row y = 0 first and PNG puts the
+first row at the top, so the raw image has the HOT plate at the top and the
+plumes falling. Without the flip the physics reads upside down.
+
+For the linear phase the raw field is useless — the perturbation is four orders
+below the mean profile. Render the departure from the horizontal average
+instead, `T'(x,y) = T(x,y) − ⟨T⟩ₓ(y)`, with the diverging map:
+
+```bash
+python3 - <<'EOF'
+import struct, sys
+src, dst = 'rb_cold_h498_T_0010.bin', 'tp.bin'
+d = open(src,'rb').read(); nx, ny = struct.unpack('<ii', d[:8])
+v = list(struct.unpack('<%df' % (nx*ny), d[8:8+4*nx*ny]))
+for y in range(ny):
+    row = v[y*nx:(y+1)*nx]; m = sum(row)/nx
+    for x in range(nx): v[y*nx+x] = row[x] - m
+open(dst,'wb').write(struct.pack('<ii', nx, ny) + struct.pack('<%df' % (nx*ny), *v))
+EOF
+python3 ../../doc/fig/mkpng.py div tp.bin Tpert.png 1.0
+```
+
+That is what showed the mode structure on the CPU run while every Nusselt
+column still read 1.0.
+
+Copy anything worth keeping back to home or RDS — **scratch is not backed up**
+and files unused for three months can be deleted.
 
 ---
 

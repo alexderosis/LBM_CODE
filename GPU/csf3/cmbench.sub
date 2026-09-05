@@ -71,7 +71,20 @@ set -euo pipefail
 module purge
 module load libs/cuda/12.8.1
 
-cd "$SLURM_SUBMIT_DIR/../.."   # repo root: cmbench is the parent tree's
+# Submit from the repo root, or set M3LB_ROOT. sbatch copies the script, so it
+# cannot locate itself; the submit directory is the only handle.
+ROOT=${M3LB_ROOT:-$SLURM_SUBMIT_DIR}
+BIN="$ROOT/build-gpu/validation/cmbench"
+if [ ! -x "$BIN" ]; then
+  echo "ERROR: no executable at $BIN" >&2
+  echo "  cmbench is the PARENT Kokkos tree's, not GPU/'s. Build it with:" >&2
+  echo "    cd $ROOT && cmake -S . -B build-gpu -DCMAKE_BUILD_TYPE=Release \\" >&2
+  echo "        -DLBM_GPU_BACKEND=cuda -DLBM_GPU_ARCH=AMPERE80 -DLBM_PRECISION=float" >&2
+  echo "    cmake --build build-gpu -j4 --target cmbench" >&2
+  exit 1
+fi
+
+cd "$ROOT"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 
-./build-gpu/validation/cmbench
+"$BIN"

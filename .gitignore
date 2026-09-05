@@ -47,3 +47,9 @@ results/J_zhou_thermal/*_uy.dat
 # demonstrator is not.
 doc/video/
 GPU/build*/
+
+# CSF3 job output. GPU/csf3/*.sub write field planes under runs/ and SLURM
+# writes its logs into the submit directory; neither belongs in history.
+runs/
+rbcold-*.log
+cmbench-*.log

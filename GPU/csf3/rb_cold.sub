@@ -80,9 +80,34 @@ OUT_LIST=(1 2 5)               # dump cadence, chosen to keep each run ~1 GB
 H=${H_LIST[$SLURM_ARRAY_TASK_ID]}
 OUT=${OUT_LIST[$SLURM_ARRAY_TASK_ID]}
 
-cd "$SLURM_SUBMIT_DIR"
+# WHERE THE REPO IS. sbatch COPIES the script, so $0 is a spool path and the
+# script cannot find itself -- the submit directory is the only handle there is.
+# So: submit from the repo root (which is what the README says), or set
+# M3LB_ROOT. An earlier version of this file used a path relative to
+# GPU/csf3/ and the README told you to submit from the root, which meant the
+# two disagreed and the job died on "No such file or directory".
+ROOT=${M3LB_ROOT:-$SLURM_SUBMIT_DIR}
+BIN="$ROOT/GPU/build/rb_high_ra"
+if [ ! -x "$BIN" ]; then
+  echo "ERROR: no executable at $BIN" >&2
+  echo "  Submit from the M3LB repo root, e.g." >&2
+  echo "    cd ~/scratch/M3LB && sbatch --array=0 GPU/csf3/rb_cold.sub" >&2
+  echo "  or point at it explicitly:" >&2
+  echo "    sbatch --export=ALL,M3LB_ROOT=/path/to/M3LB GPU/csf3/rb_cold.sub" >&2
+  echo "  and build it first (GPU/ is its own CMake project):" >&2
+  echo "    cd \$M3LB_ROOT/GPU && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \\" >&2
+  echo "          -DLBM_GPU_ARCH=80 -DLBM_DOUBLE=ON && cmake --build build -j4" >&2
+  exit 1
+fi
+
+# Output goes under runs/, not the repo root: at -out 1 this writes hundreds of
+# megabytes of field planes and they have no business next to the source.
+RUNDIR="$ROOT/runs/rb_cold_h${H}"
+mkdir -p "$RUNDIR"
+cd "$RUNDIR"
+
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 
-echo "=== H = $H, Ra = 1e11, cold start, -out $OUT ==="
-../build/rb_high_ra -h "$H" -aspect 2.008 -ra 1e11 -pr 0.71 -u 0.05 \
-                    -ic cold -tf 100 -out "$OUT" -dump "rb_cold_h${H}"
+echo "=== H = $H, Ra = 1e11, cold start, -out $OUT  ->  $RUNDIR ==="
+"$BIN" -h "$H" -aspect 2.008 -ra 1e11 -pr 0.71 -u 0.05 \
+       -ic cold -tf 100 -out "$OUT" -dump "rb_cold_h${H}"
